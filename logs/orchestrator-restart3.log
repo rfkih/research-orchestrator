@@ -1,0 +1,32 @@
+INFO:     Started server process [22680]
+INFO:     Waiting for application startup.
+{"profile": "dev", "host": "127.0.0.1", "port": 8082, "jvm_base_url": "http://127.0.0.1:8081", "jvm_auth_mode": "dev_bypass", "event": "orchestrator.startup", "level": "info", "ts": "2026-05-01T04:17:26.956152Z"}
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8082 (Press CTRL+C to quit)
+{"queue_id": "8482c4c4-b5b4-42dc-925c-99b07f7adc5d", "strategy_code": "MMR", "iter": 1, "budget": 5, "event": "tick.claimed", "level": "info", "ts": "2026-05-01T04:17:39.465239Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/dev/login-as \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-01T04:17:39.723562Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-01T04:17:40.014790Z"}
+{"queue_id": "8482c4c4-b5b4-42dc-925c-99b07f7adc5d", "run_id": "4e6ce749-a97b-4588-ac5c-aecdd1e3ad00", "combo": {"extremeAtrMult": "1.0", "rsiOversoldMax": "15", "maxBarsHeld": "3"}, "event": "tick.submitted", "level": "info", "ts": "2026-05-01T04:17:40.019845Z"}
+{"queue_id": "8482c4c4-b5b4-42dc-925c-99b07f7adc5d", "iteration_id": "63d94159-c5ef-480a-8e4a-7544622c3de3", "statistical_verdict": "NO_EDGE", "verdict": "DISCARD", "event": "tick.iteration_logged", "level": "info", "ts": "2026-05-01T04:19:15.509582Z"}
+{"event": "HTTP Request: GET http://127.0.0.1:8081/actuator/health/liveness \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-01T09:50:46.346711Z"}
+{"queue_id": "cec27eec-d5ec-47be-bfba-e9c471924a8c", "strategy_code": "LSR", "iter": 1, "budget": 1, "event": "tick.claimed", "level": "info", "ts": "2026-05-01T10:02:25.956685Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 401 \"", "level": "info", "ts": "2026-05-01T10:02:26.326368Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/dev/login-as \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-01T10:02:27.129899Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-01T10:02:27.555509Z"}
+{"queue_id": "cec27eec-d5ec-47be-bfba-e9c471924a8c", "run_id": "87cebf8f-3527-451c-8029-08b7b8f8cd3f", "combo": {"adxThreshold": "20"}, "event": "tick.submitted", "level": "info", "ts": "2026-05-01T10:02:27.558830Z"}
+{"queue_id": "cec27eec-d5ec-47be-bfba-e9c471924a8c", "iteration_id": "7bf6fd11-6159-49c8-bee6-4d0d47678691", "statistical_verdict": "INSUFFICIENT_EVIDENCE", "verdict": "ITERATE", "event": "tick.iteration_logged", "level": "info", "ts": "2026-05-01T10:03:02.604287Z"}
+WARNING:  Unsupported upgrade request.
+WARNING:  Unsupported upgrade request.
+WARNING:  Unsupported upgrade request.
+WARNING:  Unsupported upgrade request.
+WARNING:  Unsupported upgrade request.
+WARNING:  Unsupported upgrade request.
+WARNING:  Unsupported upgrade request.
+WARNING:  Unsupported upgrade request.
+WARNING:  Unsupported upgrade request.
+WARNING:  Unsupported upgrade request.
+WARNING:  Unsupported upgrade request.
+WARNING:  Unsupported upgrade request.
+WARNING:  Unsupported upgrade request.
+WARNING:  Unsupported upgrade request.
+WARNING:  Unsupported upgrade request.

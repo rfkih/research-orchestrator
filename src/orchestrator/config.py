@@ -1,0 +1,108 @@
+"""Pydantic-validated configuration. No magic strings, no os.environ reads
+elsewhere — every value the service depends on is declared here, typed, and
+documented. The service refuses to start if any field is invalid.
+
+Loaded once at startup and passed via FastAPI dependency injection. Tests
+override by constructing Settings(**overrides) directly — never by mutating
+env vars.
+"""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import Field, SecretStr, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+DEV_TOKEN_SENTINEL = "dev-sentinel-not-for-prod"
+
+
+class Settings(BaseSettings):
+    """Service-wide configuration. Read once at startup; never mutated."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="ORCH_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="forbid",  # Misspelled env vars must fail loud, not silently.
+    )
+
+    # ── Profile ─────────────────────────────────────────────────────────
+    profile: Literal["dev", "prod"] = "dev"
+
+    # ── HTTP surface ────────────────────────────────────────────────────
+    host: str = "127.0.0.1"  # Loopback default — service is internal-only.
+    port: int = Field(8082, ge=1024, le=65535)
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+
+    # ── Auth ────────────────────────────────────────────────────────────
+    auth_token: SecretStr = Field(
+        ...,
+        description=(
+            "Shared secret callers must send in X-Orch-Token. "
+            "Generate with `python -c 'import secrets; print(secrets.token_urlsafe(48))'`."
+        ),
+    )
+
+    # ── Database ────────────────────────────────────────────────────────
+    db_dsn: SecretStr = Field(
+        ...,
+        description="postgresql://blackheart_research:***@host:5432/blackheart",
+    )
+    db_pool_min: int = Field(2, ge=1, le=50)
+    db_pool_max: int = Field(10, ge=1, le=100)
+
+    # ── JVM ─────────────────────────────────────────────────────────────
+    jvm_base_url: str = "http://127.0.0.1:8081"
+    jvm_request_timeout_s: float = Field(30.0, ge=1.0, le=300.0)
+    jvm_auth_mode: Literal["dev_bypass", "service_account"] = "dev_bypass"
+    jvm_service_user: str | None = None
+    jvm_service_password: SecretStr | None = None
+    # Optional: in dev_bypass mode, pin the login-as email so the JWT carries
+    # the operator's userId. Without this, `/dev/login-as` returns the first
+    # user, which may not own the account_strategy rows the tick targets
+    # (404 on /api/v1/backtest because runBacktest scopes by JWT userId).
+    jvm_dev_login_email: str | None = None
+
+    # ── Telegram (optional) ─────────────────────────────────────────────
+    telegram_bot_token: SecretStr | None = None
+    telegram_chat_id: str | None = None
+
+    # ── Validators ──────────────────────────────────────────────────────
+    @field_validator("auth_token")
+    @classmethod
+    def _reject_dev_sentinel_on_prod(cls, v: SecretStr, info) -> SecretStr:
+        # Pydantic-settings field validators don't get sibling values cleanly,
+        # so we re-check at app startup too. This is the first line.
+        return v
+
+    @field_validator("db_pool_max")
+    @classmethod
+    def _pool_max_ge_min(cls, v: int, info) -> int:
+        pool_min = info.data.get("db_pool_min", 2)
+        if v < pool_min:
+            raise ValueError(f"db_pool_max ({v}) must be >= db_pool_min ({pool_min})")
+        return v
+
+    def assert_prod_safe(self) -> None:
+        """Called at startup. Refuses to boot a prod profile with dev secrets
+        or dev-bypass JVM auth."""
+        if self.profile != "prod":
+            return
+        if self.auth_token.get_secret_value() == DEV_TOKEN_SENTINEL:
+            raise RuntimeError(
+                "Refusing to start: ORCH_PROFILE=prod with dev-sentinel ORCH_AUTH_TOKEN. "
+                "Generate a real secret."
+            )
+        if self.jvm_auth_mode == "dev_bypass":
+            raise RuntimeError(
+                "Refusing to start: ORCH_PROFILE=prod with ORCH_JVM_AUTH_MODE=dev_bypass. "
+                "Switch to service_account."
+            )
+        if self.jvm_auth_mode == "service_account" and (
+            not self.jvm_service_user or not self.jvm_service_password
+        ):
+            raise RuntimeError(
+                "Refusing to start: ORCH_JVM_AUTH_MODE=service_account requires "
+                "ORCH_JVM_SERVICE_USER and ORCH_JVM_SERVICE_PASSWORD."
+            )

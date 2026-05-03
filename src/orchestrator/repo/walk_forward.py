@@ -1,0 +1,91 @@
+"""``walk_forward_run`` writes — single INSERT after all folds complete.
+
+Schema reference: V12__create_walk_forward_run.sql. The CHECK constraint
+requires ``stability_verdict`` ∈ {ROBUST, INCONSISTENT, INSUFFICIENT_EVIDENCE,
+OVERFIT, NO_EDGE}; the caller is responsible for computing it.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+from uuid import UUID
+
+import asyncpg
+
+
+async def insert_walk_forward(
+    conn: asyncpg.Connection,
+    *,
+    strategy_code: str,
+    interval_name: str,
+    instrument: str,
+    full_start: Any,
+    full_end: Any,
+    train_months: int,
+    test_months: int,
+    n_folds: int,
+    fold_pf_mean: float | None,
+    fold_pf_std: float | None,
+    fold_pf_min: float | None,
+    fold_pf_max: float | None,
+    fold_pf_positive_pct: float | None,
+    fold_return_mean: float | None,
+    fold_return_std: float | None,
+    fold_sharpe_mean: float | None,
+    fold_sharpe_std: float | None,
+    total_trades_across_folds: int,
+    stability_verdict: str,
+    motivating_iteration_id: UUID | None,
+    fold_results: list[dict[str, Any]],
+    git_commit_hash: str | None,
+    notes: str | None,
+    created_by: str,
+) -> UUID:
+    walk_forward_id = await conn.fetchval(
+        """
+        INSERT INTO walk_forward_run (
+            walk_forward_id, strategy_code, interval_name, instrument,
+            full_window_start, full_window_end, train_months, test_months, n_folds,
+            fold_pf_mean, fold_pf_std, fold_pf_min, fold_pf_max, fold_pf_positive_pct,
+            fold_return_mean, fold_return_std,
+            fold_sharpe_mean, fold_sharpe_std,
+            total_trades_across_folds, stability_verdict,
+            motivating_iteration_id, fold_results, git_commit_hash,
+            notes, created_time, created_by
+        ) VALUES (
+            gen_random_uuid(), $1, $2, $3,
+            $4, $5, $6, $7, $8,
+            $9, $10, $11, $12, $13,
+            $14, $15, $16, $17,
+            $18, $19,
+            $20, $21, $22,
+            $23, NOW(), $24
+        )
+        RETURNING walk_forward_id
+        """,
+        strategy_code,
+        interval_name,
+        instrument,
+        full_start,
+        full_end,
+        train_months,
+        test_months,
+        n_folds,
+        fold_pf_mean,
+        fold_pf_std,
+        fold_pf_min,
+        fold_pf_max,
+        fold_pf_positive_pct,
+        fold_return_mean,
+        fold_return_std,
+        fold_sharpe_mean,
+        fold_sharpe_std,
+        total_trades_across_folds,
+        stability_verdict,
+        motivating_iteration_id,
+        fold_results,
+        git_commit_hash,
+        notes,
+        created_by,
+    )
+    return walk_forward_id

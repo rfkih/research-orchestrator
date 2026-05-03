@@ -1,0 +1,606 @@
+"""``POST /tick`` orchestration — port of ``research-tick.sh``.
+
+One tick = one iteration. The flow:
+
+  1. Claim the next queue row (``FOR UPDATE SKIP LOCKED`` — concurrent
+     ticks cannot collide).
+  2. Derive the next sweep combo from ``sweep_config`` and the row's
+     pre-increment ``iteration_number``.
+  3. Look up the strategy's ``account_strategy_id``. Mismatch is a config
+     error and the queue row is marked FAILED.
+  4. Submit the backtest to the research JVM and poll ``backtest_run``
+     until COMPLETED / FAILED.
+  5. Pull run-level metrics, compute verdict, INSERT ``research_iteration_log``
+     and pointer-update the queue row in a single transaction.
+  6. Decide queue next-state per the bash decision table:
+        NO_EDGE + early_stop=true        → COMPLETED / DISCARD
+        SIGNIFICANT_EDGE + WF (deferred) → PENDING (continue) — Phase 4 wires WF
+        INSUFFICIENT_EVIDENCE + budget   → PARKED
+        otherwise                        → PENDING (continue)
+
+Crash recovery: any exception after step 1 rolls the queue back to PENDING
+with ``iteration_number`` decremented, mirroring the bash trap.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from typing import Any
+from uuid import UUID
+
+import asyncpg
+
+from ..clients.jvm import JvmClient
+from ..config import Settings
+from ..errors import NextAction, OrchestratorError
+from ..infra.db import Database
+from ..logging import get_logger
+from ..repo import (
+    hypothesis_audit as audit_repo,
+    iterations_write,
+    queue_write,
+    trades as trades_repo,
+)
+from . import analyze, sweep
+
+log = get_logger(__name__)
+
+# Backtest poll cap. The bash version uses 1800s; we honour the same so
+# operators retain muscle memory. Configurable later if a sweep takes longer.
+_POLL_TIMEOUT_S = 1800
+_POLL_INTERVAL_S = 5
+# Stuck-RUNNING reaper threshold. Generous buffer over the poll cap so we
+# never reset a healthy in-flight tick.
+_STUCK_RUNNING_S = _POLL_TIMEOUT_S + 5 * 60
+
+
+def _terminal(err: OrchestratorError) -> OrchestratorError:
+    """Tag an OrchestratorError so the outer rollback skips it.
+
+    Used when a code path has already moved the queue row to a terminal
+    state (FAILED/PARKED/COMPLETED). The default ``except`` arm would
+    otherwise call ``_rollback`` and silently undo that with status=PENDING.
+    """
+    err.queue_terminalized = True  # type: ignore[attr-defined]
+    return err
+
+
+class TickResult:
+    """Plain container — the API layer renders this through Pydantic."""
+
+    def __init__(
+        self,
+        *,
+        outcome: str,
+        queue_id: str | None = None,
+        iteration_id: str | None = None,
+        backtest_run_id: str | None = None,
+        statistical_verdict: str | None = None,
+        verdict: str | None = None,
+        notes: list[str] | None = None,
+        next_actions: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.outcome = outcome
+        self.queue_id = queue_id
+        self.iteration_id = iteration_id
+        self.backtest_run_id = backtest_run_id
+        self.statistical_verdict = statistical_verdict
+        self.verdict = verdict
+        self.notes = notes or []
+        self.next_actions = next_actions or []
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "outcome": self.outcome,
+            "queue_id": self.queue_id,
+            "iteration_id": self.iteration_id,
+            "backtest_run_id": self.backtest_run_id,
+            "statistical_verdict": self.statistical_verdict,
+            "verdict": self.verdict,
+            "notes": self.notes,
+            "next_actions": self.next_actions,
+        }
+
+
+async def _resolve_account_strategy_id(
+    conn: asyncpg.Connection, strategy_code: str
+) -> str | None:
+    return await conn.fetchval(
+        """
+        SELECT account_strategy_id
+        FROM account_strategy
+        WHERE strategy_code = $1 AND is_deleted = false
+        LIMIT 1
+        """,
+        strategy_code,
+    )
+
+
+async def _resolve_account_strategy(
+    conn: asyncpg.Connection, strategy_code: str
+) -> dict[str, Any] | None:
+    """Like ``_resolve_account_strategy_id`` but also returns the strategy's
+    allow_long/allow_short flags so researcher payloads match the production
+    direction policy (instead of hardcoding both to True regardless of what
+    the strategy actually supports). Result keys: ``account_strategy_id``,
+    ``allow_long``, ``allow_short``."""
+    row = await conn.fetchrow(
+        """
+        SELECT account_strategy_id, allow_long, allow_short
+        FROM account_strategy
+        WHERE strategy_code = $1 AND is_deleted = false
+        LIMIT 1
+        """,
+        strategy_code,
+    )
+    if row is None:
+        return None
+    return {
+        "account_strategy_id": str(row["account_strategy_id"]),
+        # Treat NULL as TRUE — matches the JVM's resolveAllowLong/Short fallback.
+        "allow_long": True if row["allow_long"] is None else bool(row["allow_long"]),
+        "allow_short": True if row["allow_short"] is None else bool(row["allow_short"]),
+    }
+
+
+async def _poll_backtest_status(
+    db: Database, backtest_run_id: str, timeout_s: int = _POLL_TIMEOUT_S
+) -> str:
+    """Poll until terminal status. Returns the final status string.
+
+    Holds a single connection for the full poll loop instead of acquiring
+    one per tick — a 30-min poll at 5s interval would otherwise burn 360
+    pool acquisitions for nothing.
+    """
+    deadline = time.monotonic() + timeout_s
+    last_status: str | None = None
+    async with db.acquire() as conn:
+        while time.monotonic() < deadline:
+            row = await conn.fetchrow(
+                "SELECT status FROM backtest_run WHERE backtest_run_id = $1",
+                backtest_run_id,
+            )
+            last_status = (row["status"] if row else None) or "UNKNOWN"
+            if last_status in ("COMPLETED", "FAILED", "CANCELLED", "ERROR"):
+                return last_status
+            await asyncio.sleep(_POLL_INTERVAL_S)
+    return last_status or "TIMEOUT"
+
+
+async def _fetch_run_metrics(conn: asyncpg.Connection, backtest_run_id: str) -> dict[str, Any]:
+    row = await conn.fetchrow(
+        """
+        SELECT backtest_run_id, strategy_code, status, total_trades, total_wins,
+               total_losses, win_rate, profit_factor, net_profit, return_pct,
+               max_drawdown_pct, max_drawdown_amount, sharpe_ratio, sortino_ratio,
+               avg_win, avg_loss, expectancy, initial_capital, ending_balance,
+               asset, interval_name, start_time, end_time
+        FROM backtest_run
+        WHERE backtest_run_id = $1
+        """,
+        backtest_run_id,
+    )
+    if row is None:
+        raise OrchestratorError(
+            status_code=502,
+            error_code="backtest_row_missing",
+            message=f"Backtest reported COMPLETED but backtest_run row {backtest_run_id} not found.",
+            retryable=False,
+        )
+    # Decimal/datetime → JSON-friendly. For the metrics_snapshot JSONB
+    # column we serialise to native types up front.
+    def _coerce(v: Any) -> Any:
+        if isinstance(v, Decimal):
+            return str(v)
+        if isinstance(v, datetime):
+            return v.isoformat()
+        if isinstance(v, UUID):
+            return str(v)
+        return v
+
+    return {k: _coerce(v) for k, v in dict(row).items()}
+
+
+def _build_submit_payload(
+    *,
+    account_strategy_id: str,
+    strategy_code: str,
+    asset: str,
+    interval_name: str,
+    overrides: dict[str, Any],
+    settings: Settings,  # noqa: ARG001 — reserved for prod-window/capital config
+    allow_long: bool = True,
+    allow_short: bool = True,
+) -> dict[str, Any]:
+    # Window + sizing match research-tick.sh lines 340-359. endTime is
+    # "yesterday UTC midnight" so we never test on a partial bar; bash
+    # had a hardcoded date that drifted with each rebuild, this doesn't.
+    end_time = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT00:00:00")
+    return {
+        "accountStrategyId": account_strategy_id,
+        "strategyCode": strategy_code,
+        "asset": asset,
+        "interval": interval_name,
+        "startTime": "2024-01-01T00:00:00",
+        "endTime": end_time,
+        "initialCapital": 100,
+        "riskPerTradePct": 2.0,
+        "feeRate": 0.00075,
+        "minNotional": 5,
+        "minQty": 0.000001,
+        "qtyStep": 0.000001,
+        "maxOpenPositions": 1,
+        # Mirror the production strategy's direction policy rather than
+        # hardcoding both. A long-only strategy researched with shorts
+        # enabled would surface fake P&L from a side it'll never trade.
+        "allowLong": allow_long,
+        "allowShort": allow_short,
+        "strategyParamOverrides": {strategy_code: overrides},
+        # Origin tag — surfaces as a "RESEARCHER" badge on the frontend run
+        # list/detail so users can tell autonomous-agent runs apart from
+        # their own. Backend defaults missing values to USER.
+        "triggeredBy": "RESEARCHER",
+    }
+
+
+async def run_tick(
+    *,
+    db: Database,
+    jvm: JvmClient,
+    settings: Settings,
+    agent_name: str,
+) -> TickResult:
+    """One tick. Idempotent at the queue level — re-runs are safe because
+    each tick claims a fresh row and atomically increments iteration_number."""
+
+    # ── Step 0: reap any RUNNING rows older than the poll cap ─────────
+    # Covers SIGKILL-style crashes whose rollback handler never ran.
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            recovered = await queue_write.recover_stuck(conn, _STUCK_RUNNING_S)
+    if recovered:
+        log.warn("tick.recovered_stuck_rows", count=recovered)
+
+    # ── Step 1: claim row ──────────────────────────────────────────────
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            claim = await queue_write.claim_next(conn)
+
+    if claim is None:
+        return TickResult(
+            outcome="empty_queue",
+            notes=["Queue has no PENDING/RUNNING rows. Enqueue with POST /queue."],
+            next_actions=[{"kind": "call", "method": "POST", "path": "/queue"}],
+        )
+
+    queue_id = claim["queue_id"]
+    strategy_code = claim["strategy_code"]
+    interval_name = claim["interval_name"]
+    instrument = claim["instrument"]
+    sweep_config = claim["sweep_config"]
+    prior_iter = int(claim["prior_iter"])
+    iter_budget = int(claim["iter_budget"])
+    early_stop = bool(claim["early_stop_on_no_edge"])
+    new_iter = prior_iter + 1
+
+    log.info(
+        "tick.claimed",
+        queue_id=str(queue_id),
+        strategy_code=strategy_code,
+        iter=new_iter,
+        budget=iter_budget,
+    )
+
+    try:
+        return await _execute_after_claim(
+            db=db,
+            jvm=jvm,
+            settings=settings,
+            agent_name=agent_name,
+            queue_id=queue_id,
+            strategy_code=strategy_code,
+            interval_name=interval_name,
+            instrument=instrument,
+            sweep_config=sweep_config,
+            prior_iter=prior_iter,
+            new_iter=new_iter,
+            iter_budget=iter_budget,
+            early_stop=early_stop,
+        )
+    except OrchestratorError as err:
+        # If the failing path already moved the row to a terminal state
+        # (FAILED/PARKED), do NOT roll back — that would reset to PENDING
+        # and the row would be reclaimed and fail again forever.
+        if not getattr(err, "queue_terminalized", False):
+            await _rollback(db, queue_id, "Tick failed (domain error); rolled back to PENDING.")
+        raise
+    except Exception as e:  # noqa: BLE001 — last-line safety net before the trap
+        log.error("tick.crashed", queue_id=str(queue_id), error=str(e))
+        await _rollback(db, queue_id, f"Tick crashed: {type(e).__name__}; rolled back to PENDING.")
+        raise
+
+
+async def _rollback(db: Database, queue_id: Any, note: str) -> None:
+    try:
+        async with db.acquire() as conn:
+            await queue_write.rollback_iter(conn, queue_id, note)
+    except Exception as cleanup_err:  # noqa: BLE001
+        log.warn("tick.rollback_failed", queue_id=str(queue_id), error=str(cleanup_err))
+
+
+async def _execute_after_claim(
+    *,
+    db: Database,
+    jvm: JvmClient,
+    settings: Settings,
+    agent_name: str,
+    queue_id: Any,
+    strategy_code: str,
+    interval_name: str,
+    instrument: str,
+    sweep_config: dict[str, Any],
+    prior_iter: int,
+    new_iter: int,
+    iter_budget: int,
+    early_stop: bool,
+) -> TickResult:
+    # ── Step 2: derive sweep combo ────────────────────────────────────
+    combo = sweep.derive_combo(sweep_config, prior_iter)
+    if combo is None:
+        note = (
+            f"[{datetime.now(timezone.utc).isoformat()}] Sweep exhausted at "
+            f"iter={prior_iter}; total combos={sweep.total_combos(sweep_config)}."
+        )
+        async with db.acquire() as conn:
+            await queue_write.park_exhausted(conn, queue_id, note)
+        return TickResult(
+            outcome="sweep_exhausted",
+            queue_id=str(queue_id),
+            notes=[note],
+            next_actions=[{"kind": "read_doc", "doc_anchor": "queue.sweep_exhausted"}],
+        )
+
+    # ── Step 3: resolve account_strategy_id ───────────────────────────
+    async with db.acquire() as conn:
+        as_row = await _resolve_account_strategy(conn, strategy_code)
+    if not as_row:
+        note = (
+            f"[{datetime.now(timezone.utc).isoformat()}] No account_strategy row "
+            f"for strategy_code={strategy_code} (is_deleted=false)."
+        )
+        async with db.acquire() as conn:
+            await queue_write.fail_queue(conn, queue_id, note)
+        raise _terminal(OrchestratorError(
+            status_code=412,
+            error_code="account_strategy_missing",
+            message=note,
+            retryable=False,
+            hint="Seed an account_strategy row for the strategy_code before enqueuing.",
+            next_action=NextAction(kind="contact_human"),
+            details={"queue_id": str(queue_id), "strategy_code": strategy_code},
+        ))
+
+    # ── Step 3.5: record hypothesis_audit row BEFORE the backtest ─────
+    # Recording up-front means a crashed/timed-out tick still counts
+    # toward trial multiplicity — overfitting risk is "did the loop ever
+    # see this combo", not "did the run finish". We backfill verdicts
+    # in step 5 once the iteration is logged.
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            audit_id = await audit_repo.insert_audit(
+                conn,
+                strategy_code=strategy_code,
+                params_snapshot=combo,
+                queue_id=queue_id,
+                created_by=agent_name,
+            )
+            # +1 for the current in-flight trial — its audit row has
+            # iteration_id=NULL until step 5 backfills, so the COUNT
+            # query (filtered to completed rows only) excludes it.
+            cumulative_trials = await audit_repo.count_cumulative_trials(
+                conn, strategy_code
+            ) + 1
+
+    # ── Step 4: submit backtest, poll for completion ──────────────────
+    payload = _build_submit_payload(
+        account_strategy_id=as_row["account_strategy_id"],
+        strategy_code=strategy_code,
+        asset=instrument,
+        interval_name=interval_name,
+        overrides=combo,
+        settings=settings,
+        allow_long=as_row["allow_long"],
+        allow_short=as_row["allow_short"],
+    )
+    backtest_run_id = await jvm.submit_backtest(payload)
+    log.info(
+        "tick.submitted",
+        queue_id=str(queue_id),
+        run_id=backtest_run_id,
+        combo=combo,
+    )
+
+    final_status = await _poll_backtest_status(db, backtest_run_id)
+    if final_status != "COMPLETED":
+        note = (
+            f"[{datetime.now(timezone.utc).isoformat()}] Backtest terminal status="
+            f"{final_status} (run_id={backtest_run_id})."
+        )
+        async with db.acquire() as conn:
+            await queue_write.fail_queue(conn, queue_id, note)
+        raise _terminal(OrchestratorError(
+            status_code=502,
+            error_code="backtest_did_not_complete",
+            message=note,
+            retryable=False,
+            details={"backtest_run_id": backtest_run_id, "final_status": final_status},
+        ))
+
+    # ── Step 5: analyze, log iteration + queue pointer in one transaction ──
+    async with db.acquire() as conn:
+        run_metrics = await _fetch_run_metrics(conn, backtest_run_id)
+        trades = await trades_repo.fetch_trades(conn, backtest_run_id)
+
+    # Re-fetch the raw run dict with native datetimes for analyze.py — the
+    # _fetch_run_metrics path stringifies for JSONB. analyze_run wants
+    # datetime objects to compute the annualisation factor.
+    async with db.acquire() as conn:
+        raw_run = await conn.fetchrow(
+            "SELECT start_time, end_time, return_pct, max_drawdown_pct "
+            "FROM backtest_run WHERE backtest_run_id = $1",
+            backtest_run_id,
+        )
+    raw_run_dict = dict(raw_run) if raw_run else {}
+
+    analysis = analyze.analyze_run(
+        raw_run_dict, trades, cumulative_trials=cumulative_trials
+    )
+    stat_v = analysis["statistical_verdict"]["verdict"]
+    sample_ok = analyze.sample_size_adequate(analysis["n_trades"])
+    dec_v = analyze.decision_verdict(stat_v, analysis["n_trades"], analysis["slippage_haircut_pnl"])
+
+    # metrics_snapshot blends run-level metrics with the analyzer payload.
+    metrics_snapshot = {**run_metrics, "analysis": analysis}
+
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            log_iter_n = await iterations_write.next_iteration_number(conn, strategy_code)
+            iteration_id = await iterations_write.insert_iteration(
+                conn,
+                strategy_code=strategy_code,
+                iteration_number=log_iter_n,
+                backtest_run_id=backtest_run_id,
+                params_snapshot=combo,
+                metrics_snapshot=metrics_snapshot,
+                confidence_intervals={"pf_95": analysis["pf_95_ci"]},
+                verdict=dec_v,
+                statistical_verdict=stat_v,
+                sample_size_adequate=sample_ok,
+                git_commit_hash=None,
+                code_change_summary=f"Sweep iter {log_iter_n} (orchestrator): {combo}",
+                change_reasoning="Mechanical sweep iteration via POST /tick.",
+                quant_audit_notes=(
+                    "Logged by orchestrator. statistical_verdict via bootstrap PF CI "
+                    "(n_resamples=2000); DSR per Bailey & Lopez de Prado 2014 with "
+                    f"cumulative_trials={cumulative_trials} (real selection-bias "
+                    f"multiplicity from hypothesis_audit); slippage haircut at "
+                    f"+20bps={analysis['slippage_haircut_pnl'].get('+20bps')}. "
+                    "Walk-forward (POST /walk-forward) gates final PASS verdict."
+                ),
+                created_by=agent_name,
+            )
+            await queue_write.attach_iteration(
+                conn,
+                queue_id,
+                iteration_id=iteration_id,
+                backtest_run_id=backtest_run_id,
+            )
+            # Backfill the audit row written in step 3.5 with the resolved
+            # verdicts. The re-discovery gate keys on decision_verdict so
+            # this update is what enables the gate to fire on later sweeps.
+            await audit_repo.update_audit_verdict(
+                conn,
+                audit_id=audit_id,
+                iteration_id=iteration_id,
+                statistical_verdict=stat_v,
+                decision_verdict=dec_v,
+            )
+
+    log.info(
+        "tick.iteration_logged",
+        queue_id=str(queue_id),
+        iteration_id=str(iteration_id),
+        statistical_verdict=stat_v,
+        verdict=dec_v,
+    )
+
+    # ── Step 6: queue next-state ──────────────────────────────────────
+    next_actions = await _decide_next_state(
+        db=db,
+        queue_id=queue_id,
+        new_iter=new_iter,
+        iter_budget=iter_budget,
+        early_stop=early_stop,
+        statistical_verdict=stat_v,
+    )
+
+    return TickResult(
+        outcome="iterated",
+        queue_id=str(queue_id),
+        iteration_id=str(iteration_id),
+        backtest_run_id=backtest_run_id,
+        statistical_verdict=stat_v,
+        verdict=dec_v,
+        next_actions=next_actions,
+    )
+
+
+async def _decide_next_state(
+    *,
+    db: Database,
+    queue_id: Any,
+    new_iter: int,
+    iter_budget: int,
+    early_stop: bool,
+    statistical_verdict: str,
+) -> list[dict[str, Any]]:
+    """Mirrors research-tick.sh lines 514-572. Returns agent next-action hints."""
+    ts = datetime.now(timezone.utc).isoformat()
+    if statistical_verdict == "NO_EDGE" and early_stop:
+        note = f"[{ts}] Discarded at iter {new_iter}: stat verdict NO_EDGE + early_stop=true."
+        async with db.acquire() as conn:
+            await queue_write.complete_queue(
+                conn,
+                queue_id,
+                final_verdict="DISCARD",
+                walk_forward_id=None,
+                note=note,
+            )
+        return [{"kind": "call", "method": "GET", "path": "/journal?entry_type=ANTI_PATTERN"}]
+
+    if statistical_verdict == "SIGNIFICANT_EDGE":
+        # Walk-forward is a 6-fold × ~30min validation; running it inside
+        # /tick would block the HTTP request for hours. We park the row
+        # and direct the agent to POST /walk-forward, which writes a
+        # walk_forward_run row and (if ROBUST) flips the queue to
+        # COMPLETED/PASS. If not ROBUST, the agent re-enqueues a refined
+        # sweep — same semantics as the bash flow, just decoupled.
+        note = (
+            f"[{ts}] iter {new_iter} SIGNIFICANT_EDGE — needs walk-forward "
+            f"validation. POST /walk-forward to gate PASS verdict."
+        )
+        async with db.acquire() as conn:
+            await queue_write.park_exhausted(conn, queue_id, note)
+        return [
+            {"kind": "call", "method": "POST", "path": "/walk-forward",
+             "hint": "Body {strategy_code, queue_id} — gates PASS on stability_verdict=ROBUST."},
+        ]
+
+    if statistical_verdict in ("INSUFFICIENT_EVIDENCE", "NOT_TESTED"):
+        if new_iter >= iter_budget:
+            note = (
+                f"[{ts}] Parked at iter {new_iter}: still INSUFFICIENT_EVIDENCE "
+                f"after iter_budget={iter_budget}. Human review."
+            )
+            async with db.acquire() as conn:
+                await queue_write.complete_queue(
+                    conn,
+                    queue_id,
+                    final_verdict="INSUFFICIENT_EVIDENCE",
+                    walk_forward_id=None,
+                    note=note,
+                )
+            return [{"kind": "contact_human"}]
+        note = f"[{ts}] iter {new_iter} INSUFFICIENT_EVIDENCE; continuing."
+        async with db.acquire() as conn:
+            await queue_write.reset_to_pending(conn, queue_id, note)
+        return [{"kind": "call", "method": "POST", "path": "/tick"}]
+
+    # NO_EDGE without early_stop, or unknown — leave row PENDING for next tick.
+    note = f"[{ts}] iter {new_iter} statistical_verdict={statistical_verdict}; continuing."
+    async with db.acquire() as conn:
+        await queue_write.reset_to_pending(conn, queue_id, note)
+    return [{"kind": "call", "method": "POST", "path": "/tick"}]

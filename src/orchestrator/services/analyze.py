@@ -1,0 +1,463 @@
+"""Quant-grade analysis — port of ``research/scripts/analyze-run.py``.
+
+For one backtest_run the orchestrator computes:
+
+  * Bootstrap 95% confidence interval on Profit Factor (n_resamples=2000).
+    Hedge-fund discipline: a strategy "has edge" only when the CI lower
+    bound > 1.0, not when the point estimate > 1.0.
+  * Probabilistic Sharpe Ratio (Bailey & Lopez de Prado 2014). Returns
+    the probability that the true Sharpe is > 0 after correcting for
+    skew, kurtosis, sample size, and selection bias (Bonferroni N tests).
+  * Slippage sensitivity: net PnL after +5/+10/+20/+50 bps round-trip
+    haircut on each trade.
+  * Regime-stratified breakdown by ``entry_trend_regime`` and calendar
+    quarter.
+  * Statistical verdict: SIGNIFICANT_EDGE / INSUFFICIENT_EVIDENCE /
+    NO_EDGE based on n>=100 AND PF CI excluding 1.0.
+
+Pure functions only — no I/O. The trades+run dicts are passed in. The
+caller (tick service) handles the DB fetch.
+"""
+
+from __future__ import annotations
+
+import math
+import random
+import statistics
+from collections import defaultdict
+from datetime import datetime
+from decimal import Decimal
+from typing import Any, Iterable
+
+# Below this many trades, statistical_verdict is INSUFFICIENT_EVIDENCE
+# regardless of point estimates. Matches research/CLAUDE.md "Profitability bar".
+MIN_TRADES_FOR_SIG = 100
+PF_INFINITY_SENTINEL = 9999.0
+
+
+# ── Coercions ─────────────────────────────────────────────────────────
+
+
+def _f(v: Any) -> float | None:
+    if v is None:
+        return None
+    if isinstance(v, Decimal):
+        return float(v)
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+# ── PF + bootstrap ────────────────────────────────────────────────────
+
+
+def profit_factor(pnls: list[float]) -> float | None:
+    """PF = gross profit / |gross loss|. None for n<2; sentinel for no losses."""
+    if len(pnls) < 2:
+        return None
+    wins = sum(p for p in pnls if p > 0)
+    losses = sum(-p for p in pnls if p < 0)
+    if losses == 0:
+        return PF_INFINITY_SENTINEL if wins > 0 else None
+    return wins / losses
+
+
+def bootstrap_pf_ci(
+    pnls: list[float],
+    n_resamples: int = 2000,
+    conf: float = 0.95,
+    seed: int = 42,
+) -> dict[str, Any]:
+    """Bootstrap CI on profit factor.
+
+    Sentinel-PF resamples (no losers in the resample) are dropped — we
+    don't want infinity-PF samples skewing the upper percentile. With
+    very small N this can leave us with too few finite resamples; the
+    caller treats ``low is None`` as "not computable".
+    """
+    if len(pnls) < 5:
+        return {"low": None, "high": None, "mean": None, "n_resamples": 0,
+                "note": "n too small for bootstrap"}
+    rng = random.Random(seed)
+    pf_samples: list[float] = []
+    for _ in range(n_resamples):
+        sample = [rng.choice(pnls) for _ in pnls]
+        pf = profit_factor(sample)
+        if pf is not None and pf < PF_INFINITY_SENTINEL:
+            pf_samples.append(pf)
+    if not pf_samples:
+        return {"low": None, "high": None, "mean": None, "n_resamples": 0,
+                "note": "no resamples produced finite PF"}
+    pf_samples.sort()
+    alpha = (1 - conf) / 2
+    lo_idx = int(alpha * len(pf_samples))
+    hi_idx = max(int((1 - alpha) * len(pf_samples)) - 1, 0)
+    return {
+        "low": round(pf_samples[lo_idx], 4),
+        "high": round(pf_samples[hi_idx], 4),
+        "mean": round(sum(pf_samples) / len(pf_samples), 4),
+        "n_resamples": len(pf_samples),
+        "note": None,
+    }
+
+
+# ── Sharpe / Sortino / PSR ────────────────────────────────────────────
+
+
+def sharpe_ratio(returns: list[float], ann_factor: float | None = None) -> float | None:
+    if len(returns) < 2:
+        return None
+    mean = sum(returns) / len(returns)
+    var = sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)
+    if var <= 0:
+        return None
+    sr = mean / math.sqrt(var)
+    return sr * math.sqrt(ann_factor) if ann_factor else sr
+
+
+def sortino_ratio(
+    returns: list[float], ann_factor: float | None = None, target: float = 0.0
+) -> float | None:
+    if len(returns) < 2:
+        return None
+    mean_excess = (sum(returns) / len(returns)) - target
+    downside = [r - target for r in returns if r < target]
+    if len(downside) < 2:
+        return None
+    var = sum(d**2 for d in downside) / len(downside)
+    if var <= 0:
+        return None
+    sortino = mean_excess / math.sqrt(var)
+    return sortino * math.sqrt(ann_factor) if ann_factor else sortino
+
+
+def skewness(values: list[float]) -> float:
+    if len(values) < 3:
+        return 0.0
+    mean = sum(values) / len(values)
+    m2 = sum((v - mean) ** 2 for v in values) / len(values)
+    m3 = sum((v - mean) ** 3 for v in values) / len(values)
+    if m2 <= 0:
+        return 0.0
+    return m3 / (m2**1.5)
+
+
+def excess_kurtosis(values: list[float]) -> float:
+    if len(values) < 4:
+        return 0.0
+    mean = sum(values) / len(values)
+    m2 = sum((v - mean) ** 2 for v in values) / len(values)
+    m4 = sum((v - mean) ** 4 for v in values) / len(values)
+    if m2 <= 0:
+        return 0.0
+    return m4 / (m2**2) - 3.0
+
+
+def _norm_cdf(z: float) -> float:
+    return 0.5 * (1 + math.erf(z / math.sqrt(2)))
+
+
+def _norm_inv(p: float) -> float:
+    """Beasley-Springer-Moro normal inverse CDF, ~1e-9 accurate."""
+    if p <= 0:
+        return -float("inf")
+    if p >= 1:
+        return float("inf")
+    a = [-3.969683028665376e1, 2.209460984245205e2, -2.759285104469687e2,
+         1.383577518672690e2, -3.066479806614716e1, 2.506628277459239e0]
+    b = [-5.447609879822406e1, 1.615858368580409e2, -1.556989798598866e2,
+         6.680131188771972e1, -1.328068155288572e1]
+    c = [-7.784894002430293e-3, -3.223964580411365e-1, -2.400758277161838e0,
+         -2.549732539343734e0, 4.374664141464968e0, 2.938163982698783e0]
+    d = [7.784695709041462e-3, 3.224671290700398e-1, 2.445134137142996e0,
+         3.754408661907416e0]
+    p_low, p_high = 0.02425, 1 - 0.02425
+    if p < p_low:
+        q = math.sqrt(-2 * math.log(p))
+        return (((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) / \
+               ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1)
+    if p <= p_high:
+        q = p - 0.5
+        r = q * q
+        return (((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5]) * q / \
+               (((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1)
+    q = math.sqrt(-2 * math.log(1 - p))
+    return -(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) / \
+            ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1)
+
+
+def probabilistic_sharpe_ratio(
+    sr: float | None,
+    n_obs: int,
+    skew: float,
+    kurt: float,
+    n_strategies_tested: int = 5,
+) -> float | None:
+    """Deflated Sharpe (Bailey & Lopez de Prado 2014).
+
+    Returns P(true SR > 0 | sample). PSR > 0.95 is the quant-grade
+    significance bar; below 0.5 the Sharpe is indistinguishable from zero.
+
+    NOTE: ``n_strategies_tested`` defaults to 5 for back-compat with the
+    hardcoded V11 contract. Production callers should use
+    ``deflated_sharpe_ratio`` and pass the actual cumulative trial
+    count from ``hypothesis_audit`` — see analyze_run().
+    """
+    if sr is None or n_obs < 30:
+        return None
+    z_alpha = _norm_inv(1 - 0.05 / n_strategies_tested)
+    sr_star = z_alpha / math.sqrt(n_obs)
+    denom_sq = 1 - skew * sr + ((kurt - 1) / 4) * (sr**2)
+    if denom_sq <= 0:
+        return None
+    z = (sr - sr_star) * math.sqrt((n_obs - 1) / denom_sq)
+    return _norm_cdf(z)
+
+
+def deflated_sharpe_ratio(
+    sr: float | None,
+    n_obs: int,
+    skew: float,
+    kurt: float,
+    n_trials: int,
+) -> float | None:
+    """Deflated Sharpe Ratio (Bailey & Lopez de Prado 2014), using the
+    REAL cumulative trial count rather than the V11 hardcoded N=5.
+
+    This is the same formula as ``probabilistic_sharpe_ratio`` but the
+    selection-bias adjustment widens with ``n_trials``: at N=5 the
+    threshold z_alpha = Phi^-1(1 - 0.05/5) ≈ 1.96; at N=250 it climbs to
+    ≈ 3.43. A strategy that just barely cleared PSR=0.95 with 5 trials
+    looks weaker once you account for the 245 prior trials the same
+    autonomous loop ran.
+
+    Reference: Bailey, López de Prado (2014), *The Deflated Sharpe
+    Ratio: Correcting for Selection Bias, Backtest Overfitting, and
+    Non-Normality*. The HLZ (Harvey, Liu, Zhu 2016) data-mining
+    adjustment is the same idea applied to factor research — both
+    converge on "scale your significance bar by sqrt(2 log N)".
+
+    n_trials clamps to >= 1; passing 0 would otherwise blow up the log.
+    """
+    if sr is None or n_obs < 30:
+        return None
+    n_trials = max(1, int(n_trials))
+    z_alpha = _norm_inv(1 - 0.05 / n_trials)
+    sr_star = z_alpha / math.sqrt(n_obs)
+    denom_sq = 1 - skew * sr + ((kurt - 1) / 4) * (sr**2)
+    if denom_sq <= 0:
+        return None
+    z = (sr - sr_star) * math.sqrt((n_obs - 1) / denom_sq)
+    return _norm_cdf(z)
+
+
+# ── Slippage sensitivity ──────────────────────────────────────────────
+
+
+def slippage_sensitivity(
+    trades: Iterable[dict[str, Any]],
+    scenarios: tuple[int, ...] = (5, 10, 20, 50),
+) -> dict[str, float]:
+    """Project net PnL across slippage haircut scenarios.
+
+    Approximation: notional ≈ max(|pnl|, $10) × 50. The bash analyzer
+    uses the same proxy because backtest_trade doesn't expose per-trade
+    notional cleanly; this is order-of-magnitude correct and gives a
+    relative ranking, which is what the verdict gate uses.
+    """
+    trades_list = list(trades)
+    pnls = [_f(t.get("realized_pnl_amount")) or 0.0 for t in trades_list]
+    notionals = [max(abs(p), 10.0) * 50.0 for p in pnls]
+    out: dict[str, float] = {}
+    for slip_bps in scenarios:
+        total = 0.0
+        for pnl, notional in zip(pnls, notionals, strict=True):
+            haircut = notional * (slip_bps / 10000.0)
+            total += pnl - haircut
+        out[f"+{slip_bps}bps"] = round(total, 4)
+    return out
+
+
+# ── Regime stratification ─────────────────────────────────────────────
+
+
+def regime_stratify(trades: Iterable[dict[str, Any]]) -> dict[str, dict[str, dict[str, Any]]]:
+    """Split by entry_trend_regime + calendar quarter."""
+    by_regime: dict[str, dict[str, float]] = defaultdict(
+        lambda: {"n": 0, "pnl": 0.0, "wins": 0}
+    )
+    by_quarter: dict[str, dict[str, float]] = defaultdict(
+        lambda: {"n": 0, "pnl": 0.0, "wins": 0}
+    )
+    for t in trades:
+        pnl = _f(t.get("realized_pnl_amount")) or 0.0
+        regime = t.get("entry_trend_regime") or "UNKNOWN"
+        by_regime[regime]["n"] += 1
+        by_regime[regime]["pnl"] += pnl
+        if pnl > 0:
+            by_regime[regime]["wins"] += 1
+        et = t.get("entry_time")
+        if isinstance(et, datetime):
+            q = f"{et.year}Q{(et.month - 1) // 3 + 1}"
+            by_quarter[q]["n"] += 1
+            by_quarter[q]["pnl"] += pnl
+            if pnl > 0:
+                by_quarter[q]["wins"] += 1
+
+    def fmt(d: dict[str, dict[str, float]]) -> dict[str, dict[str, Any]]:
+        return {
+            k: {
+                "n": int(v["n"]),
+                "pnl": round(v["pnl"], 4),
+                "win_rate": round(v["wins"] / v["n"], 4) if v["n"] else None,
+            }
+            for k, v in d.items()
+        }
+
+    return {"by_trend_regime": fmt(by_regime), "by_quarter": fmt(by_quarter)}
+
+
+# ── Composite verdict ─────────────────────────────────────────────────
+
+
+DSR_SIGNIFICANCE_THRESHOLD = 0.95
+
+
+def statistical_verdict(
+    n: int, pf_ci: dict[str, Any], dsr: float | None = None
+) -> dict[str, str]:
+    """SIGNIFICANT_EDGE / INSUFFICIENT_EVIDENCE / NO_EDGE per V11+ rules,
+    plus a DSR multiplicity gate (Tier 1 quant-grade fix).
+
+    The PF-CI gate is necessary but not sufficient: a strategy whose 95%
+    CI excludes 1.0 may still be a noise pass once you account for the
+    cumulative trial count. If DSR < 0.95, demote SIGNIFICANT_EDGE to
+    INSUFFICIENT_EVIDENCE with a reason that names the multiplicity.
+
+    DSR is None for n<30 (insufficient observations for the PSR formula);
+    in that case we fall back to PF-only behaviour rather than blocking
+    valid early-stage iterations.
+    """
+    if n < MIN_TRADES_FOR_SIG:
+        return {"verdict": "INSUFFICIENT_EVIDENCE",
+                "reason": f"n={n} below n>={MIN_TRADES_FOR_SIG} threshold"}
+    lo, hi = pf_ci.get("low"), pf_ci.get("high")
+    if lo is None or hi is None:
+        return {"verdict": "INSUFFICIENT_EVIDENCE",
+                "reason": "PF confidence interval not computable"}
+    if lo > 1.0:
+        if dsr is not None and dsr < DSR_SIGNIFICANCE_THRESHOLD:
+            return {
+                "verdict": "INSUFFICIENT_EVIDENCE",
+                "reason": (
+                    f"PF 95% CI [{lo}, {hi}] favorable but DSR={round(dsr, 4)} "
+                    f"< {DSR_SIGNIFICANCE_THRESHOLD} — selection-bias deflation "
+                    f"rejects after multiplicity correction."
+                ),
+            }
+        return {"verdict": "SIGNIFICANT_EDGE",
+                "reason": f"95% CI [{lo}, {hi}] excludes 1.0 favorably"}
+    if hi < 1.0:
+        return {"verdict": "NO_EDGE",
+                "reason": f"95% CI [{lo}, {hi}] excludes 1.0 adversely"}
+    return {"verdict": "INSUFFICIENT_EVIDENCE",
+            "reason": f"95% CI [{lo}, {hi}] spans 1.0"}
+
+
+# ── Top-level analyzer ────────────────────────────────────────────────
+
+
+def analyze_run(
+    run: dict[str, Any],
+    trades: list[dict[str, Any]],
+    n_strategies_tested: int = 5,
+    slippage_scenarios: tuple[int, ...] = (5, 10, 20, 50),
+    cumulative_trials: int | None = None,
+) -> dict[str, Any]:
+    """Run the full analysis. Returns the structured payload that maps
+    directly into ``research_iteration_log.metrics_snapshot`` and
+    ``confidence_intervals``.
+
+    ``n_strategies_tested`` is preserved for the legacy PSR field. Pass
+    ``cumulative_trials`` (from ``hypothesis_audit``) to also compute
+    DSR with the real selection-bias multiplicity. When omitted, DSR
+    falls back to ``n_strategies_tested`` so behaviour matches PSR.
+    """
+    pnls = [_f(t.get("realized_pnl_amount")) or 0.0 for t in trades]
+    n = len(pnls)
+
+    pf_pt = profit_factor(pnls)
+    pf_ci = bootstrap_pf_ci(pnls)
+
+    # Annualisation factor: trades/year. Approximation matches the bash analyzer.
+    ann_factor: float | None = None
+    start = run.get("start_time")
+    end = run.get("end_time")
+    if isinstance(start, datetime) and isinstance(end, datetime) and n > 0:
+        days = (end - start).days
+        if days > 0:
+            ann_factor = (365 / days) * n
+
+    sr = sharpe_ratio(pnls, ann_factor)
+    sortino = sortino_ratio(pnls, ann_factor)
+    sk = skewness(pnls)
+    kt = excess_kurtosis(pnls)
+    psr = probabilistic_sharpe_ratio(sr, n, sk, kt, n_strategies_tested)
+
+    # DSR with real cumulative trial count from hypothesis_audit. Falls
+    # back to n_strategies_tested so test fixtures and legacy callers
+    # that don't pass cumulative_trials get PSR-equivalent output.
+    dsr_n_trials = cumulative_trials if cumulative_trials is not None else n_strategies_tested
+    dsr = deflated_sharpe_ratio(sr, n, sk, kt, dsr_n_trials)
+
+    return_pct = _f(run.get("return_pct"))
+    max_dd = _f(run.get("max_drawdown_pct"))
+    calmar = (return_pct / max_dd) if (return_pct and max_dd and max_dd > 0) else None
+
+    slippage = slippage_sensitivity(trades, slippage_scenarios)
+    regimes = regime_stratify(trades)
+    stat = statistical_verdict(n, pf_ci, dsr)
+
+    return {
+        "n_trades": n,
+        "pf_point_estimate": round(pf_pt, 4) if isinstance(pf_pt, float) else pf_pt,
+        "pf_95_ci": pf_ci,
+        "sharpe_annualized": round(sr, 4) if sr is not None else None,
+        "sortino_annualized": round(sortino, 4) if sortino is not None else None,
+        "calmar": round(calmar, 4) if calmar is not None else None,
+        "psr": round(psr, 4) if psr is not None else None,
+        "dsr": round(dsr, 4) if dsr is not None else None,
+        "dsr_n_trials": dsr_n_trials,
+        "skewness": round(sk, 4),
+        "excess_kurtosis": round(kt, 4),
+        "max_drawdown_pct": max_dd,
+        "slippage_haircut_pnl": slippage,
+        "statistical_verdict": stat,
+        "regimes": regimes,
+        "ann_factor": round(ann_factor, 4) if ann_factor else None,
+    }
+
+
+def decision_verdict(stat_verdict: str, n: int, slippage: dict[str, float]) -> str:
+    """Map statistical verdict + slippage check → decision verdict.
+
+    PASS requires statistical verdict SIGNIFICANT_EDGE *and* +20bps PnL > 0.
+    Below n>=100 we always ITERATE (more data needed). NO_EDGE → DISCARD.
+    """
+    if n < MIN_TRADES_FOR_SIG:
+        return "ITERATE"
+    if stat_verdict == "NO_EDGE":
+        return "DISCARD"
+    if stat_verdict == "SIGNIFICANT_EDGE":
+        # Slippage gate: live trading takes 10-30 bps; if +20 turns negative
+        # the strategy is borderline regardless of point PF.
+        slip_20 = slippage.get("+20bps")
+        if slip_20 is None or slip_20 <= 0:
+            return "ITERATE"
+        return "PASS"
+    return "ITERATE"
+
+
+def sample_size_adequate(n: int) -> bool:
+    return n >= MIN_TRADES_FOR_SIG

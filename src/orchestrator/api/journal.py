@@ -1,0 +1,180 @@
+"""``/journal`` — agent's hypothesis / outcome / anti-pattern log.
+
+Backed by ``research_journal`` (V10). The agent reads this on cold-boot to
+recover prior lessons (anti-patterns, falsified hypotheses) so it doesn't
+re-run a sweep that's already been ruled out.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+from uuid import UUID
+
+import asyncpg
+from fastapi import APIRouter, Depends, Query, Request
+from pydantic import BaseModel, Field
+
+from ..errors import NextAction, OrchestratorError
+from ..repo import journal as journal_repo
+from .deps import get_agent_name, get_db_conn
+from .pagination import Page, decode_cursor, encode_cursor
+
+router = APIRouter(prefix="/journal", tags=["journal"])
+
+_VALID_TYPE = {
+    "STRATEGY_OUTCOME",
+    "CROSS_STRATEGY_FINDING",
+    "HYPOTHESIS",
+    "IDEA_BACKLOG",
+    "ANTI_PATTERN",
+    "RUN_SUMMARY",
+}
+_VALID_STATUS = {"ACTIVE", "STALE", "FALSIFIED", "PARKED"}
+
+
+class JournalCreateRequest(BaseModel):
+    """Mirrors the V10 ``research_journal`` columns the agent is allowed to set.
+
+    ``journal_id`` / ``created_time`` / ``updated_time`` / ``created_by`` /
+    ``updated_by`` are server-assigned (gen_random_uuid + NOW + the
+    X-Agent-Name header), so they're absent from the request body.
+    """
+
+    entry_type: str = Field(..., min_length=1, max_length=40)
+    title: str = Field(..., min_length=1, max_length=300)
+    content: str = Field(..., min_length=1)
+    strategy_code: str | None = Field(None, max_length=60)
+    interval_name: str | None = Field(None, max_length=20)
+    instrument: str | None = Field(None, max_length=30)
+    structured_data: dict[str, Any] = Field(default_factory=dict)
+    status: str = Field("ACTIVE", min_length=1, max_length=20)
+    iteration_id_refs: list[UUID] | None = None
+    related_journal_ids: list[UUID] | None = None
+
+
+@router.get("", response_model=Page)
+async def list_journal(
+    entry_type: str | None = Query(None),
+    status: str | None = Query(None),
+    strategy_code: str | None = Query(None),
+    search: str | None = Query(
+        None, description="Free-text search over title + content (English tsvector)."
+    ),
+    cursor: str | None = Query(None),
+    limit: int = Query(25, ge=1, le=200),
+    conn: asyncpg.Connection = Depends(get_db_conn),
+) -> Page:
+    if entry_type is not None and entry_type not in _VALID_TYPE:
+        raise OrchestratorError(
+            status_code=400,
+            error_code="bad_entry_type",
+            message=f"entry_type must be one of {sorted(_VALID_TYPE)}.",
+            retryable=False,
+        )
+    if status is not None and status not in _VALID_STATUS:
+        raise OrchestratorError(
+            status_code=400,
+            error_code="bad_journal_status",
+            message=f"status must be one of {sorted(_VALID_STATUS)}.",
+            retryable=False,
+        )
+    after_t, after_id = (None, None)
+    if cursor is not None:
+        after_t, after_id = decode_cursor(cursor)
+
+    rows = await journal_repo.list_journal(
+        conn,
+        entry_type=entry_type,
+        status=status,
+        strategy_code=strategy_code,
+        search=search,
+        after_created_time=after_t,
+        after_id=after_id,
+        limit=limit + 1,
+    )
+    has_more = len(rows) > limit
+    items = rows[:limit]
+    next_cursor: str | None = None
+    if has_more:
+        last = items[-1]
+        next_cursor = encode_cursor(last["created_time"], last["journal_id"])
+
+    next_actions: list[dict[str, Any]] = []
+    if has_more:
+        next_actions.append(
+            {"kind": "call", "method": "GET", "path": f"/journal?cursor={next_cursor}"}
+        )
+    return Page(items=items, next_cursor=next_cursor, next_actions=next_actions)
+
+
+@router.get("/{journal_id}")
+async def get_journal(
+    journal_id: UUID,
+    conn: asyncpg.Connection = Depends(get_db_conn),
+) -> dict[str, Any]:
+    row = await journal_repo.get_journal(conn, journal_id)
+    if row is None:
+        raise OrchestratorError(
+            status_code=404,
+            error_code="journal_not_found",
+            message=f"No research_journal row with journal_id={journal_id}.",
+            retryable=False,
+            next_action=NextAction(kind="call", method="GET", path="/journal"),
+        )
+    return row
+
+
+@router.post("", status_code=201)
+async def create_journal(
+    body: JournalCreateRequest,
+    request: Request,
+    conn: asyncpg.Connection = Depends(get_db_conn),
+    agent: str = Depends(get_agent_name),
+) -> dict[str, Any]:
+    if body.entry_type not in _VALID_TYPE:
+        raise OrchestratorError(
+            status_code=400,
+            error_code="bad_entry_type",
+            message=f"entry_type must be one of {sorted(_VALID_TYPE)}.",
+            retryable=False,
+        )
+    if body.status not in _VALID_STATUS:
+        raise OrchestratorError(
+            status_code=400,
+            error_code="bad_journal_status",
+            message=f"status must be one of {sorted(_VALID_STATUS)}.",
+            retryable=False,
+        )
+
+    # Idempotency-Key replay — same agent + key returns the cached response so
+    # a retried pre-registration of a hypothesis can't double-write the row.
+    idempotency_key = getattr(request.state, "idempotency_key", None)
+    store = request.app.state.idempotency
+    if idempotency_key:
+        cached = await store.get(agent, f"journal:{idempotency_key}")
+        if cached is not None:
+            return cached
+
+    row = await journal_repo.insert_journal(
+        conn,
+        entry_type=body.entry_type,
+        title=body.title,
+        content=body.content,
+        strategy_code=body.strategy_code,
+        interval_name=body.interval_name,
+        instrument=body.instrument,
+        structured_data=body.structured_data,
+        status=body.status,
+        iteration_id_refs=body.iteration_id_refs,
+        related_journal_ids=body.related_journal_ids,
+        created_by=agent,
+    )
+    response = {
+        **row,
+        "next_actions": [
+            {"kind": "call", "method": "GET", "path": f"/journal/{row['journal_id']}"},
+        ],
+    }
+    if idempotency_key:
+        await store.put(agent, f"journal:{idempotency_key}", response)
+    return response
