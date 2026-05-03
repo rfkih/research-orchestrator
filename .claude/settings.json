@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm tsc --noEmit *)",
+      "Bash(PGPASSWORD=admin psql -U postgres -d trading_db *)",
+      "Bash(TOKEN=*)",
+      "Bash(grep *)",
+      "Bash(curl -s http://127.0.0.1:8082/*)"
+    ]
+  }
+}

@@ -56,3 +56,28 @@ def decode_cursor(cursor: str) -> tuple[datetime, str]:
             hint="Drop the cursor parameter to start over from the newest row.",
             details={"reason": type(e).__name__},
         ) from e
+
+
+def encode_cursor_ext(payload: dict[str, Any]) -> str:
+    """Encode an arbitrary dict as a URL-safe opaque cursor."""
+    return (
+        base64.urlsafe_b64encode(json.dumps(payload, default=str).encode())
+        .decode()
+        .rstrip("=")
+    )
+
+
+def decode_cursor_ext(cursor: str) -> dict[str, Any]:
+    """Decode a cursor produced by ``encode_cursor_ext``. Raises ``OrchestratorError`` on garbage."""
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        return json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
+    except Exception as e:
+        raise OrchestratorError(
+            status_code=400,
+            error_code="bad_cursor",
+            message="Cursor is not a value previously returned by this API.",
+            retryable=False,
+            hint="Drop the cursor parameter to start over from the newest row.",
+            details={"reason": type(e).__name__},
+        ) from e

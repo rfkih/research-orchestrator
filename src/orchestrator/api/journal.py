@@ -7,6 +7,7 @@ re-run a sweep that's already been ruled out.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -17,7 +18,7 @@ from pydantic import BaseModel, Field
 from ..errors import NextAction, OrchestratorError
 from ..repo import journal as journal_repo
 from .deps import get_agent_name, get_db_conn
-from .pagination import Page, decode_cursor, encode_cursor
+from .pagination import Page, decode_cursor_ext, encode_cursor_ext
 
 router = APIRouter(prefix="/journal", tags=["journal"])
 
@@ -30,6 +31,8 @@ _VALID_TYPE = {
     "RUN_SUMMARY",
 }
 _VALID_STATUS = {"ACTIVE", "STALE", "FALSIFIED", "PARKED"}
+_VALID_SORT_BY = {"created_time", "strategy_code", "status", "entry_type"}
+_VALID_SORT_DIR = {"asc", "desc"}
 
 
 class JournalCreateRequest(BaseModel):
@@ -60,6 +63,8 @@ async def list_journal(
     search: str | None = Query(
         None, description="Free-text search over title + content (English tsvector)."
     ),
+    sort_by: str = Query("created_time", description=f"Sort field. One of {sorted(_VALID_SORT_BY)}."),
+    sort_dir: str = Query("desc", description="Sort direction: asc or desc."),
     cursor: str | None = Query(None),
     limit: int = Query(25, ge=1, le=200),
     conn: asyncpg.Connection = Depends(get_db_conn),
@@ -78,9 +83,38 @@ async def list_journal(
             message=f"status must be one of {sorted(_VALID_STATUS)}.",
             retryable=False,
         )
-    after_t, after_id = (None, None)
+    if sort_by not in _VALID_SORT_BY:
+        raise OrchestratorError(
+            status_code=400,
+            error_code="bad_sort_by",
+            message=f"sort_by must be one of {sorted(_VALID_SORT_BY)}.",
+            retryable=False,
+        )
+    if sort_dir not in _VALID_SORT_DIR:
+        raise OrchestratorError(
+            status_code=400,
+            error_code="bad_sort_dir",
+            message="sort_dir must be 'asc' or 'desc'.",
+            retryable=False,
+        )
+
+    after_value: Any = None
+    after_created_time: datetime | None = None
+    after_id: str | None = None
     if cursor is not None:
-        after_t, after_id = decode_cursor(cursor)
+        decoded = decode_cursor_ext(cursor)
+        # Cursor is authoritative — ignore query-string sort params when paginating.
+        sort_by = decoded.get("sb", "created_time")
+        sort_dir = decoded.get("sd", "desc")
+        after_id = decoded.get("id")
+        raw_v = decoded.get("v")
+        if sort_by == "created_time":
+            after_value = datetime.fromisoformat(raw_v) if raw_v else None
+            after_created_time = after_value
+        else:
+            after_value = raw_v
+            raw_t = decoded.get("t")
+            after_created_time = datetime.fromisoformat(raw_t) if raw_t else None
 
     rows = await journal_repo.list_journal(
         conn,
@@ -88,7 +122,10 @@ async def list_journal(
         status=status,
         strategy_code=strategy_code,
         search=search,
-        after_created_time=after_t,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        after_value=after_value,
+        after_created_time=after_created_time,
         after_id=after_id,
         limit=limit + 1,
     )
@@ -97,7 +134,22 @@ async def list_journal(
     next_cursor: str | None = None
     if has_more:
         last = items[-1]
-        next_cursor = encode_cursor(last["created_time"], last["journal_id"])
+        if sort_by == "created_time":
+            payload: dict[str, Any] = {
+                "sb": sort_by,
+                "sd": sort_dir,
+                "v": last["created_time"].isoformat(),
+                "id": str(last["journal_id"]),
+            }
+        else:
+            payload = {
+                "sb": sort_by,
+                "sd": sort_dir,
+                "v": last.get(sort_by),
+                "t": last["created_time"].isoformat(),
+                "id": str(last["journal_id"]),
+            }
+        next_cursor = encode_cursor_ext(payload)
 
     next_actions: list[dict[str, Any]] = []
     if has_more:

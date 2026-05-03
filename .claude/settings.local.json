@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm tsc *)",
+      "Bash(pnpm --prefix \"C:/MyFiles/blackheart/front-end\" tsc --noEmit)",
+      "Bash(cmd /c \"cd C:\\\\MyFiles\\\\blackheart\\\\front-end && pnpm tsc --noEmit 2>&1\")",
+      "Bash(powershell.exe *)",
+      "Bash(PYTHONPATH=src python -m pytest tests/ -q --ignore=tests/test_integration)",
+      "Bash(PYTHONPATH=src python -m pytest tests/test_health.py::test_journal_rejects_bad_entry_type -v)",
+      "Bash(gradlew.bat compileJava compileTestJava -q)",
+      "Bash(cmd /c \"cd C:\\\\MyFiles\\\\blackheart\\\\blackheart && gradlew.bat compileJava compileTestJava -q 2>&1\")",
+      "Bash(cmd /c \"cd /d C:\\\\MyFiles\\\\blackheart\\\\blackheart && gradlew.bat compileJava compileTestJava -q\")",
+      "Bash(powershell -Command \"Set-Location 'C:\\\\MyFiles\\\\blackheart\\\\blackheart'; .\\\\gradlew.bat compileJava compileTestJava -q 2>&1\")",
+      "Bash(powershell *)",
+      "Bash(rm \"C:/MyFiles/blackheart/blackheart/src/main/resources/db/flyway/V43__add_allowed_trend_regimes_to_account_strategy.sql\")",
+      "Bash(rm \"C:/MyFiles/blackheart/blackheart/build/resources/main/db/flyway/V43__add_allowed_trend_regimes_to_account_strategy.sql\")",
+      "Bash(netstat -ano)",
+      "Bash(findstr ':8081')"
+    ]
+  }
+}
