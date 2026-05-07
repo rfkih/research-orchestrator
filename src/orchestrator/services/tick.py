@@ -33,6 +33,8 @@ from uuid import UUID
 
 import asyncpg
 
+from redis.asyncio import Redis as AsyncRedis
+
 from ..clients.jvm import JvmClient
 from ..config import Settings
 from ..errors import NextAction, OrchestratorError
@@ -40,11 +42,13 @@ from ..infra.db import Database
 from ..logging import get_logger
 from ..repo import (
     hypothesis_audit as audit_repo,
+    iterations as iterations_repo,
     iterations_write,
     queue_write,
     trades as trades_repo,
 )
-from . import analyze, sweep
+from . import analyze, portfolio, sweep
+from .activity_logger import log_activity
 
 log = get_logger(__name__)
 
@@ -252,6 +256,8 @@ async def run_tick(
     jvm: JvmClient,
     settings: Settings,
     agent_name: str,
+    session_id: UUID | None = None,
+    redis_client: AsyncRedis | None = None,
 ) -> TickResult:
     """One tick. Idempotent at the queue level — re-runs are safe because
     each tick claims a fresh row and atomically increments iteration_number."""
@@ -284,6 +290,7 @@ async def run_tick(
     prior_iter = int(claim["prior_iter"])
     iter_budget = int(claim["iter_budget"])
     early_stop = bool(claim["early_stop_on_no_edge"])
+    started_at = claim["started_at"]
     new_iter = prior_iter + 1
 
     log.info(
@@ -300,6 +307,8 @@ async def run_tick(
             jvm=jvm,
             settings=settings,
             agent_name=agent_name,
+            session_id=session_id,
+            redis_client=redis_client,
             queue_id=queue_id,
             strategy_code=strategy_code,
             interval_name=interval_name,
@@ -309,6 +318,7 @@ async def run_tick(
             new_iter=new_iter,
             iter_budget=iter_budget,
             early_stop=early_stop,
+            started_at=started_at,
         )
     except OrchestratorError as err:
         # If the failing path already moved the row to a terminal state
@@ -337,6 +347,8 @@ async def _execute_after_claim(
     jvm: JvmClient,
     settings: Settings,
     agent_name: str,
+    session_id: UUID | None,
+    redis_client: AsyncRedis | None,
     queue_id: Any,
     strategy_code: str,
     interval_name: str,
@@ -346,14 +358,49 @@ async def _execute_after_claim(
     new_iter: int,
     iter_budget: int,
     early_stop: bool,
+    started_at: Any,
 ) -> TickResult:
     # ── Step 2: derive sweep combo ────────────────────────────────────
-    combo = sweep.derive_combo(sweep_config, prior_iter)
+    # Grid: deterministic cross-product index. TPE: ask Optuna for the
+    # next point given the queue's history of (params, pf) pairs.
+    if sweep.is_tpe(sweep_config):
+        async with db.acquire() as conn:
+            past_trials = await iterations_repo.fetch_tpe_history_for_queue(
+                conn, queue_id
+            )
+        try:
+            combo = sweep.next_combo_tpe(
+                sweep_config, past_trials, iter_index=prior_iter
+            )
+        except Exception as e:  # noqa: BLE001 — TPE config errors get a clean envelope
+            note = (
+                f"[{datetime.now(timezone.utc).isoformat()}] TPE sampler failed "
+                f"at iter={prior_iter}: {type(e).__name__}: {e}."
+            )
+            async with db.acquire() as conn:
+                await queue_write.fail_queue(conn, queue_id, note)
+            raise _terminal(OrchestratorError(
+                status_code=500,
+                error_code="tpe_sampler_failed",
+                message=note,
+                retryable=False,
+                details={"queue_id": str(queue_id), "iter": prior_iter},
+            )) from e
+    else:
+        combo = sweep.derive_combo(sweep_config, prior_iter)
+
     if combo is None:
-        note = (
-            f"[{datetime.now(timezone.utc).isoformat()}] Sweep exhausted at "
-            f"iter={prior_iter}; total combos={sweep.total_combos(sweep_config)}."
-        )
+        if sweep.is_tpe(sweep_config):
+            exhausted_note = (
+                f"TPE budget exhausted at iter={prior_iter}; "
+                f"n_trials={sweep.tpe_trial_budget(sweep_config)}."
+            )
+        else:
+            exhausted_note = (
+                f"Sweep exhausted at iter={prior_iter}; "
+                f"total combos={sweep.total_combos(sweep_config)}."
+            )
+        note = f"[{datetime.now(timezone.utc).isoformat()}] {exhausted_note}"
         async with db.acquire() as conn:
             await queue_write.park_exhausted(conn, queue_id, note)
         return TickResult(
@@ -423,6 +470,29 @@ async def _execute_after_claim(
         combo=combo,
     )
 
+    # Activity log: TICK_DISPATCHED (fire-and-forget)
+    try:
+        async with db.acquire() as _log_conn:
+            await log_activity(
+                _log_conn,
+                session_id=session_id,
+                agent_name=agent_name,
+                activity_type="TICK_DISPATCHED",
+                title=f"Backtest dispatched for {strategy_code} iter {new_iter}",
+                strategy_code=strategy_code,
+                details={
+                    "backtest_run_id": backtest_run_id,
+                    "queue_id": str(queue_id),
+                    "iter": new_iter,
+                    "combo": combo,
+                },
+                related_id=queue_id if isinstance(queue_id, UUID) else None,
+                related_type="queue",
+                redis_client=redis_client,
+            )
+    except Exception as _act_exc:  # noqa: BLE001
+        log.warning("tick.activity_log_failed", step="TICK_DISPATCHED", error=str(_act_exc))
+
     final_status = await _poll_backtest_status(db, backtest_run_id)
     if final_status != "COMPLETED":
         note = (
@@ -459,11 +529,46 @@ async def _execute_after_claim(
         raw_run_dict, trades, cumulative_trials=cumulative_trials
     )
     stat_v = analysis["statistical_verdict"]["verdict"]
+
+    # ── Portfolio correlation gate (layered ON TOP of V11) ────────────
+    # Only runs when V11 already cleared SIGNIFICANT_EDGE — never relaxes
+    # V11, only further demotes. A candidate too correlated with the live
+    # book (LSR/VCB/VBO) gets sent back to INSUFFICIENT_EVIDENCE; the
+    # underlying signal may be real but it duplicates existing exposure.
+    portfolio_corr_payload: dict[str, Any] | None = None
+    if stat_v == "SIGNIFICANT_EDGE":
+        gate = await portfolio.evaluate_portfolio_gate(
+            db,
+            run_metrics=run_metrics,
+            trades=trades,
+            pf_ci=analysis["pf_95_ci"],
+        )
+        portfolio_corr_payload = gate
+        if gate.get("demote"):
+            stat_v = "INSUFFICIENT_EVIDENCE"
+            analysis = {
+                **analysis,
+                "statistical_verdict": {
+                    "verdict": "INSUFFICIENT_EVIDENCE",
+                    "reason": (
+                        f"Demoted by portfolio gate: {gate.get('reason')}"
+                    ),
+                },
+            }
+            log.info(
+                "tick.portfolio_gate_demoted",
+                queue_id=str(queue_id),
+                max_abs_corr=gate.get("max_abs_corr"),
+                pf_lo_effective=gate.get("pf_lo_effective"),
+            )
+
     sample_ok = analyze.sample_size_adequate(analysis["n_trades"])
     dec_v = analyze.decision_verdict(stat_v, analysis["n_trades"], analysis["slippage_haircut_pnl"])
 
     # metrics_snapshot blends run-level metrics with the analyzer payload.
     metrics_snapshot = {**run_metrics, "analysis": analysis}
+    if portfolio_corr_payload is not None:
+        metrics_snapshot["portfolio_corr"] = portfolio_corr_payload
 
     async with db.acquire() as conn:
         async with conn.transaction():
@@ -492,12 +597,34 @@ async def _execute_after_claim(
                 ),
                 created_by=agent_name,
             )
-            await queue_write.attach_iteration(
+            attached = await queue_write.attach_iteration(
                 conn,
                 queue_id,
                 iteration_id=iteration_id,
                 backtest_run_id=backtest_run_id,
+                expected_started_at=started_at,
             )
+            if attached == 0:
+                # Reaper recovered this row mid-flight and another tick
+                # re-claimed it. Don't continue to next-state decision —
+                # raise so the outer handler logs and the new tick's
+                # iteration_log row is the canonical one.
+                raise _terminal(OrchestratorError(
+                    status_code=409,
+                    error_code="queue_row_reclaimed",
+                    message=(
+                        f"Queue row {queue_id} was reclaimed by another tick "
+                        f"(started_at fence mismatched). This tick's "
+                        f"iteration_log row was written but the queue "
+                        f"pointer was not updated."
+                    ),
+                    retryable=False,
+                    details={
+                        "queue_id": str(queue_id),
+                        "iteration_id": str(iteration_id),
+                        "backtest_run_id": str(backtest_run_id),
+                    },
+                ))
             # Backfill the audit row written in step 3.5 with the resolved
             # verdicts. The re-discovery gate keys on decision_verdict so
             # this update is what enables the gate to fire on later sweeps.
@@ -516,6 +643,36 @@ async def _execute_after_claim(
         statistical_verdict=stat_v,
         verdict=dec_v,
     )
+
+    # Activity log: ITERATION_COMPLETED (fire-and-forget)
+    try:
+        async with db.acquire() as _log_conn:
+            await log_activity(
+                _log_conn,
+                session_id=session_id,
+                agent_name=agent_name,
+                activity_type="ITERATION_COMPLETED",
+                title=(
+                    f"{strategy_code} iter {new_iter}: "
+                    f"{stat_v} / {dec_v}"
+                ),
+                strategy_code=strategy_code,
+                details={
+                    "statistical_verdict": stat_v,
+                    "verdict": dec_v,
+                    "backtest_run_id": backtest_run_id,
+                    "iteration_id": str(iteration_id),
+                    "queue_id": str(queue_id),
+                    "iter": new_iter,
+                    "n_trades": analysis.get("n_trades"),
+                    "pf_95_ci": analysis.get("pf_95_ci"),
+                },
+                related_id=iteration_id if isinstance(iteration_id, UUID) else None,
+                related_type="iteration",
+                redis_client=redis_client,
+            )
+    except Exception as _act_exc:  # noqa: BLE001
+        log.warning("tick.activity_log_failed", step="ITERATION_COMPLETED", error=str(_act_exc))
 
     # ── Step 6: queue next-state ──────────────────────────────────────
     next_actions = await _decide_next_state(

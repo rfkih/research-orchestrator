@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
+
+logger = logging.getLogger(__name__)
 
 import asyncpg
 from fastapi import APIRouter, Depends, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from ..errors import NextAction, OrchestratorError
 from ..repo import hypothesis_audit as audit_repo
 from ..repo import queue as queue_repo
 from ..repo import queue_write
+from ..repo import reviews as reviews_repo
+from ..services.activity_logger import log_activity
 from .deps import get_agent_name, get_db_conn
 from .pagination import Page, decode_cursor, encode_cursor
 
@@ -24,21 +29,68 @@ _VALID_INTERVALS = {"5m", "15m", "1h", "4h"}
 
 
 class SweepParam(BaseModel):
+    """One sweep parameter. Shape depends on the parent ``strategy``:
+
+      * ``grid``: provide ``values`` (list of allowed cells).
+      * ``tpe``  + ``type=float|int``: provide ``low`` and ``high``.
+      * ``tpe``  + ``type=choice``: provide ``values``.
+
+    Validation is enforced at the ``SweepConfig`` level so a single error
+    message can name the strategy that's incompatible with the params.
+    """
+
     name: str = Field(..., min_length=1, max_length=80)
-    values: list[Any] = Field(..., min_length=1, max_length=50)
+    # Grid mode + TPE-choice mode populate this:
+    values: list[Any] | None = Field(None, max_length=50)
+    # TPE mode populates these:
+    type: Literal["float", "int", "choice"] | None = None
+    low: str | None = Field(None, max_length=40)
+    high: str | None = Field(None, max_length=40)
 
 
 class SweepConfig(BaseModel):
-    """Same shape consumed by ``derive_combo`` in services/sweep.py.
+    """Sweep specification. Backwards-compatible: existing callers that
+    omit ``strategy`` get the original grid behaviour and need not pass
+    ``n_trials``/``seed``.
 
-    ``strategy`` is reserved for future non-grid search (e.g. Bayesian);
-    Phase 3 only honours ``grid``. ``iter_budget`` lives on the parent
-    EnqueueRequest and on the queue row itself — duplicating it here
-    would just create a clobber path.
+    TPE (added 2026-05-05) is sample-efficient relative to a dense grid:
+    n=20 TPE trials typically beat a 64-cell grid on a 4-dim search.
+    Use it when param ranges are continuous and you don't want to commit
+    to a coarse grid up front.
     """
 
-    strategy: str = Field("grid", pattern=r"^grid$")
+    strategy: Literal["grid", "tpe"] = "grid"
     params: list[SweepParam] = Field(default_factory=list, max_length=10)
+    # TPE only — ignored for grid (which derives length from cross-product):
+    n_trials: int = Field(20, ge=4, le=200)
+    seed: int = Field(42, ge=0)
+
+    @model_validator(mode="after")
+    def _check_param_shape(self) -> "SweepConfig":
+        if self.strategy == "grid":
+            for p in self.params:
+                if p.values is None or len(p.values) == 0:
+                    raise ValueError(
+                        f"grid param {p.name!r} requires non-empty values"
+                    )
+        elif self.strategy == "tpe":
+            for p in self.params:
+                if p.type is None:
+                    raise ValueError(
+                        f"tpe param {p.name!r} requires type "
+                        "(one of float|int|choice)"
+                    )
+                if p.type == "choice":
+                    if not p.values:
+                        raise ValueError(
+                            f"tpe choice param {p.name!r} requires values"
+                        )
+                else:
+                    if p.low is None or p.high is None:
+                        raise ValueError(
+                            f"tpe numeric param {p.name!r} requires low and high"
+                        )
+        return self
 
 
 class EnqueueRequest(BaseModel):
@@ -57,10 +109,36 @@ class EnqueueRequest(BaseModel):
     # in entry signal, etc.) — gate exists to prevent the autonomous loop
     # from p-hacking by repeatedly re-testing the same dimensions.
     override_discard_gate: bool = False
+    # Paired-agent review gate (added 2026-05-05): /queue refuses unless an
+    # APPROVED plan review exists for (strategy_code, axis_names,
+    # hypothesis_id). hypothesis_id is required when override_review_gate
+    # is False — it identifies which pre-registered HYPOTHESIS the reviewer
+    # endorsed. override_review_gate=true requires operator-level
+    # justification (paste the journal entry id in the request).
+    hypothesis_id: str | None = Field(None, max_length=80)
+    override_review_gate: bool = False
 
 
 class CancelRequest(BaseModel):
     reason: str = Field(..., min_length=1, max_length=500)
+
+
+def resolve_iter_budget(
+    sweep_config: SweepConfig, requested: int
+) -> tuple[int, str | None]:
+    """For TPE sweeps, iter_budget must be >= n_trials or the queue parks
+    early (tick.py _decide_next_state parks at new_iter >= iter_budget).
+    Auto-bump silently and return a note explaining the change.
+
+    Pure function so it's testable without spinning up the handler.
+    """
+    if sweep_config.strategy == "tpe" and requested < sweep_config.n_trials:
+        return sweep_config.n_trials, (
+            f"iter_budget auto-bumped from {requested} to "
+            f"{sweep_config.n_trials} to match sweep_config.n_trials "
+            f"(TPE budget exhausts at n_trials, not iter_budget)."
+        )
+    return requested, None
 
 
 @router.get("", response_model=Page)
@@ -151,6 +229,65 @@ async def enqueue(
             return cached
 
     sweep_dict = body.sweep_config.model_dump()
+    effective_iter_budget, iter_budget_note = resolve_iter_budget(
+        body.sweep_config, body.iter_budget
+    )
+
+    # Paired-agent review gate. Reviewer must have posted APPROVED for
+    # the (strategy_code, axis_names, hypothesis_id) tuple before /queue
+    # accepts the sweep. CONDITIONAL_APPROVAL also passes (researcher
+    # acknowledges the warnings).
+    param_names_for_review = [p["name"] for p in sweep_dict.get("params", [])]
+    if param_names_for_review and not body.override_review_gate:
+        if not body.hypothesis_id:
+            raise OrchestratorError(
+                status_code=400,
+                error_code="hypothesis_id_required",
+                message=(
+                    "POST /queue requires hypothesis_id (the journal_id of "
+                    "the pre-registered HYPOTHESIS) so the review gate can "
+                    "find the matching APPROVED verdict. Pass "
+                    "override_review_gate=true with documented justification "
+                    "to bypass."
+                ),
+                retryable=False,
+                hint=(
+                    "Write a HYPOTHESIS journal entry first, request a plan "
+                    "review (POST /reviews/request, target_kind='plan'), wait "
+                    "for APPROVED, then re-submit /queue with hypothesis_id."
+                ),
+            )
+        target_id = reviews_repo.plan_target_id(
+            body.strategy_code, param_names_for_review, body.hypothesis_id
+        )
+        latest = await reviews_repo.fetch_latest_verdict(conn, target_id)
+        sd = (latest or {}).get("structured_data") or {}
+        verdict = sd.get("verdict")
+        if verdict not in ("APPROVED", "CONDITIONAL_APPROVAL"):
+            raise OrchestratorError(
+                status_code=409,
+                error_code="review_required",
+                message=(
+                    f"No APPROVED plan review on file for target_id={target_id}. "
+                    f"Latest verdict: {verdict or 'NONE'}."
+                ),
+                retryable=False,
+                hint=(
+                    "Submit POST /reviews/request with target_kind='plan' and "
+                    "wait for the reviewer agent to post APPROVED. The "
+                    "researcher cannot self-approve."
+                ),
+                next_action=NextAction(
+                    kind="call",
+                    method="POST",
+                    path="/reviews/request",
+                ),
+                details={
+                    "target_id": target_id,
+                    "latest_verdict": verdict,
+                    "hypothesis_id": body.hypothesis_id,
+                },
+            )
 
     # Tier 1 re-discovery gate. Block sweeps that revisit a dimension
     # the agent has already discarded — without this, the autonomous
@@ -200,11 +337,40 @@ async def enqueue(
         sweep_config=sweep_dict,
         hypothesis=body.hypothesis,
         priority=body.priority,
-        iter_budget=body.iter_budget,
+        iter_budget=effective_iter_budget,
         early_stop_on_no_edge=body.early_stop_on_no_edge,
         require_walk_forward=body.require_walk_forward,
         created_by=agent,
     )
+
+    # Activity log: SWEEP_QUEUED (fire-and-forget)
+    try:
+        session_id_str = request.headers.get("X-Session-Id")
+        session_id = UUID(session_id_str) if session_id_str else None
+        redis_client = request.app.state.redis
+        await log_activity(
+            conn,
+            session_id=session_id,
+            agent_name=agent,
+            activity_type="SWEEP_QUEUED",
+            title=f"Sweep queued for {body.strategy_code} ({body.interval_name})",
+            strategy_code=body.strategy_code,
+            details={
+                "queue_id": str(row["queue_id"]),
+                "strategy_code": body.strategy_code,
+                "iter_budget": effective_iter_budget,
+                "sweep_strategy": sweep_dict.get("strategy", "grid"),
+                "interval_name": body.interval_name,
+                "instrument": body.instrument,
+                "hypothesis_id": body.hypothesis_id,
+            },
+            related_id=row["queue_id"] if isinstance(row.get("queue_id"), UUID) else None,
+            related_type="queue",
+            redis_client=redis_client,
+        )
+    except Exception as _act_exc:  # noqa: BLE001
+        logger.warning("Activity log insert failed (non-fatal): %s", _act_exc)
+
     response = {
         **row,
         "next_actions": [
@@ -212,6 +378,8 @@ async def enqueue(
             {"kind": "call", "method": "GET", "path": f"/queue/{row['queue_id']}"},
         ],
     }
+    if iter_budget_note:
+        response["notes"] = [iter_budget_note]
     if idempotency_key:
         await store.put(agent, f"queue:{idempotency_key}", response)
     return response

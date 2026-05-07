@@ -19,6 +19,12 @@ dependencies = [
     "prometheus-client>=0.21,<0.23",
     "structlog>=24.4,<26",
     "python-json-logger>=2.0,<4",
+    # Bayesian search for sweeps (services/sweep.py:next_combo_tpe). Pinned
+    # to a single major; TPESampler API has been stable since 3.x.
+    "optuna>=4.0,<5",
+    # Redis async client — activity pub/sub for real-time frontend streaming.
+    # Optional at runtime: when ORCH_REDIS_URL is unset, publish is skipped.
+    "redis[asyncio]>=5.0",
 ]
 
 [project.optional-dependencies]

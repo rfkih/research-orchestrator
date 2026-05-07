@@ -1,10 +1,13 @@
 #!/usr/bin/env pwsh
 # Phase 3 ETH/USDT data plumbing.
 #
-# Hits the research JVM's /api/v1/historical/backfill?symbol=ETHUSDT&interval=4h
-# endpoint, which is admin-gated. The endpoint fans out to 1h/15m/5m companion
-# warmup for the same 4h date range (~2.4y) and computes FeatureStore indicators
-# for all four intervals. Long-running (20-60 min synchronous).
+# Submits a COVERAGE_REPAIR (mode=warmup) job against the research JVM's
+# /api/v1/historical/jobs endpoint, then polls the job until terminal.
+# Warmup fans out to 1h/15m/5m companion intervals automatically when the
+# requested interval is 4h. Total runtime is typically 20-60 min.
+#
+# (Replaces the earlier script that hit the legacy synchronous /backfill
+# endpoint, which has been retired in favor of the unified job system.)
 #
 # Usage:
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File phase3-eth-backfill.ps1
@@ -30,7 +33,7 @@ $Pass = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
 $LoginBody = @{ email = $Email; password = $Pass } | ConvertTo-Json
 $Pass = $null  # release ASAP
 
-Write-Host "[1/3] Logging in as $Email ..."
+Write-Host "[1/4] Logging in as $Email ..."
 try {
     $LoginResp = Invoke-RestMethod -Method Post `
         -Uri "$TradingBase/api/v1/users/login" `
@@ -43,25 +46,59 @@ try {
 $LoginBody = $null
 
 # ── 2. Pre-flight: confirm ETH currently absent ─────────────────────────────
-Write-Host "[2/3] Pre-flight: checking current ETH coverage ..."
+Write-Host "[2/4] Pre-flight: checking current ETH coverage ..."
 $Pre = Invoke-Expression "psql -h 127.0.0.1 -U postgres -d trading_db -t -A -c `"SELECT COUNT(*) FROM market_data WHERE symbol='$Symbol';`""
 Write-Host "   ETHUSDT market_data rows BEFORE: $Pre"
 
-# ── 3. Fire backfill (long-running, synchronous) ────────────────────────────
+# ── 3. Submit COVERAGE_REPAIR job ───────────────────────────────────────────
 $Started = Get-Date
-Write-Host "[3/3] POST $ResearchBase/api/v1/historical/backfill?symbol=$Symbol&interval=$Interval"
-Write-Host "   This blocks for 20-60 min. Progress visible in research JVM logs."
+$JobBody = @{
+    jobType  = 'COVERAGE_REPAIR'
+    symbol   = $Symbol
+    interval = $Interval
+    params   = @{ mode = 'warmup' }
+} | ConvertTo-Json -Depth 5
+
+Write-Host "[3/4] POST $ResearchBase/api/v1/historical/jobs (COVERAGE_REPAIR warmup)"
 Write-Host "   Started: $Started"
 
 try {
-    $Resp = Invoke-RestMethod -Method Post `
-        -Uri "$ResearchBase/api/v1/historical/backfill?symbol=$Symbol&interval=$Interval" `
-        -WebSession $Sess -TimeoutSec 7200
-    $Done = Get-Date
-    Write-Host "   Done:    $Done  (elapsed $(($Done - $Started).TotalMinutes.ToString('F1')) min)" -ForegroundColor Green
-    $Resp | ConvertTo-Json -Depth 5 | Write-Host
+    $Submitted = Invoke-RestMethod -Method Post `
+        -Uri "$ResearchBase/api/v1/historical/jobs" `
+        -Body $JobBody -ContentType 'application/json' `
+        -WebSession $Sess
 } catch {
-    Write-Host "Backfill failed: $_" -ForegroundColor Red
+    Write-Host "Job submission failed: $_" -ForegroundColor Red
+    exit 1
+}
+
+$JobId = $Submitted.jobId
+Write-Host "   jobId: $JobId"
+
+# ── 4. Poll until terminal (PENDING → RUNNING → SUCCESS/FAILED/CANCELLED) ──
+Write-Host "[4/4] Polling /jobs/$JobId every 30s until terminal ..."
+$Resp = $null
+while ($true) {
+    Start-Sleep -Seconds 30
+    try {
+        $Resp = Invoke-RestMethod -Method Get `
+            -Uri "$ResearchBase/api/v1/historical/jobs/$JobId" `
+            -WebSession $Sess
+    } catch {
+        Write-Host "Polling failed: $_" -ForegroundColor Red
+        exit 1
+    }
+    $elapsed = ((Get-Date) - $Started).TotalMinutes.ToString('F1')
+    Write-Host "   [$elapsed min] status=$($Resp.status) phase=$($Resp.phase) progress=$($Resp.progressDone)/$($Resp.progressTotal)"
+    if ($Resp.status -in @('SUCCESS', 'FAILED', 'CANCELLED')) { break }
+}
+
+$Done = Get-Date
+if ($Resp.status -eq 'SUCCESS') {
+    Write-Host "   Done: $Done  (elapsed $(($Done - $Started).TotalMinutes.ToString('F1')) min)" -ForegroundColor Green
+    $Resp.result | ConvertTo-Json -Depth 5 | Write-Host
+} else {
+    Write-Host "   Job ended with status=$($Resp.status): $($Resp.errorMessage)" -ForegroundColor Red
     exit 1
 }
 

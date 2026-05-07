@@ -11,6 +11,7 @@ the agent can act on (a follow-up endpoint, a doc anchor, a wait + retry).
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Literal
 
 from fastapi import FastAPI, Request, status
@@ -18,6 +19,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
+
+_unhandled_logger = logging.getLogger(__name__)
 
 
 class NextAction(BaseModel):
@@ -128,9 +131,20 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(Exception)
-    async def _unhandled(_: Request, exc: Exception) -> JSONResponse:
-        # Last resort. Logs the traceback elsewhere; envelope is intentionally
-        # opaque — agents must not retry on unknown 500s without a hint.
+    async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
+        # Last resort. logger.exception lands on the
+        # ErrorReporterLoggingHandler installed by configure_logging(),
+        # which ships the row through the reporter — single path, single
+        # row per fingerprint. Don't call reporter.report_exception_async
+        # here too: that would compute a different logger_name and write
+        # a second row for the same crash.
+        _unhandled_logger.exception(
+            "unhandled exception in %s %s",
+            request.method,
+            request.url.path,
+        )
+        # Envelope is intentionally opaque — agents must not retry on
+        # unknown 500s without a hint.
         return _envelope_response(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             ErrorEnvelope(

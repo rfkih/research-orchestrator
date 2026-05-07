@@ -16,6 +16,8 @@ import sys
 import structlog
 
 from .config import Settings
+from .observability.error_reporter import init_reporter
+from .observability.log_handler import ErrorReporterLoggingHandler
 
 
 def configure_logging(settings: Settings) -> None:
@@ -52,7 +54,20 @@ def configure_logging(settings: Settings) -> None:
         )
     )
     root = logging.getLogger()
-    root.handlers = [handler]
+    handlers: list[logging.Handler] = [handler]
+
+    # Initialise the error_log reporter and attach a stdlib logging handler
+    # that ships every ERROR-level record (ours, uvicorn's, asyncpg's,
+    # FastAPI's) to the trading JVM's /api/v1/errors. Empty url → reporter
+    # is created but `enabled=False`, so the handler is a no-op — keeps
+    # the wiring simple without a feature-flag conditional everywhere.
+    reporter = init_reporter(
+        ingest_url=settings.error_ingest_url or None,
+        timeout_s=settings.error_ingest_timeout_s,
+    )
+    handlers.append(ErrorReporterLoggingHandler(reporter))
+
+    root.handlers = handlers
     root.setLevel(settings.log_level)
 
     for noisy in ("uvicorn.access",):

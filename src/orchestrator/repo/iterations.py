@@ -8,6 +8,7 @@ follow-up sweep or graduate a strategy.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -15,6 +16,11 @@ from uuid import UUID
 import asyncpg
 
 from ..errors import OrchestratorError
+
+# PF sentinel used in services/analyze.py when a backtest had no losses.
+# We cap at this value when feeding TPE so the sampler doesn't extrapolate
+# wildly off a single near-perfect cell.
+_TPE_PF_CAP = 10.0
 
 _LEADERBOARD_SORTS = {
     "pf": "(metrics_snapshot->>'profit_factor')::numeric",
@@ -66,6 +72,66 @@ async def list_iterations(
     """
     rows = await conn.fetch(sql, *args)
     return [dict(r) for r in rows]
+
+
+async def fetch_tpe_history_for_queue(
+    conn: asyncpg.Connection, queue_id: UUID
+) -> list[tuple[dict[str, Any], float | None]]:
+    """Past trials for a queue, formatted for ``next_combo_tpe``.
+
+    Returns ``(params, pf | None)`` tuples in creation order:
+      * ``pf`` set → completed trial; TPE adds it as a normal trial.
+      * ``pf`` None → failed trial (JVM crash, backtest FAILED, or n<5
+        trades so PF is uncomputable). TPE adds these as PRUNED so the
+        sampler learns to avoid the region rather than re-suggesting it.
+
+    Joins ``hypothesis_audit`` (queue_id linkage) to
+    ``research_iteration_log`` via LEFT JOIN so failed audits (where
+    iteration_id IS NULL) still appear in history. The ``params_snapshot``
+    is read from whichever side is non-null.
+
+    Sentinel-PF (no losses, ``analyze.PF_INFINITY_SENTINEL``) is capped
+    at ``_TPE_PF_CAP`` so a single anomaly doesn't dominate the sampler.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT COALESCE(il.params_snapshot, ha.params_snapshot) AS params_snapshot,
+               il.metrics_snapshot
+          FROM hypothesis_audit ha
+          LEFT JOIN research_iteration_log il ON il.iteration_id = ha.iteration_id
+         WHERE ha.queue_id = $1
+         ORDER BY ha.created_time ASC
+        """,
+        queue_id,
+    )
+    out: list[tuple[dict[str, Any], float | None]] = []
+    for r in rows:
+        params = dict(r["params_snapshot"] or {})
+        if not params:
+            continue
+        metrics = r["metrics_snapshot"]
+        analysis = metrics.get("analysis") if isinstance(metrics, dict) else None
+        if not isinstance(analysis, dict):
+            # Either iteration_id NULL (failed audit) or no analysis block.
+            # Either way, treat as failed trial.
+            out.append((params, None))
+            continue
+        pf = analysis.get("pf_point_estimate")
+        if pf is None:
+            out.append((params, None))
+            continue
+        try:
+            pf_f = float(pf)
+        except (TypeError, ValueError):
+            out.append((params, None))
+            continue
+        if not math.isfinite(pf_f):
+            out.append((params, None))
+            continue
+        if pf_f >= _TPE_PF_CAP:
+            pf_f = _TPE_PF_CAP
+        out.append((params, pf_f))
+    return out
 
 
 async def get_iteration(

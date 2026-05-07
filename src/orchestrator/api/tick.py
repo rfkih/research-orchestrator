@@ -14,10 +14,12 @@ gets ``empty_queue``).
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
+from ..errors import OrchestratorError
 from ..services.tick import run_tick
 from .deps import get_agent_name
 
@@ -49,11 +51,24 @@ async def post_tick(
         if cached is not None:
             return cached
 
+    session_id_str = request.headers.get("X-Session-Id")
+    try:
+        session_id: UUID | None = UUID(session_id_str) if session_id_str else None
+    except ValueError:
+        raise OrchestratorError(
+            status_code=400,
+            error_code="invalid_session_id",
+            message=f"X-Session-Id is not a valid UUID: {session_id_str!r}",
+            retryable=False,
+        )
+
     result = await run_tick(
         db=request.app.state.db,
         jvm=request.app.state.jvm,
         settings=request.app.state.settings,
         agent_name=agent,
+        session_id=session_id,
+        redis_client=request.app.state.redis,
     )
     response = result.to_dict()
     if idempotency_key:

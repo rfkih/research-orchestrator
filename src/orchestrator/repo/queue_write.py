@@ -70,6 +70,12 @@ async def insert_queue(
 async def claim_next(conn: asyncpg.Connection) -> dict[str, Any] | None:
     """Atomically claim the next PENDING queue row.
 
+    Returns ``started_at`` so callers can fence later writes against
+    the reaper: if a slow tick comes back to write the iteration_log
+    AFTER ``recover_stuck`` reset the row to PENDING and another tick
+    re-claimed it (with a fresh ``started_at``), the original tick's
+    fence will mismatch and ``attach_iteration`` will affect 0 rows.
+
     PENDING-only (was PENDING/RUNNING). The SKIP LOCKED row-lock only spans
     the claim transaction; once it commits, RUNNING rows are unlocked and a
     second tick would happily reclaim a row already in flight, double-firing
@@ -98,7 +104,7 @@ async def claim_next(conn: asyncpg.Connection) -> dict[str, Any] | None:
         RETURNING claimed.queue_id, claimed.strategy_code, claimed.interval_name,
                   claimed.instrument, claimed.sweep_config, claimed.prior_iter,
                   claimed.iter_budget, claimed.early_stop_on_no_edge,
-                  claimed.require_walk_forward
+                  claimed.require_walk_forward, rq.started_at
         """
     )
     return dict(row) if row else None
@@ -237,20 +243,43 @@ async def attach_iteration(
     *,
     iteration_id: UUID,
     backtest_run_id: UUID,
-) -> None:
+    expected_started_at: Any | None = None,
+) -> int:
     """Stamp the latest iteration / run pointers on the queue row.
+
+    When ``expected_started_at`` is provided, the UPDATE is fenced with
+    ``AND started_at = $4`` so a stale tick that came back after
+    ``recover_stuck`` reset the row affects 0 rows — caller can detect
+    by checking the returned count.
 
     Pairs with the iteration_log INSERT in the same transaction so the
     queue row never points at an iteration that doesn't exist yet.
     """
-    await conn.execute(
-        """
-        UPDATE research_queue
-        SET last_iteration_id = $2,
-            last_run_id = $3
-        WHERE queue_id = $1
-        """,
-        queue_id,
-        iteration_id,
-        backtest_run_id,
-    )
+    if expected_started_at is None:
+        result = await conn.execute(
+            """
+            UPDATE research_queue
+            SET last_iteration_id = $2,
+                last_run_id = $3
+            WHERE queue_id = $1
+            """,
+            queue_id,
+            iteration_id,
+            backtest_run_id,
+        )
+    else:
+        result = await conn.execute(
+            """
+            UPDATE research_queue
+            SET last_iteration_id = $2,
+                last_run_id = $3
+            WHERE queue_id = $1
+              AND started_at = $4
+            """,
+            queue_id,
+            iteration_id,
+            backtest_run_id,
+            expected_started_at,
+        )
+    # asyncpg returns "UPDATE n" — parse the count.
+    return int(result.split()[-1])

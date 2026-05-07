@@ -68,6 +68,23 @@ class Settings(BaseSettings):
     telegram_bot_token: SecretStr | None = None
     telegram_chat_id: str | None = None
 
+    # ── Observability (optional) ────────────────────────────────────────
+    # When set, ERROR-level log records and unhandled exception handlers
+    # ship a row to the trading JVM's /api/v1/errors as
+    # source=research-orch. Empty / None = disabled (no-op reporter).
+    error_ingest_url: str | None = None
+    error_ingest_timeout_s: float = Field(5.0, ge=0.5, le=30.0)
+
+    # ── Redis (optional — activity pub/sub) ─────────────────────────────
+    redis_url: str | None = Field(
+        None,
+        description=(
+            "redis://localhost:6379/0 — when set, activity events are published "
+            "to 'research:activity' channel for real-time frontend streaming. "
+            "Leave unset to disable."
+        ),
+    )
+
     # ── Validators ──────────────────────────────────────────────────────
     @field_validator("auth_token")
     @classmethod
