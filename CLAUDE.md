@@ -16,6 +16,8 @@ PostgreSQL (V28+ schemas owned by trading JVM)      Research JVM (8081)
 
 **Loopback only.** Shared-secret token is defense-in-depth, not the boundary.
 
+**Identity (V54).** Orchestrator authenticates as the dedicated `research-agent@blackheart.local` user (Flyway V54). Prod env: `ORCH_JVM_AUTH_MODE=service_account` + `ORCH_JVM_SERVICE_USER=research-agent@blackheart.local` + `ORCH_JVM_SERVICE_PASSWORD=<set>` + `ORCH_RESEARCH_ACCOUNT_ID=99999999-9999-9999-9999-000000000002`. Dev env: keep `dev_bypass` and pin via `ORCH_JVM_DEV_LOGIN_EMAIL`. Backtests are attributed to the agent's account; admin's live-trading account is never touched by research.
+
 ## Repo layout
 
 ```
@@ -84,7 +86,7 @@ All non-2xx responses use `OrchestratorError` → `{error_code, message, retryab
 ### Tick lifecycle (V11 + Tier 1)
 1. Claim queue row.
 2. Derive next param combo from `sweep_config`.
-3. Resolve account_strategy (412 if missing).
+3. Resolve account_strategy (412 if missing). **V54**: lookup is scoped by `account_id = settings.research_account_id` (env `ORCH_RESEARCH_ACCOUNT_ID`) when set — required in prod so admin-owned rows for the same `strategy_code` are never picked. Unset = legacy "first matching row" fallback for local dev.
 3.5. **Insert `hypothesis_audit` row** (Tier 1, 2026-05-03) — records trial BEFORE backtest submission. `iteration_id` NULL until step 5 backfills. Drives DSR `n_trials` for selection-bias deflation. `count_cumulative_trials` filters `iteration_id IS NOT NULL` so infra failures don't inflate multiplicity.
 4. Submit backtest, poll to terminal.
 5. Analyze (`analyze_run` with `cumulative_trials`), log iteration, attach to queue, **backfill audit verdicts**.

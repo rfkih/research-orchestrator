@@ -110,8 +110,26 @@ class TickResult:
 
 
 async def _resolve_account_strategy_id(
-    conn: asyncpg.Connection, strategy_code: str
+    conn: asyncpg.Connection,
+    strategy_code: str,
+    account_id: UUID | None = None,
 ) -> str | None:
+    """V54: when ``account_id`` is set (prod always sets it via
+    ``ORCH_RESEARCH_ACCOUNT_ID``), pin the lookup to the research-agent's
+    account so admin-owned rows for the same strategy_code can't be picked.
+    When unset (local dev convenience), fall back to the legacy "first
+    matching row" behaviour."""
+    if account_id is not None:
+        return await conn.fetchval(
+            """
+            SELECT account_strategy_id
+            FROM account_strategy
+            WHERE strategy_code = $1 AND account_id = $2 AND is_deleted = false
+            LIMIT 1
+            """,
+            strategy_code,
+            account_id,
+        )
     return await conn.fetchval(
         """
         SELECT account_strategy_id
@@ -124,22 +142,40 @@ async def _resolve_account_strategy_id(
 
 
 async def _resolve_account_strategy(
-    conn: asyncpg.Connection, strategy_code: str
+    conn: asyncpg.Connection,
+    strategy_code: str,
+    account_id: UUID | None = None,
 ) -> dict[str, Any] | None:
     """Like ``_resolve_account_strategy_id`` but also returns the strategy's
     allow_long/allow_short flags so researcher payloads match the production
     direction policy (instead of hardcoding both to True regardless of what
     the strategy actually supports). Result keys: ``account_strategy_id``,
-    ``allow_long``, ``allow_short``."""
-    row = await conn.fetchrow(
-        """
-        SELECT account_strategy_id, allow_long, allow_short
-        FROM account_strategy
-        WHERE strategy_code = $1 AND is_deleted = false
-        LIMIT 1
-        """,
-        strategy_code,
-    )
+    ``allow_long``, ``allow_short``.
+
+    V54: ``account_id`` scopes the lookup to the research-agent account in
+    prod; when unset, retains the legacy "first matching row" fallback for
+    local dev."""
+    if account_id is not None:
+        row = await conn.fetchrow(
+            """
+            SELECT account_strategy_id, allow_long, allow_short
+            FROM account_strategy
+            WHERE strategy_code = $1 AND account_id = $2 AND is_deleted = false
+            LIMIT 1
+            """,
+            strategy_code,
+            account_id,
+        )
+    else:
+        row = await conn.fetchrow(
+            """
+            SELECT account_strategy_id, allow_long, allow_short
+            FROM account_strategy
+            WHERE strategy_code = $1 AND is_deleted = false
+            LIMIT 1
+            """,
+            strategy_code,
+        )
     if row is None:
         return None
     return {
@@ -412,7 +448,9 @@ async def _execute_after_claim(
 
     # ── Step 3: resolve account_strategy_id ───────────────────────────
     async with db.acquire() as conn:
-        as_row = await _resolve_account_strategy(conn, strategy_code)
+        as_row = await _resolve_account_strategy(
+            conn, strategy_code, settings.research_account_id
+        )
     if not as_row:
         note = (
             f"[{datetime.now(timezone.utc).isoformat()}] No account_strategy row "

@@ -207,7 +207,9 @@ async def run_walk_forward(
         full_end = (datetime.now(timezone.utc) - timedelta(days=1)).date()
 
     async with db.acquire() as conn:
-        as_row = await _resolve_account_strategy(conn, strategy_code)
+        as_row = await _resolve_account_strategy(
+            conn, strategy_code, settings.research_account_id
+        )
     if not as_row:
         raise OrchestratorError(
             status_code=412,

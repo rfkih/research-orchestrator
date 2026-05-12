@@ -60,6 +60,10 @@ async def playbook() -> Playbook:
             "X-Session-Id": (
                 "Optional UUID. When provided, activity rows written by /tick, "
                 "/queue, /walk-forward, /reviews/* are grouped under this session. "
+                "When omitted, the orchestrator synthesizes a deterministic "
+                "per-(agent, UTC date) UUID — all calls from one agent on one UTC "
+                "day land in the same session automatically. Pass an explicit UUID "
+                "only if you want finer grouping than per-day. "
                 "Use POST /activity to log SESSION_START, SESSION_END, "
                 "HYPOTHESIS_REGISTERED, PLAN_WRITTEN, GOAL_HIT events. "
                 "GET /activity/sessions returns session-level summaries."
@@ -366,8 +370,9 @@ async def playbook() -> Playbook:
                     "TICK_DISPATCHED, ITERATION_COMPLETED, SWEEP_QUEUED, "
                     "WALK_FORWARD_SUBMITTED, WALK_FORWARD_RESULT, REVIEW_REQUESTED, "
                     "REVIEW_RECEIVED are auto-logged by the orchestrator — do not "
-                    "double-log them. Pass X-Session-Id header on all calls to group "
-                    "activities into a session."
+                    "double-log them. X-Session-Id is optional: when omitted, the "
+                    "orchestrator auto-groups by (agent, UTC date) so the activity "
+                    "log still produces sensible per-day sessions."
                 ),
                 idempotent=False,
             ),
@@ -555,6 +560,7 @@ class AgentState(BaseModel):
     profile: str
     db_ok: bool
     jvm_ok: bool
+    current_session_id: str
     notes: list[str]
     next_actions: list[dict[str, Any]]
 
@@ -578,6 +584,7 @@ async def agent_state(request: Request) -> AgentState:
         profile=request.app.state.settings.profile,
         db_ok=db_ok,
         jvm_ok=jvm_ok,
+        current_session_id=str(request.state.session_id) if request.state.session_id else "",
         notes=notes,
         next_actions=next_actions,
     )

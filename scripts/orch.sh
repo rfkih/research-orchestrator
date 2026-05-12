@@ -72,6 +72,14 @@ CURL_ARGS=(-fsS -X "$METHOD")
 CURL_ARGS+=(-H "X-Orch-Token: ${ORCH_AUTH_TOKEN}")
 CURL_ARGS+=(-H "X-Agent-Name: ${AGENT}")
 
+# Optional session grouping. If ORCH_SESSION_ID is exported the wrapper
+# passes it through, so all calls in this shell land in the same activity
+# session. When unset, the orchestrator synthesizes a deterministic
+# per-(agent, UTC date) session UUID — no header needed for sane grouping.
+if [[ -n "${ORCH_SESSION_ID:-}" ]]; then
+    CURL_ARGS+=(-H "X-Session-Id: ${ORCH_SESSION_ID}")
+fi
+
 if [[ "$METHOD" == "POST" ]]; then
     CURL_ARGS+=(-H "Content-Type: application/json")
     CURL_ARGS+=(--data-binary "@${BODY_FILE}")

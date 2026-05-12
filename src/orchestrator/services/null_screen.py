@@ -331,7 +331,9 @@ async def run_null_screen(
 
     # Resolve account_strategy once so we don't repeat the lookup per draw.
     async with db.acquire() as conn:
-        as_row = await _resolve_account_strategy(conn, strategy_code)
+        as_row = await _resolve_account_strategy(
+            conn, strategy_code, settings.research_account_id
+        )
     if not as_row:
         raise OrchestratorError(
             status_code=412,

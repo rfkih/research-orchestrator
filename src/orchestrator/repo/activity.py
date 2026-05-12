@@ -15,20 +15,20 @@ async def insert_activity(
     related_id: UUID | None = None,
     related_type: str | None = None,
     status: str = "SUCCESS",
-) -> UUID:
-    """Insert one activity row. session_id=None is stored as NULL (agent didn't provide one)."""
+) -> dict:
+    """Insert one activity row. Returns dict with activity_id and created_at."""
     row = await conn.fetchrow(
         """
         INSERT INTO research_agent_activity
             (activity_id, session_id, agent_name, activity_type, strategy_code,
              title, details, related_id, related_type, status)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-        RETURNING activity_id
+        RETURNING activity_id, created_at
         """,
         uuid4(), session_id, agent_name, activity_type, strategy_code,
         title, details, related_id, related_type, status,
     )
-    return row["activity_id"]
+    return {"activity_id": row["activity_id"], "created_at": row["created_at"]}
 
 
 async def list_activities(

@@ -66,6 +66,21 @@ class JvmClient:
 
     async def _mint_jwt(self) -> str:
         """Mint a JWT once per process. Re-mint on 401 from a downstream call."""
+        if self._settings.jvm_auth_mode == "static_jwt":
+            # Pre-minted static JWT. Used when the research JVM runs without
+            # dev-tooling (no /api/v1/dev/login-as endpoint) and no service
+            # account credentials are available. Caller is responsible for
+            # ensuring the token is valid and not expired.
+            static = self._settings.jvm_static_jwt
+            if not static:
+                raise OrchestratorError(
+                    status_code=502,
+                    error_code="jvm_auth_failed",
+                    message="jvm_auth_mode=static_jwt but ORCH_JVM_STATIC_JWT is not set.",
+                    retryable=False,
+                    next_action=NextAction(kind="contact_human"),
+                )
+            return static.get_secret_value()
         if self._settings.jvm_auth_mode == "dev_bypass":
             # Dev backdoor — research JVM exposes /api/v1/dev/login-as on the
             # research profile only. Refused on prod by Settings.assert_prod_safe.

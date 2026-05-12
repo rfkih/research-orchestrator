@@ -32,7 +32,7 @@ async def log_activity(
     can stream events in real time. Silently skipped when ``redis_client`` is None.
     """
     try:
-        activity_id = await activity_repo.insert_activity(
+        row = await activity_repo.insert_activity(
             conn,
             session_id=session_id,
             agent_name=agent_name,
@@ -48,7 +48,7 @@ async def log_activity(
         if redis_client is not None:
             payload = json.dumps(
                 {
-                    "activityId": str(activity_id),
+                    "activityId": str(row["activity_id"]),
                     "sessionId": str(session_id) if session_id else None,
                     "agentName": agent_name,
                     "activityType": activity_type,
@@ -58,6 +58,7 @@ async def log_activity(
                     "relatedId": str(related_id) if related_id else None,
                     "relatedType": related_type,
                     "status": status,
+                    "createdAt": row["created_at"].isoformat(),
                 },
                 default=str,
             )

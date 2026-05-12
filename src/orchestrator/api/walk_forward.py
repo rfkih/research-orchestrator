@@ -125,16 +125,7 @@ async def post_walk_forward(
                 },
             )
 
-    session_id_str = request.headers.get("X-Session-Id")
-    try:
-        session_id: UUID | None = UUID(session_id_str) if session_id_str else None
-    except ValueError:
-        raise OrchestratorError(
-            status_code=400,
-            error_code="invalid_session_id",
-            message=f"X-Session-Id is not a valid UUID: {session_id_str!r}",
-            retryable=False,
-        )
+    session_id = request.state.session_id
     redis_client = request.app.state.redis
 
     # Activity log: WALK_FORWARD_SUBMITTED (fire-and-forget)

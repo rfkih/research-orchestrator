@@ -15,7 +15,15 @@
       "Bash(rm \"C:/MyFiles/blackheart/blackheart/src/main/resources/db/flyway/V43__add_allowed_trend_regimes_to_account_strategy.sql\")",
       "Bash(rm \"C:/MyFiles/blackheart/blackheart/build/resources/main/db/flyway/V43__add_allowed_trend_regimes_to_account_strategy.sql\")",
       "Bash(netstat -ano)",
-      "Bash(findstr ':8081')"
+      "Bash(findstr ':8081')",
+      "Bash(uv run *)",
+      "Bash(Start-Sleep -Seconds 5)",
+      "Bash(Get-Content \"C:\\\\Users\\\\rifki\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Project-research-orchestrator\\\\dc563af5-5c63-48c1-b589-7b88b8d25859\\\\tasks\\\\b3ksb2nun.output\" -Raw)",
+      "PowerShell(uv run *)",
+      "PowerShell(python --version; python -m orchestrator --help 2>&1 | Select-Object -First 5)",
+      "PowerShell(pip *)",
+      "PowerShell(py *)",
+      "PowerShell(python -m orchestrator 2>&1)"
     ]
   }
 }

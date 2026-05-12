@@ -352,7 +352,9 @@ async def run_cross_window(
     motivating_walk_forward_id: UUID | None = None,
 ) -> CrossWindowResult:
     async with db.acquire() as conn:
-        as_row = await _resolve_account_strategy(conn, strategy_code)
+        as_row = await _resolve_account_strategy(
+            conn, strategy_code, settings.research_account_id
+        )
         data_min = await _data_min_start(conn, instrument, interval_name)
     if not as_row:
         raise OrchestratorError(

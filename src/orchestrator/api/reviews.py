@@ -135,12 +135,10 @@ async def submit_review_request(
 
     # Activity log: REVIEW_REQUESTED (fire-and-forget)
     try:
-        session_id_str = request.headers.get("X-Session-Id")
-        session_id: UUID | None = UUID(session_id_str) if session_id_str else None
         redis_client = request.app.state.redis
         await log_activity(
             conn,
-            session_id=session_id,
+            session_id=request.state.session_id,
             agent_name=agent,
             activity_type="REVIEW_REQUESTED",
             title=f"Review requested: {body.target_kind} for {strategy_code}",
@@ -221,12 +219,10 @@ async def submit_review_verdict(
 
     # Activity log: REVIEW_RECEIVED (fire-and-forget)
     try:
-        session_id_str = request.headers.get("X-Session-Id")
-        session_id: UUID | None = UUID(session_id_str) if session_id_str else None
         redis_client = request.app.state.redis
         await log_activity(
             conn,
-            session_id=session_id,
+            session_id=request.state.session_id,
             agent_name=agent,
             activity_type="REVIEW_RECEIVED",
             title=f"Review verdict: {body.verdict} for {body.target_kind} ({body.target_id[:60]})",

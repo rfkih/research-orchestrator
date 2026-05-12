@@ -345,12 +345,10 @@ async def enqueue(
 
     # Activity log: SWEEP_QUEUED (fire-and-forget)
     try:
-        session_id_str = request.headers.get("X-Session-Id")
-        session_id = UUID(session_id_str) if session_id_str else None
         redis_client = request.app.state.redis
         await log_activity(
             conn,
-            session_id=session_id,
+            session_id=request.state.session_id,
             agent_name=agent,
             activity_type="SWEEP_QUEUED",
             title=f"Sweep queued for {body.strategy_code} ({body.interval_name})",

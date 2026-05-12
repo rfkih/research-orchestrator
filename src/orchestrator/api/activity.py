@@ -24,12 +24,19 @@ class ActivityCreate(BaseModel):
 
 @router.post("", status_code=201)
 async def create_activity(body: ActivityCreate, request: Request):
-    agent_name = request.headers.get("X-Agent-Name", "unknown")
+    # Prefer agent identity from auth middleware (already validated) over
+    # the raw header — middleware default is "anonymous" so this matches
+    # the pre-existing fallback semantics.
+    agent_name = getattr(request.state, "agent_name", None) or request.headers.get("X-Agent-Name", "unknown")
+    # Body wins for explicit grouping. Fall back to the middleware-resolved
+    # session_id (header value or per-(agent, day) synth) so SESSION_START
+    # and similar markers never land with NULL session_id.
+    session_id = body.session_id or getattr(request.state, "session_id", None)
     redis_client = request.app.state.redis
     async with request.app.state.db.acquire() as conn:
-        activity_id = await activity_repo.insert_activity(
+        row = await activity_repo.insert_activity(
             conn,
-            session_id=body.session_id,
+            session_id=session_id,
             agent_name=agent_name,
             activity_type=body.activity_type,
             title=body.title,
@@ -44,8 +51,8 @@ async def create_activity(body: ActivityCreate, request: Request):
             import json
             payload = json.dumps(
                 {
-                    "activityId": str(activity_id),
-                    "sessionId": str(body.session_id) if body.session_id else None,
+                    "activityId": str(row["activity_id"]),
+                    "sessionId": str(session_id) if session_id else None,
                     "agentName": agent_name,
                     "activityType": body.activity_type,
                     "strategyCode": body.strategy_code,
@@ -54,6 +61,7 @@ async def create_activity(body: ActivityCreate, request: Request):
                     "relatedId": str(body.related_id) if body.related_id else None,
                     "relatedType": body.related_type,
                     "status": body.status,
+                    "createdAt": row["created_at"].isoformat(),
                 },
                 default=str,
             )
@@ -61,7 +69,7 @@ async def create_activity(body: ActivityCreate, request: Request):
                 await redis_client.publish("research:activity", payload)
             except Exception as _pub_exc:  # noqa: BLE001
                 logger.warning("Redis publish failed (non-fatal): %s", _pub_exc)
-    return {"activity_id": str(activity_id)}
+    return {"activity_id": str(row["activity_id"])}
 
 
 @router.get("")

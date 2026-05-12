@@ -10,6 +10,7 @@ env vars.
 from __future__ import annotations
 
 from typing import Literal
+from uuid import UUID
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -55,7 +56,7 @@ class Settings(BaseSettings):
     # ── JVM ─────────────────────────────────────────────────────────────
     jvm_base_url: str = "http://127.0.0.1:8081"
     jvm_request_timeout_s: float = Field(30.0, ge=1.0, le=300.0)
-    jvm_auth_mode: Literal["dev_bypass", "service_account"] = "dev_bypass"
+    jvm_auth_mode: Literal["dev_bypass", "service_account", "static_jwt"] = "dev_bypass"
     jvm_service_user: str | None = None
     jvm_service_password: SecretStr | None = None
     # Optional: in dev_bypass mode, pin the login-as email so the JWT carries
@@ -63,6 +64,20 @@ class Settings(BaseSettings):
     # user, which may not own the account_strategy rows the tick targets
     # (404 on /api/v1/backtest because runBacktest scopes by JWT userId).
     jvm_dev_login_email: str | None = None
+    # static_jwt mode: provide a pre-minted JWT directly. Used when the
+    # research JVM runs without dev-tooling (so /api/v1/dev/login-as is
+    # absent) and no service_account credentials are available. The token
+    # must be valid for the JVM's HMAC secret and carry a real userId.
+    # Refresh by re-setting this env var and restarting the orchestrator.
+    jvm_static_jwt: SecretStr | None = None
+
+    # ── Research agent identity (V54) ───────────────────────────────────
+    # The account_id of the dedicated research-agent account seeded by
+    # Flyway V54. When set, _resolve_account_strategy filters by this id
+    # so concurrent admin-owned rows for the same strategy_code don't get
+    # picked. Required in prod; in dev, leaving this unset falls back to
+    # the legacy "first matching row" behaviour for local convenience.
+    research_account_id: UUID | None = None
 
     # ── Telegram (optional) ─────────────────────────────────────────────
     telegram_bot_token: SecretStr | None = None
@@ -122,4 +137,11 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "Refusing to start: ORCH_JVM_AUTH_MODE=service_account requires "
                 "ORCH_JVM_SERVICE_USER and ORCH_JVM_SERVICE_PASSWORD."
+            )
+        if self.research_account_id is None:
+            raise RuntimeError(
+                "Refusing to start: ORCH_PROFILE=prod requires ORCH_RESEARCH_ACCOUNT_ID "
+                "(the account_id of the research-agent account seeded by Flyway V54). "
+                "Without it, tick.py would resolve account_strategy rows by "
+                "strategy_code alone and could pick admin-owned rows."
             )

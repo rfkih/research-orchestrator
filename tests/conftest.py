@@ -18,12 +18,17 @@ from orchestrator.main import create_app
 
 @pytest.fixture
 def settings() -> Settings:
+    # research_account_id matches the pinned UUID seeded by Flyway V54 so
+    # tests that exercise tick-account scoping see the agent's account, not
+    # a random admin row.
+    from uuid import UUID as _UUID
     return Settings(
         profile="dev",
         auth_token=SecretStr("test-token"),
         db_dsn=SecretStr("postgresql://x:y@127.0.0.1:5432/none"),
         jvm_base_url="http://127.0.0.1:8081",
         jvm_auth_mode="dev_bypass",
+        research_account_id=_UUID("99999999-9999-9999-9999-000000000002"),
     )
 
 
