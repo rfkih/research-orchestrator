@@ -217,7 +217,8 @@ async def _fetch_run_metrics(conn: asyncpg.Connection, backtest_run_id: str) -> 
                total_losses, win_rate, profit_factor, net_profit, return_pct,
                max_drawdown_pct, max_drawdown_amount, sharpe_ratio, sortino_ratio,
                avg_win, avg_loss, expectancy, initial_capital, ending_balance,
-               asset, interval_name, start_time, end_time
+               asset, interval_name, start_time, end_time,
+               avg_trade_return_pct, geometric_return_pct_at_alloc_90
         FROM backtest_run
         WHERE backtest_run_id = $1
         """,
@@ -557,7 +558,8 @@ async def _execute_after_claim(
     # datetime objects to compute the annualisation factor.
     async with db.acquire() as conn:
         raw_run = await conn.fetchrow(
-            "SELECT start_time, end_time, return_pct, max_drawdown_pct "
+            "SELECT start_time, end_time, return_pct, max_drawdown_pct, "
+            "       geometric_return_pct_at_alloc_90 "
             "FROM backtest_run WHERE backtest_run_id = $1",
             backtest_run_id,
         )
@@ -601,7 +603,11 @@ async def _execute_after_claim(
             )
 
     sample_ok = analyze.sample_size_adequate(analysis["n_trades"])
-    dec_v = analyze.decision_verdict(stat_v, analysis["n_trades"], analysis["slippage_haircut_pnl"])
+    dec_v = analyze.decision_verdict(
+        stat_v,
+        analysis["n_trades"],
+        analysis.get("annualized_geometric_return_pct_at_alloc_90"),
+    )
 
     # metrics_snapshot blends run-level metrics with the analyzer payload.
     metrics_snapshot = {**run_metrics, "analysis": analysis}
@@ -629,8 +635,12 @@ async def _execute_after_claim(
                     "Logged by orchestrator. statistical_verdict via bootstrap PF CI "
                     "(n_resamples=2000); DSR per Bailey & Lopez de Prado 2014 with "
                     f"cumulative_trials={cumulative_trials} (real selection-bias "
-                    f"multiplicity from hypothesis_audit); slippage haircut at "
-                    f"+20bps={analysis['slippage_haircut_pnl'].get('+20bps')}. "
+                    f"multiplicity from hypothesis_audit); decision_verdict gates on "
+                    f"annualized_geom_return_pct_at_alloc_90="
+                    f"{analysis.get('annualized_geometric_return_pct_at_alloc_90')} "
+                    f">= 10.0 (PASS threshold). Slippage at +20bps="
+                    f"{analysis['slippage_haircut_pnl'].get('+20bps')} retained for "
+                    f"audit but no longer gates the verdict. "
                     "Walk-forward (POST /walk-forward) gates final PASS verdict."
                 ),
                 created_by=agent_name,

@@ -100,6 +100,17 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ── blackheart-ingest (compute backend) ─────────────────────────────
+    # Loopback by default — the orchestrator and ingest both live on the
+    # home box. POST /features/{name}/v/{version}/backfill proxies to
+    # ``{ingest_base_url}/compute/{name}/v/{version}``.
+    ingest_base_url: str = "http://127.0.0.1:8089"
+    # 10-min ceiling covers a full-history per-bar feature compute over 5+
+    # years on 1h bars (~38k rows). Most calls return in well under a
+    # minute; the high default keeps the orchestrator from giving up while
+    # the worker is still running.
+    ingest_request_timeout_s: float = Field(600.0, ge=1.0, le=3600.0)
+
     # ── Validators ──────────────────────────────────────────────────────
     @field_validator("auth_token")
     @classmethod

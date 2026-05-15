@@ -38,7 +38,7 @@ research-orchestrator/
 
 | Boundary | Why frozen |
 |---|---|
-| **V11 statistical gate** (`MIN_TRADES_FOR_SIG`, PF 95% CI, PSR/DSR thresholds, +20bps slippage, walk-forward stability cutoffs) | Methodology contract. Loosening to fit a candidate is fraud. |
+| **V11 statistical gate** (`MIN_TRADES_FOR_SIG`, PF 95% CI, PSR/DSR thresholds, walk-forward stability cutoffs) + **V60 economic gate** (`ANNUALIZED_RETURN_PASS_THRESHOLD_PCT=10.0` on annualized geometric_return_pct_at_alloc_90, 365-day year) | Methodology contract. Loosening to fit a candidate is fraud. +20bps slippage check was retired — slippage_haircut_pnl is still logged for audit but no longer gates the verdict. |
 | **Auth shape** (`X-Orch-Token` header, `Settings.assert_prod_safe()`, dev-token sentinel) | Security boundary. |
 | **Settings defaults** (DB role, port, host binding `127.0.0.1`, profile gating) | Loopback-only is deliberate ops choice. |
 | **DB schema** | Migrations live in `blackheart/src/main/resources/db/flyway/`. Orchestrator is a DML-only client. New table = new Flyway migration in the trading-JVM repo. |

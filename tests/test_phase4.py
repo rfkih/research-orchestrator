@@ -171,16 +171,35 @@ def test_statistical_verdict_insufficient_when_ci_spans_one() -> None:
 
 
 def test_decision_verdict_iterate_for_low_n() -> None:
-    assert decision_verdict("SIGNIFICANT_EDGE", 50, {"+20bps": 100.0}) == "ITERATE"
+    # Below n>=100 the verdict is always ITERATE regardless of geom return.
+    assert decision_verdict("SIGNIFICANT_EDGE", 50, 25.0) == "ITERATE"
 
 
 def test_decision_verdict_discard_for_no_edge() -> None:
-    assert decision_verdict("NO_EDGE", 200, {"+20bps": 100.0}) == "DISCARD"
+    # NO_EDGE is terminal; even a great geom return doesn't rescue it
+    # (statistical_verdict already says the PF CI excludes 1 adversely).
+    assert decision_verdict("NO_EDGE", 200, 50.0) == "DISCARD"
 
 
-def test_decision_verdict_pass_requires_positive_slippage_haircut() -> None:
-    assert decision_verdict("SIGNIFICANT_EDGE", 200, {"+20bps": 100.0}) == "PASS"
-    assert decision_verdict("SIGNIFICANT_EDGE", 200, {"+20bps": -5.0}) == "ITERATE"
+def test_decision_verdict_pass_requires_geom_above_threshold() -> None:
+    # SIGNIFICANT_EDGE + annualized geom >= 10% → PASS.
+    assert decision_verdict("SIGNIFICANT_EDGE", 200, 10.0) == "PASS"
+    assert decision_verdict("SIGNIFICANT_EDGE", 200, 25.0) == "PASS"
+    # Below threshold → ITERATE — the edge is real but compounds too slowly
+    # at 90% sizing to justify promotion.
+    assert decision_verdict("SIGNIFICANT_EDGE", 200, 9.99) == "ITERATE"
+    assert decision_verdict("SIGNIFICANT_EDGE", 200, 0.0) == "ITERATE"
+    assert decision_verdict("SIGNIFICANT_EDGE", 200, -100.0) == "ITERATE"
+
+
+def test_decision_verdict_none_geom_iterates() -> None:
+    # Legacy backtest_run rows pre-V60 have no geometric_return column →
+    # analyzer returns None → must NOT pass (no economic signal to read).
+    assert decision_verdict("SIGNIFICANT_EDGE", 200, None) == "ITERATE"
+
+
+def test_decision_verdict_insufficient_evidence_iterates() -> None:
+    assert decision_verdict("INSUFFICIENT_EVIDENCE", 200, 50.0) == "ITERATE"
 
 
 def test_sample_size_adequate_at_threshold() -> None:

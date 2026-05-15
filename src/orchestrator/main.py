@@ -14,12 +14,15 @@ from fastapi import FastAPI
 from .api.activity import router as activity_router
 from .api.agent import router as agent_router
 from .api.cross_window import router as cross_window_router
+from .api.features import router as features_router
 from .api.health import router as health_router
 from .api.iterations import router as iterations_router
 from .api.journal import router as journal_router
 from .api.json_response import TypedJSONResponse
+from .api.models import router as models_router
 from .api.null_screen import router as null_screen_router
 from .api.queue import router as queue_router
+from .api.raw import router as raw_router
 from .api.reviews import router as reviews_router
 from .api.tick import router as tick_router
 from .api.verdict_drift import router as verdict_drift_router
@@ -65,6 +68,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(null_screen_router)
     app.include_router(reviews_router)
     app.include_router(activity_router)
+    app.include_router(features_router)
+    app.include_router(models_router)
+    app.include_router(raw_router)
     return app
 
 

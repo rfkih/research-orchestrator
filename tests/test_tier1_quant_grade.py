@@ -16,13 +16,18 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import pytest
+
 from orchestrator.repo.hypothesis_audit import (
     axis_set_hash,
     param_combo_hash,
 )
 from orchestrator.services.analyze import (
+    ANNUALIZED_RETURN_PASS_THRESHOLD_PCT,
+    DAYS_PER_YEAR,
     DSR_SIGNIFICANCE_THRESHOLD,
     analyze_run,
+    annualize_geometric_return,
     deflated_sharpe_ratio,
     statistical_verdict,
 )
@@ -212,3 +217,84 @@ def test_analyze_run_uses_cumulative_trials_when_provided() -> None:
     # And DSR shrinks with more trials (selection-bias deflation widens)
     assert out_low["dsr"] is not None and out_high["dsr"] is not None
     assert out_high["dsr"] < out_low["dsr"]
+
+
+# ── annualize_geometric_return ────────────────────────────────────────
+
+
+def test_annualize_geometric_return_one_year_passthrough() -> None:
+    # 365 days = exactly 1 year — annualized value equals input.
+    assert annualize_geometric_return(15.0, 365) == pytest.approx(15.0, abs=1e-6)
+
+
+def test_annualize_geometric_return_half_year_doubles_compound() -> None:
+    # 6-month +5% compounds to (1.05)^2 - 1 = 10.25% / yr.
+    out = annualize_geometric_return(5.0, 182)
+    assert out is not None
+    assert out > 10.0 and out < 11.0
+
+
+def test_annualize_geometric_return_multi_year_decays() -> None:
+    # 2-year +25% annualized: (1.25)^0.5 - 1 ≈ 11.8%.
+    out = annualize_geometric_return(25.0, 730)
+    assert out is not None
+    assert 11.0 < out < 13.0
+
+
+def test_annualize_geometric_return_ruin_clamps_to_minus_hundred() -> None:
+    # Multiplier <= 0 means the strategy compounded equity through zero
+    # at least once — annualization is meaningless, return ruin sentinel.
+    assert annualize_geometric_return(-100.0, 365) == -100.0
+    assert annualize_geometric_return(-150.0, 365) == -100.0
+
+
+def test_annualize_geometric_return_invalid_inputs_return_none() -> None:
+    assert annualize_geometric_return(None, 365) is None
+    assert annualize_geometric_return(15.0, None) is None
+    assert annualize_geometric_return(15.0, 0) is None
+    assert annualize_geometric_return(15.0, -10) is None
+
+
+def test_annualize_geometric_return_uses_365_day_year() -> None:
+    # Crypto markets are 24/7 — operator directive: 365 calendar days,
+    # not 252 trading days. Encode the contract so it can't drift silently.
+    assert DAYS_PER_YEAR == 365
+
+
+# ── analyze_run surfaces annualized geom + window_days ────────────────
+
+
+def test_analyze_run_includes_annualized_geom_when_run_has_geom() -> None:
+    run = {
+        "start_time": datetime(2024, 1, 1),
+        "end_time": datetime(2025, 1, 1),
+        "return_pct": 30.0,
+        "max_drawdown_pct": 5.0,
+        "geometric_return_pct_at_alloc_90": 25.0,
+    }
+    out = analyze_run(run, _trades_with_clear_edge(150))
+    assert out["window_days"] == 366  # 2024 was a leap year
+    assert out["geometric_return_pct_at_alloc_90"] == pytest.approx(25.0, abs=1e-6)
+    # Slightly under 25 because the window is 366 days, not exactly 365.
+    annualized = out["annualized_geometric_return_pct_at_alloc_90"]
+    assert annualized is not None
+    assert 24.0 < annualized < 25.0
+
+
+def test_analyze_run_handles_missing_geom_column() -> None:
+    # Legacy backtest_run rows pre-V60 don't carry the column.
+    run = {
+        "start_time": datetime(2024, 1, 1),
+        "end_time": datetime(2025, 1, 1),
+        "return_pct": 30.0,
+        "max_drawdown_pct": 5.0,
+    }
+    out = analyze_run(run, _trades_with_clear_edge(150))
+    assert out["geometric_return_pct_at_alloc_90"] is None
+    assert out["annualized_geometric_return_pct_at_alloc_90"] is None
+
+
+def test_pass_threshold_constant_is_ten_percent() -> None:
+    # CLAUDE.md profitability bar — encode the contract so a stray edit
+    # to the constant doesn't silently change which strategies promote.
+    assert ANNUALIZED_RETURN_PASS_THRESHOLD_PCT == 10.0

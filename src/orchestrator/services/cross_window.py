@@ -64,9 +64,11 @@ MIN_TOTAL_TRADES = 100
 # exclude from the % positive numerator AND denominator.
 MIN_TRADES_PER_WINDOW = 30
 
-# Slippage haircut bps used for the "net positive" gate. Matches the
-# +20bps decision_verdict gate in analyze.py — a window is "net positive"
-# only if it survives realistic execution costs.
+# Slippage haircut bps used for the "net positive" gate. Cross-window
+# evaluates ROBUSTNESS (does the edge hold across regimes), distinct from
+# the main tick's economic gate (V60+ uses annualized geometric_return ≥
+# 10%/yr at 90% sizing — see analyze.decision_verdict). A window is "net
+# positive" only if its slippage-adjusted PnL clears zero at this haircut.
 SLIPPAGE_GATE_BPS = 20
 
 # Disclosure note attached to every aggregate. The +20bps haircut is

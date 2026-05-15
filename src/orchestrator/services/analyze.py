@@ -34,6 +34,18 @@ from typing import Any, Iterable
 MIN_TRADES_FOR_SIG = 100
 PF_INFINITY_SENTINEL = 9999.0
 
+# Annualized compounded-return threshold for the economic PASS gate. Strategies
+# clearing the V11 statistical gate must ALSO compound to at least this much
+# per year at 90% sizing to be worth keeping. Mirrors CLAUDE.md's headline
+# "10%/yr net after fees+slippage" profitability bar — a strategy below this
+# can have real edge yet still not deserve real capital.
+ANNUALIZED_RETURN_PASS_THRESHOLD_PCT = 10.0
+
+# Calendar days per year. Crypto markets trade 24/7 so we use 365 rather
+# than 252 trading days. Plain integer per operator decision — leap-year
+# drift is sub-percent and doesn't move the PASS/ITERATE boundary.
+DAYS_PER_YEAR = 365
+
 
 # ── Coercions ─────────────────────────────────────────────────────────
 
@@ -318,6 +330,48 @@ def regime_stratify(trades: Iterable[dict[str, Any]]) -> dict[str, dict[str, dic
     return {"by_trend_regime": fmt(by_regime), "by_quarter": fmt(by_quarter)}
 
 
+# ── Annualization ─────────────────────────────────────────────────────
+
+
+def annualize_geometric_return(
+    geometric_return_pct: float | None, days: int | None
+) -> float | None:
+    """Annualize a cumulative geometric return over a backtest window.
+
+    ``geometric_return_pct`` is the persisted
+    ``backtest_run.geometric_return_pct_at_alloc_90`` — the compounded equity
+    multiplier minus one, in percent, assuming every trade was sized at 90%
+    of equity. We extrapolate the same compounding rate to one year:
+
+    .. code-block:: text
+
+        multiplier = 1 + geom/100
+        annualized_multiplier = multiplier ^ (365 / days)
+        annualized_geom_pct = (annualized_multiplier - 1) * 100
+
+    Edge cases:
+
+    * ``None`` input or ``days <= 0`` → ``None`` (caller must decide; we don't
+      fabricate a number).
+    * ``multiplier <= 0`` (ruin: at least one trade compounded the equity
+      through zero) → ``-100.0`` regardless of window. A ruined strategy is
+      ruined whether the window was a month or a decade.
+    * ``days < 30`` produces wildly extrapolated values — caller is responsible
+      for not gating on those (the V11 ``n>=100`` requirement makes <30 day
+      backtests rare anyway, but we don't clamp here).
+    """
+    if geometric_return_pct is None or days is None or days <= 0:
+        return None
+    multiplier = 1.0 + (geometric_return_pct / 100.0)
+    if multiplier <= 0.0:
+        return -100.0
+    years = days / DAYS_PER_YEAR
+    if years <= 0:
+        return None
+    annualized_multiplier = multiplier ** (1.0 / years)
+    return (annualized_multiplier - 1.0) * 100.0
+
+
 # ── Composite verdict ─────────────────────────────────────────────────
 
 
@@ -392,12 +446,13 @@ def analyze_run(
 
     # Annualisation factor: trades/year. Approximation matches the bash analyzer.
     ann_factor: float | None = None
+    window_days: int | None = None
     start = run.get("start_time")
     end = run.get("end_time")
-    if isinstance(start, datetime) and isinstance(end, datetime) and n > 0:
-        days = (end - start).days
-        if days > 0:
-            ann_factor = (365 / days) * n
+    if isinstance(start, datetime) and isinstance(end, datetime):
+        window_days = (end - start).days
+        if window_days > 0 and n > 0:
+            ann_factor = (DAYS_PER_YEAR / window_days) * n
 
     sr = sharpe_ratio(pnls, ann_factor)
     sortino = sortino_ratio(pnls, ann_factor)
@@ -414,6 +469,12 @@ def analyze_run(
     return_pct = _f(run.get("return_pct"))
     max_dd = _f(run.get("max_drawdown_pct"))
     calmar = (return_pct / max_dd) if (return_pct and max_dd and max_dd > 0) else None
+
+    # V60 — sizing-independent compounding metric. Annualise so the gate
+    # operates on a window-invariant number (a 6-month backtest at +6%
+    # geom maps to ~12.4%/yr; a 2-year backtest at +25% maps to ~11.8%/yr).
+    geom_return_pct = _f(run.get("geometric_return_pct_at_alloc_90"))
+    annualized_geom_pct = annualize_geometric_return(geom_return_pct, window_days)
 
     slippage = slippage_sensitivity(trades, slippage_scenarios)
     regimes = regime_stratify(trades)
@@ -436,24 +497,57 @@ def analyze_run(
         "statistical_verdict": stat,
         "regimes": regimes,
         "ann_factor": round(ann_factor, 4) if ann_factor else None,
+        "window_days": window_days,
+        "geometric_return_pct_at_alloc_90": (
+            round(geom_return_pct, 4) if geom_return_pct is not None else None
+        ),
+        "annualized_geometric_return_pct_at_alloc_90": (
+            round(annualized_geom_pct, 4) if annualized_geom_pct is not None else None
+        ),
     }
 
 
-def decision_verdict(stat_verdict: str, n: int, slippage: dict[str, float]) -> str:
-    """Map statistical verdict + slippage check → decision verdict.
+def decision_verdict(
+    stat_verdict: str,
+    n: int,
+    annualized_geom_return_pct: float | None,
+) -> str:
+    """Map statistical verdict + annualized compounded return → decision verdict.
 
-    PASS requires statistical verdict SIGNIFICANT_EDGE *and* +20bps PnL > 0.
-    Below n>=100 we always ITERATE (more data needed). NO_EDGE → DISCARD.
+    PASS requires:
+
+    1. ``n >= 100`` trades (statistical floor).
+    2. ``statistical_verdict == SIGNIFICANT_EDGE`` (PF 95% CI lower > 1.0
+       AND DSR >= 0.95).
+    3. ``annualized_geometric_return_pct_at_alloc_90 >= 10.0`` — the
+       economic threshold. Replaces the prior ``+20bps slippage net > 0``
+       gate. A statistically-significant edge that compounds below 10%/yr
+       at 90% sizing isn't worth the operational overhead of promoting.
+
+    The geometric return number is window-invariant (annualised), sizing-
+    independent (per-trade rate, not capital-based), and inherits the
+    ruin clamp from the underlying compounding — a strategy with even one
+    -100%+ step gets ``-100%`` annualised and fails the gate cleanly.
+
+    Outcomes:
+
+    * ``n < 100`` → ``ITERATE`` (more data needed).
+    * ``NO_EDGE`` → ``DISCARD``.
+    * ``SIGNIFICANT_EDGE`` and annualized geom ``>= 10%`` → ``PASS``.
+    * ``SIGNIFICANT_EDGE`` but annualized geom ``< 10%`` (incl. ``None``)
+      → ``ITERATE`` — the edge is real but the magnitude doesn't justify
+      promotion at 90% sizing; refining parameters may lift it.
+    * Anything else (e.g. ``INSUFFICIENT_EVIDENCE``) → ``ITERATE``.
     """
     if n < MIN_TRADES_FOR_SIG:
         return "ITERATE"
     if stat_verdict == "NO_EDGE":
         return "DISCARD"
     if stat_verdict == "SIGNIFICANT_EDGE":
-        # Slippage gate: live trading takes 10-30 bps; if +20 turns negative
-        # the strategy is borderline regardless of point PF.
-        slip_20 = slippage.get("+20bps")
-        if slip_20 is None or slip_20 <= 0:
+        if (
+            annualized_geom_return_pct is None
+            or annualized_geom_return_pct < ANNUALIZED_RETURN_PASS_THRESHOLD_PCT
+        ):
             return "ITERATE"
         return "PASS"
     return "ITERATE"

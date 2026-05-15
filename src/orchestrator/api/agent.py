@@ -400,6 +400,138 @@ async def playbook() -> Playbook:
                 ),
                 idempotent=True,
             ),
+            PlaybookCapability(
+                name="list_features",
+                method="GET",
+                path="/features",
+                purpose=(
+                    "List rows in feature_registry. Filters: family "
+                    "(macro/positioning/flow/market_structure/sentiment/label/...), "
+                    "status, label_direction (forward/backward/null). "
+                    "Offset-paginated (limit, offset). Read this on cold-boot "
+                    "before designing a feature-driven strategy to see what's "
+                    "already computed vs what would need a backfill."
+                ),
+                idempotent=True,
+            ),
+            PlaybookCapability(
+                name="get_feature",
+                method="GET",
+                path="/features/{name}/v/{version}",
+                purpose=(
+                    "Registry spec + coverage stats for one (name, version). "
+                    "Coverage includes row_count, earliest_ts, latest_ts, "
+                    "distinct_symbols, distinct_intervals — read this to decide "
+                    "if a backfill is needed before referencing the feature in a "
+                    "sweep_config."
+                ),
+                idempotent=True,
+            ),
+            PlaybookCapability(
+                name="feature_sample",
+                method="GET",
+                path="/features/{name}/v/{version}/sample",
+                purpose=(
+                    "Most-recent N rows from feature_values for one (name, "
+                    "version), DESC by ts (default n=100, max 1000). Use "
+                    "symbol/interval to scope per-bar features. Quick sanity "
+                    "check on what the transformer actually emits."
+                ),
+                idempotent=True,
+            ),
+            PlaybookCapability(
+                name="list_feature_runs",
+                method="GET",
+                path="/features/runs",
+                purpose=(
+                    "List recent feature_compute_run rows ordered by "
+                    "started_at DESC. Filters: feature_name, version, status "
+                    "(pending/running/done/failed/cancelled). Use this to see "
+                    "if a backfill is still in flight or to find the run_id "
+                    "of the latest compute for an audit."
+                ),
+                idempotent=True,
+            ),
+            PlaybookCapability(
+                name="get_feature_run",
+                method="GET",
+                path="/features/runs/{run_id}",
+                purpose=(
+                    "Single feature_compute_run audit row. Returns "
+                    "range_start, range_end, symbol, interval, status, "
+                    "rows_written, started_at, finished_at, error_message. "
+                    "Use this to inspect a failed backfill or confirm a "
+                    "compute landed the expected row count."
+                ),
+                idempotent=True,
+            ),
+            PlaybookCapability(
+                name="backfill_feature",
+                method="POST",
+                path="/features/{name}/v/{version}/backfill",
+                purpose=(
+                    "Trigger one feature compute on the blackheart-ingest "
+                    "worker. Synchronous proxy — the orchestrator waits for "
+                    "the worker to finish (default 600s timeout). Body: "
+                    "{start, end, symbol, interval} — symbol+interval are "
+                    "REQUIRED for per-bar features (any feature whose "
+                    "raw_tables=['market_data']). Returns "
+                    "{run_id, rows_written, status, duration_seconds, ...} "
+                    "from the worker; immediately follow with "
+                    "GET /features/runs/{run_id} for the persisted audit row. "
+                    "Idempotency-Key (~24h TTL): success bodies AND "
+                    "deterministic 4xx errors (unknown feature, missing "
+                    "symbol/interval) are cached; transient failures "
+                    "(503 unreachable, 502 compute crash) are NOT cached "
+                    "so retries get a fresh attempt. "
+                    "NOTE: POST /features/register is NOT exposed — new "
+                    "features require a code change in "
+                    "blackheart_ingest.features.definitions + a Flyway "
+                    "migration; deferred to M5."
+                ),
+                idempotent=False,
+            ),
+            PlaybookCapability(
+                name="list_raw_sources",
+                method="GET",
+                path="/raw/sources",
+                purpose=(
+                    "List ml_ingest_schedule rows LEFT JOINed with "
+                    "ml_source_health. One row per (source, symbol) tuple "
+                    "from the schedule; health rows are keyed by source so "
+                    "every symbol-variant of a source shares the same "
+                    "health_status. Per row: source, symbol, "
+                    "cron_expression, lookback_hours, enabled, config, "
+                    "last_run_at, last_success_at, last_error_message, "
+                    "next_run_at, health_status (healthy/degraded/failed/"
+                    "unknown), last_pull_at, consecutive_failures, "
+                    "rows_inserted_total, rejected_pit_violations_total, "
+                    "errors_total, health_message. Use this to confirm an "
+                    "upstream source is wired + healthy before designing "
+                    "a feature that depends on it."
+                ),
+                idempotent=True,
+            ),
+            PlaybookCapability(
+                name="raw_table_coverage",
+                method="GET",
+                path="/raw/{table}/coverage",
+                purpose=(
+                    "Coverage stats for one whitelisted raw table: "
+                    "macro_raw, onchain_raw, news_raw, social_raw. "
+                    "(market_data is NOT in the whitelist — for per-bar "
+                    "features whose raw_tables=['market_data'], rely on "
+                    "GET /features/{name}/v/{version} coverage instead.) "
+                    "Returns one row per (source, series_id): row_count, "
+                    "first_event_time, last_event_time, "
+                    "last_ingestion_time. Optional filters: source, "
+                    "series_id, from, to (event_time window, inclusive). "
+                    "Use this to verify a macro/on-chain/news/social "
+                    "source has the historical depth a feature backfill "
+                    "needs before issuing the compute."
+                ),
+                idempotent=True,
+            ),
         ],
         recipes=[
             PlaybookRecipe(
@@ -538,6 +670,45 @@ async def playbook() -> Playbook:
                     "  'ROBUST'        → strategy passes; promote per graduation rule",
                     "  'OVERFIT'/'INCONSISTENT' → re-design with regularisation, POST /queue",
                     "  'NO_EDGE'/'INSUFFICIENT_EVIDENCE' → abandon or extend window",
+                ],
+            ),
+            PlaybookRecipe(
+                name="feature-coverage-check",
+                when=(
+                    "Designing a strategy that references an ML feature "
+                    "(macro_raw, market_data zscore, label, etc.) — verify the "
+                    "feature exists, is computed for the relevant window, and "
+                    "trigger a backfill if not before enqueuing a sweep."
+                ),
+                steps=[
+                    "GET /features?family=<family> — discover what's registered.",
+                    "GET /features/{name}/v/{version} — read spec + coverage "
+                    "(row_count, first_ts, last_ts). Inspect spec.raw_tables "
+                    "to know which upstream the feature depends on.",
+                    "If coverage gap covers the backtest window:",
+                    "  GET /raw/sources — confirm the upstream source is "
+                    "healthy and has the depth required.",
+                    "  Upstream-coverage check is split by raw_tables[0]:",
+                    "    macro_raw/onchain_raw/news_raw/social_raw -> "
+                    "GET /raw/{raw_table}/coverage?source=<src>&from=<lo>&to=<hi>",
+                    "    market_data (per-bar features) -> no /raw/* endpoint; "
+                    "rely on the GET /features/{name}/v/{version} coverage stats "
+                    "already returned, since market_data is owned by the trading "
+                    "JVM and partitioned by (symbol, interval, ts).",
+                    "  POST /features/{name}/v/{version}/backfill with "
+                    "{start, end, symbol?, interval?} + Idempotency-Key — "
+                    "synchronous, may take minutes for per-bar features. "
+                    "symbol+interval are REQUIRED when spec.symbols / "
+                    "spec.intervals are non-empty.",
+                    "  GET /features/runs/{run_id} — confirm status='done' "
+                    "and rows_written matches expectation. If status='failed', "
+                    "read error_message and adjust window/inputs.",
+                    "GET /features/{name}/v/{version}/sample?n=20 (scope by "
+                    "symbol+interval for per-bar features) — eyeball the "
+                    "most-recent values for sanity (no all-NaN tail, no obvious "
+                    "distribution shift).",
+                    "Now safe to reference the feature in a sweep_config and "
+                    "POST /queue.",
                 ],
             ),
             PlaybookRecipe(

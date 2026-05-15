@@ -92,6 +92,28 @@ def _envelope_response(status_code: int, env: ErrorEnvelope) -> JSONResponse:
     return JSONResponse(status_code=status_code, content=env.model_dump(exclude_none=True))
 
 
+def _sanitize_validation_errors(errors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Strip non-JSON-serializable values from pydantic ``errors()`` output.
+
+    When a ``@field_validator`` raises ``ValueError(...)``, pydantic v2
+    attaches the raw exception object under ``ctx.error``. That breaks
+    ``JSONResponse`` rendering (the exception isn't JSON-serializable)
+    and surfaces as an unhandled 500 from inside the 422 handler — a
+    confusing failure mode where a validator that should reject with
+    422 explodes with 500 instead. We drop the raw exception but keep
+    its message (already present in the top-level ``msg`` field) so
+    the response remains informative without crashing the encoder.
+    """
+    out: list[dict[str, Any]] = []
+    for e in errors:
+        e = dict(e)
+        ctx = e.get("ctx")
+        if isinstance(ctx, dict) and "error" in ctx:
+            e["ctx"] = {k: v for k, v in ctx.items() if k != "error"}
+        out.append(e)
+    return out
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     """Wire every exception path through ``ErrorEnvelope``.
 
@@ -113,7 +135,7 @@ def register_exception_handlers(app: FastAPI) -> None:
                 retryable=False,
                 hint="Fix the fields listed in details.errors and resubmit.",
                 next_action=NextAction(kind="read_doc", doc_anchor="errors.validation_failed"),
-                details={"errors": exc.errors()},
+                details={"errors": _sanitize_validation_errors(exc.errors())},
             ),
         )
 
