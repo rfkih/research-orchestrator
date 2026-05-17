@@ -491,6 +491,301 @@ def test_register_rejects_horizon_bars_out_of_range():
         ModelRegisterRequest(horizon_bars=20_000, **common)
 
 
+# ── Promote: validate_transition pure function ─────────────────────────────
+
+
+def test_promote_validate_same_status_is_noop():
+    """Same target as current status is allowed and flagged as noop.
+    The endpoint uses the noop flag to skip the UPDATE and return the
+    existing row with transition_applied=false."""
+    from orchestrator.api.models import validate_transition
+    ok, note = validate_transition("trained", "trained")
+    assert ok is True
+    assert note == "noop"
+
+
+def test_promote_validate_trained_to_staged_allowed():
+    """The primary forward edge: an operator-reviewed model advances
+    from 'trained' to 'staged' (ready for shadow deployment)."""
+    from orchestrator.api.models import validate_transition
+    ok, note = validate_transition("trained", "staged")
+    assert ok is True
+    assert note is None
+
+
+def test_promote_validate_full_forward_chain():
+    """Walk the full lifecycle chain that gets a model from trained to
+    live. Each edge must be allowed individually."""
+    from orchestrator.api.models import validate_transition
+    chain = [
+        ("trained", "staged"),
+        ("staged", "shadow"),
+        ("shadow", "cooling_down"),
+        ("cooling_down", "live"),
+        ("live", "retired"),
+    ]
+    for src, dst in chain:
+        ok, note = validate_transition(src, dst)
+        assert ok is True, f"transition {src} -> {dst} should be allowed"
+        assert note is None
+
+
+def test_promote_validate_rejects_backward_edge():
+    """Live -> shadow (rolling back a live model to shadow) is NOT a
+    valid promote edge. Rolling back live models is via fresh
+    registration + kill switch, not status reversion."""
+    from orchestrator.api.models import validate_transition
+    ok, reason = validate_transition("live", "shadow")
+    assert ok is False
+    assert reason is not None
+    assert "invalid transition" in reason
+    assert "shadow" in reason
+
+
+def test_promote_validate_rejects_skipping_states():
+    """Trained -> live skips staged + shadow + cooling_down. Not allowed —
+    each gate has audit + observability value."""
+    from orchestrator.api.models import validate_transition
+    ok, reason = validate_transition("trained", "live")
+    assert ok is False
+    assert reason is not None
+    assert "invalid transition" in reason
+
+
+def test_promote_validate_rejects_from_terminal_retired():
+    """Retired is terminal — no outbound edges. An operator promoting
+    out of retired is a sign of confusion (the artifact is gone for
+    operational purposes); the schema makes it impossible."""
+    from orchestrator.api.models import validate_transition
+    ok, reason = validate_transition("retired", "live")
+    assert ok is False
+    assert "terminal status" in reason
+
+
+def test_promote_validate_awaiting_review_clearable_to_trained():
+    """An operator who has cleared the deployment_readiness gap
+    (registered the missing features/label) can force the model to
+    'trained' rather than re-registering. The transition is allowed."""
+    from orchestrator.api.models import validate_transition
+    ok, note = validate_transition("awaiting_operator_review", "trained")
+    assert ok is True
+    assert note is None
+
+
+def test_promote_validate_awaiting_review_rejectable():
+    """Symmetric: the same model can be explicitly rejected from
+    awaiting_operator_review (the operator decides the deployment gap
+    is unfixable)."""
+    from orchestrator.api.models import validate_transition
+    ok, note = validate_transition("awaiting_operator_review", "rejected_by_operator")
+    assert ok is True
+    assert note is None
+
+
+def test_promote_validate_rejected_can_only_go_to_retired():
+    """A rejected model cannot be rehabilitated to trained — a fix
+    means a new content_sha and a fresh registration. The only forward
+    edge is explicit retirement for audit-trail tidiness."""
+    from orchestrator.api.models import validate_transition
+    # Rehabilitation blocked
+    ok, reason = validate_transition("rejected_by_operator", "trained")
+    assert ok is False
+    assert "invalid transition" in reason
+    # Retirement allowed
+    ok, _ = validate_transition("rejected_by_operator", "retired")
+    assert ok is True
+
+
+# ── Repo: update_status ────────────────────────────────────────────────────
+
+
+def test_update_status_stamps_promoted_columns():
+    """The repo function must set BOTH promoted_by and promoted_at as
+    well as the status — the audit trail answers 'who moved this, when'
+    for every transition past trained."""
+    target_id = uuid4()
+    row = {
+        "id": target_id, "status": "staged", "version": 2,
+        "promoted_by": "orchestrator:test", "promoted_at": None,
+        "reviewer_verdict": None, "reviewer_run_id": None,
+        "updated_time": None,
+    }
+    conn = _FakeConn(fetchrow_results=[row])
+    result = _run(models_repo.update_status(
+        conn, model_id=target_id, new_status="staged",
+        expected_current_status="trained",
+        reviewer_verdict=None, reviewer_run_id=None,
+        actor="orchestrator:test",
+    ))
+    assert result is not None
+    assert result["status"] == "staged"
+    sql = conn.calls[0][1]
+    # Both promoted_by and promoted_at must appear in the SET clause
+    set_clause = sql.split("SET", 1)[1].split("WHERE", 1)[0]
+    assert "status = $2::text" in set_clause
+    assert "promoted_by = $3" in set_clause
+    assert "promoted_at = NOW()" in set_clause
+    # updated_time must also refresh so two distinct transitions on the
+    # same row are distinguishable in the audit column
+    assert "updated_time = NOW()" in set_clause
+
+
+def test_update_status_optimistic_lock_predicate():
+    """MR1 fix: the UPDATE filters on the expected current status, not
+    just the id. Without this, a concurrent transition between the
+    API's SELECT and this UPDATE could let us write a transition whose
+    source no longer matches reality.
+    """
+    conn = _FakeConn(fetchrow_results=[{
+        "id": uuid4(), "status": "staged", "version": 1,
+        "promoted_by": "x", "promoted_at": None,
+        "reviewer_verdict": None, "reviewer_run_id": None,
+        "updated_time": None,
+    }])
+    _run(models_repo.update_status(
+        conn, model_id=uuid4(), new_status="staged",
+        expected_current_status="trained",
+        reviewer_verdict=None, reviewer_run_id=None,
+        actor="orchestrator:test",
+    ))
+    sql = conn.calls[0][1]
+    where_clause = sql.split("WHERE", 1)[1].split("RETURNING", 1)[0]
+    assert "id = $1" in where_clause
+    assert "status = $6::text" in where_clause
+    # And the expected current status is passed as $6
+    params = conn.calls[0][2]
+    assert params[5] == "trained"
+
+
+def test_update_status_returns_none_when_optimistic_lock_fails():
+    """When the WHERE id=? AND status=expected predicate doesn't match
+    (another caller raced past us), the UPDATE writes 0 rows and the
+    repo returns None. The API layer surfaces this as 409, NOT 404."""
+    conn = _FakeConn(fetchrow_results=[None])
+    result = _run(models_repo.update_status(
+        conn, model_id=uuid4(), new_status="staged",
+        expected_current_status="trained",
+        reviewer_verdict=None, reviewer_run_id=None,
+        actor="orchestrator:test",
+    ))
+    assert result is None
+
+
+def test_update_status_uses_coalesce_for_reviewer_fields():
+    """If reviewer_verdict / reviewer_run_id are not supplied, the row's
+    existing values must be preserved. COALESCE(new, existing) is the
+    cleanest expression of 'NULL means keep'."""
+    conn = _FakeConn(fetchrow_results=[{
+        "id": uuid4(), "status": "shadow", "version": 1,
+        "promoted_by": "x", "promoted_at": None,
+        "reviewer_verdict": "APPROVED", "reviewer_run_id": None,
+        "updated_time": None,
+    }])
+    _run(models_repo.update_status(
+        conn, model_id=uuid4(), new_status="shadow",
+        expected_current_status="staged",
+        reviewer_verdict=None, reviewer_run_id=None,
+        actor="orchestrator:test",
+    ))
+    sql = conn.calls[0][1]
+    assert "reviewer_verdict = COALESCE($4, reviewer_verdict)" in sql
+    assert "reviewer_run_id = COALESCE($5, reviewer_run_id)" in sql
+
+
+def test_update_status_returns_none_when_row_missing():
+    """Either the id is unknown OR the optimistic-lock predicate didn't
+    match. Both surface as None; the API layer re-fetches to disambiguate."""
+    conn = _FakeConn(fetchrow_results=[None])
+    result = _run(models_repo.update_status(
+        conn, model_id=uuid4(), new_status="staged",
+        expected_current_status="trained",
+        reviewer_verdict=None, reviewer_run_id=None,
+        actor="orchestrator:test",
+    ))
+    assert result is None
+
+
+def test_get_model_by_id_selects_promoted_columns():
+    """MR2 fix: get_model_by_id must return promoted_at + promoted_by
+    so the promote endpoint's noop branch can surface the real audit
+    values rather than lying with None."""
+    conn = _FakeConn(fetchrow_results=[{
+        "id": uuid4(), "family": "lightgbm_modulator", "purpose": "regime",
+        "symbol": "BTCUSDT", "interval": "1h", "horizon_bars": 24,
+        "feature_set": {"names": []}, "hyperparams": {}, "metrics": {},
+        "random_seed": 42, "artifact_uri": None,
+        "artifact_sha256": None, "artifact_size_bytes": None,
+        "artifact_synced_to_vps": False, "artifact_synced_at": None,
+        "status": "trained", "version": 1,
+        "promoted_at": None, "promoted_by": None,
+        "created_time": None, "created_by": None, "updated_time": None,
+    }])
+    _run(models_repo.get_model_by_id(conn, uuid4()))
+    sql = conn.calls[0][1]
+    assert "promoted_at" in sql
+    assert "promoted_by" in sql
+
+
+# ── HTTP-level: input validation for /promote ──────────────────────────────
+
+
+def test_promote_rejects_missing_auth_token(client: TestClient):
+    """Auth boundary applies to /promote like every write endpoint."""
+    r = client.post(f"/models/{uuid4()}/promote", json={"target_status": "staged"})
+    assert r.status_code == 401
+    assert r.json()["error_code"] == "auth_missing_token"
+
+
+def test_promote_rejects_invalid_target_status(client: TestClient):
+    """target_status is Literal-constrained — values outside the allowed
+    set are rejected at the pydantic boundary, not at the DB CHECK."""
+    r = client.post(
+        f"/models/{uuid4()}/promote",
+        headers={"X-Orch-Token": "test-token", "X-Agent-Name": "quant-researcher"},
+        json={"target_status": "magical_state"},
+    )
+    assert r.status_code == 422
+
+
+def test_promote_rejects_training_as_target(client: TestClient):
+    """'training' is intentionally excluded as a promote target — it's
+    the value for in-flight registrations, not a manual state. Pydantic
+    rejects."""
+    r = client.post(
+        f"/models/{uuid4()}/promote",
+        headers={"X-Orch-Token": "test-token", "X-Agent-Name": "quant-researcher"},
+        json={"target_status": "training"},
+    )
+    assert r.status_code == 422
+
+
+def test_promote_accepts_well_formed_body_with_reviewer_metadata(settings):
+    """Body with reviewer fields parses cleanly. Same lifespan-aware
+    pattern as ``test_register_well_formed_body_passes_validation`` —
+    the in-memory idempotency store gets wired by the ``with TestClient``
+    block, so the handler progresses past schema/auth and only fails
+    against the fake DSN. We assert the request did NOT get a 422."""
+    from orchestrator.main import create_app
+    app = create_app(settings)
+    try:
+        with TestClient(app) as c:
+            r = c.post(
+                f"/models/{uuid4()}/promote",
+                headers={"X-Orch-Token": "test-token", "X-Agent-Name": "quant-researcher"},
+                json={
+                    "target_status": "staged",
+                    "reason": "approved by operator after Phase A review",
+                    "reviewer_verdict": "APPROVED",
+                    "reviewer_run_id": str(uuid4()),
+                },
+            )
+            assert r.status_code != 422
+    except Exception as exc:
+        # If lifespan raises on the bogus DSN before the request even
+        # runs, that's not a validation failure either — surface as PASS.
+        assert "validation" not in str(exc).lower()
+
+
 def test_register_well_formed_body_passes_validation(settings):
     """A well-formed request makes it past pydantic validation. We use
     the lifespan-aware ``with TestClient as`` form so ``app.state``

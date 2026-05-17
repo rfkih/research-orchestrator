@@ -17,11 +17,11 @@ from pydantic import BaseModel, Field, model_validator
 
 from ..errors import NextAction, OrchestratorError
 from ..services import null_screen as svc
+from ..services.idempotency import cache_response, replay_cached_response
+from .constants import VALID_INTERVAL_NAMES
 from .deps import get_agent_name
 
 router = APIRouter(prefix="/null-screen", tags=["null-screen"])
-
-_VALID_INTERVALS = {"5m", "15m", "1h", "4h"}
 
 
 class NullScreenParam(BaseModel):
@@ -62,20 +62,17 @@ async def run_null_screen(
     request: Request,
     agent: str = Depends(get_agent_name),
 ) -> dict[str, Any]:
-    if body.interval_name not in _VALID_INTERVALS:
+    if body.interval_name not in VALID_INTERVAL_NAMES:
         raise OrchestratorError(
             status_code=400,
             error_code="bad_interval",
-            message=f"interval_name must be one of {sorted(_VALID_INTERVALS)}.",
+            message=f"interval_name must be one of {sorted(VALID_INTERVAL_NAMES)}.",
             retryable=False,
         )
 
-    idempotency_key = getattr(request.state, "idempotency_key", None)
-    store = request.app.state.idempotency
-    if idempotency_key:
-        cached = await store.get(agent, f"null-screen:{idempotency_key}")
-        if cached is not None:
-            return cached
+    cached, idempotency_key = await replay_cached_response(request, agent, "null-screen")
+    if cached is not None:
+        return cached
 
     db = request.app.state.db
     jvm = request.app.state.jvm
@@ -107,6 +104,5 @@ async def run_null_screen(
             next_action=NextAction(kind="contact_human"),
         ) from e
 
-    if idempotency_key:
-        await store.put(agent, f"null-screen:{idempotency_key}", result)
+    await cache_response(request, agent, "null-screen", idempotency_key, result)
     return result

@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from ..errors import NextAction, OrchestratorError
 from ..repo import journal as journal_repo
+from ..services.idempotency import cache_response, replay_cached_response
 from .deps import get_agent_name, get_db_conn
 from .pagination import Page, decode_cursor_ext, encode_cursor_ext
 
@@ -200,12 +201,9 @@ async def create_journal(
 
     # Idempotency-Key replay — same agent + key returns the cached response so
     # a retried pre-registration of a hypothesis can't double-write the row.
-    idempotency_key = getattr(request.state, "idempotency_key", None)
-    store = request.app.state.idempotency
-    if idempotency_key:
-        cached = await store.get(agent, f"journal:{idempotency_key}")
-        if cached is not None:
-            return cached
+    cached, idempotency_key = await replay_cached_response(request, agent, "journal")
+    if cached is not None:
+        return cached
 
     row = await journal_repo.insert_journal(
         conn,
@@ -227,6 +225,5 @@ async def create_journal(
             {"kind": "call", "method": "GET", "path": f"/journal/{row['journal_id']}"},
         ],
     }
-    if idempotency_key:
-        await store.put(agent, f"journal:{idempotency_key}", response)
+    await cache_response(request, agent, "journal", idempotency_key, response)
     return response

@@ -18,6 +18,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
+from ..services.idempotency import cache_response, replay_cached_response
 from ..services.tick import run_tick
 from .deps import get_agent_name
 
@@ -42,12 +43,9 @@ async def post_tick(
     request: Request,
     agent: str = Depends(get_agent_name),
 ) -> dict[str, Any]:
-    idempotency_key = getattr(request.state, "idempotency_key", None)
-    store = request.app.state.idempotency
-    if idempotency_key:
-        cached = await store.get(agent, f"tick:{idempotency_key}")
-        if cached is not None:
-            return cached
+    cached, idempotency_key = await replay_cached_response(request, agent, "tick")
+    if cached is not None:
+        return cached
 
     result = await run_tick(
         db=request.app.state.db,
@@ -58,6 +56,5 @@ async def post_tick(
         redis_client=request.app.state.redis,
     )
     response = result.to_dict()
-    if idempotency_key:
-        await store.put(agent, f"tick:{idempotency_key}", response)
+    await cache_response(request, agent, "tick", idempotency_key, response)
     return response

@@ -15,6 +15,19 @@ from uuid import UUID
 
 import asyncpg
 
+# Full read shape — every column the agent / dashboard expect when reading
+# a queue row. Keep list_queue and get_queue in lock-step by sourcing both
+# from this constant; otherwise adding a column to V13 means remembering
+# to touch two places, and the GET-by-id payload silently drifts from the
+# list payload.
+_QUEUE_READ_COLUMNS = (
+    "queue_id, priority, strategy_code, interval_name, instrument, "
+    "sweep_config, hypothesis, status, iteration_number, iter_budget, "
+    "early_stop_on_no_edge, require_walk_forward, last_iteration_id, "
+    "last_run_id, final_verdict, walk_forward_id, "
+    "created_time, created_by, started_at, completed_at, notes"
+)
+
 
 async def list_queue(
     conn: asyncpg.Connection,
@@ -43,11 +56,7 @@ async def list_queue(
         )
     args.append(limit)
     sql = f"""
-        SELECT queue_id, priority, strategy_code, interval_name, instrument,
-               sweep_config, hypothesis, status, iteration_number, iter_budget,
-               early_stop_on_no_edge, require_walk_forward, last_iteration_id,
-               last_run_id, final_verdict, walk_forward_id,
-               created_time, created_by, started_at, completed_at, notes
+        SELECT {_QUEUE_READ_COLUMNS}
         FROM research_queue
         WHERE {' AND '.join(where)}
         ORDER BY created_time ASC, queue_id::text ASC
@@ -59,12 +68,8 @@ async def list_queue(
 
 async def get_queue(conn: asyncpg.Connection, queue_id: UUID) -> dict[str, Any] | None:
     row = await conn.fetchrow(
-        """
-        SELECT queue_id, priority, strategy_code, interval_name, instrument,
-               sweep_config, hypothesis, status, iteration_number, iter_budget,
-               early_stop_on_no_edge, require_walk_forward, last_iteration_id,
-               last_run_id, final_verdict, walk_forward_id,
-               created_time, created_by, started_at, completed_at, notes
+        f"""
+        SELECT {_QUEUE_READ_COLUMNS}
         FROM research_queue
         WHERE queue_id = $1
         """,

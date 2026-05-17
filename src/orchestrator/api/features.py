@@ -138,9 +138,6 @@ async def feature_sample(
     }
 
 
-# ── Write endpoints ─────────────────────────────────────────────────────────
-
-
 class FeatureBackfillRequest(BaseModel):
     start: datetime = Field(..., description="ISO datetime (UTC, naive). Window lower bound.")
     end: datetime = Field(..., description="ISO datetime (UTC, naive). Window upper bound.")

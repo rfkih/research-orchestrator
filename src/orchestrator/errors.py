@@ -32,13 +32,18 @@ class NextAction(BaseModel):
     - ``call``         — call ``method`` ``path`` (e.g. GET /agent/state)
     - ``read_doc``     — read ``doc_anchor`` (key into /agent/playbook)
     - ``contact_human``— escalate; the agent should not retry blindly
+    - ``note``         — purely informational; no action required, just
+      surface ``hint`` to the operator (used by terminal-verdict responses
+      like ROBUST walk-forward or NO_EDGE_CROSS_WINDOW where there's
+      nothing else to call)
     """
 
-    kind: Literal["retry", "call", "read_doc", "contact_human"]
+    kind: Literal["retry", "call", "read_doc", "contact_human", "note"]
     method: str | None = None
     path: str | None = None
     wait_s: float | None = None
     doc_anchor: str | None = None
+    hint: str | None = None
 
 
 class ErrorEnvelope(BaseModel):

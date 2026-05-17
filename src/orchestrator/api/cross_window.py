@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from ..services.cross_window import ROBUST_PCT_THRESHOLD, run_cross_window
+from ..services.idempotency import cache_response, replay_cached_response
 from .deps import get_agent_name
 
 router = APIRouter(tags=["cross-window"])
@@ -54,12 +55,9 @@ async def post_cross_window(
     request: Request,
     agent: str = Depends(get_agent_name),
 ) -> dict[str, Any]:
-    idempotency_key = getattr(request.state, "idempotency_key", None)
-    store = request.app.state.idempotency
-    if idempotency_key:
-        cached = await store.get(agent, f"cross:{idempotency_key}")
-        if cached is not None:
-            return cached
+    cached, idempotency_key = await replay_cached_response(request, agent, "cross")
+    if cached is not None:
+        return cached
 
     result = await run_cross_window(
         db=request.app.state.db,
@@ -111,6 +109,5 @@ async def post_cross_window(
         })
     payload["next_actions"] = next_actions
 
-    if idempotency_key:
-        await store.put(agent, f"cross:{idempotency_key}", payload)
+    await cache_response(request, agent, "cross", idempotency_key, payload)
     return payload

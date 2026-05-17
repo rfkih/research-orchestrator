@@ -57,13 +57,17 @@ ORCH_HOST="${ORCH_HOST:-127.0.0.1}"
 ORCH_PORT="${ORCH_PORT:-8082}"
 AGENT="${ORCH_AGENT_NAME:-quant-researcher}"
 
+ENV_FILE="$(dirname "$0")/../.env"
 if [[ -z "${ORCH_AUTH_TOKEN:-}" ]]; then
-    ENV_FILE="$(dirname "$0")/../.env"
     if [[ -f "$ENV_FILE" ]]; then
         ORCH_AUTH_TOKEN="$(grep -E '^ORCH_AUTH_TOKEN=' "$ENV_FILE" | cut -d= -f2-)"
     fi
 fi
 : "${ORCH_AUTH_TOKEN:?ORCH_AUTH_TOKEN must be set (env or .env)}"
+
+# Resolve Python interpreter — prefer env var, then auto-detect.
+# On Windows, 'python3' may be a Microsoft Store stub (exit 9); test with
+# ORCH_PYTHON=/c/Python314/python to override.
 
 [[ "$PATH_AND_QUERY" == /* ]] || PATH_AND_QUERY="/$PATH_AND_QUERY"
 URL="http://${ORCH_HOST}:${ORCH_PORT}${PATH_AND_QUERY}"
@@ -88,8 +92,23 @@ if [[ "$METHOD" == "POST" ]]; then
     fi
 fi
 
+PYTHON_CMD="${ORCH_PYTHON:-}"
+if [[ -z "$PYTHON_CMD" ]]; then
+    # Test python3 — on Windows the Microsoft Store stub exits 9 immediately.
+    # Fall back through python, then known Windows installation paths.
+    if command -v python3 &>/dev/null && python3 --version &>/dev/null; then
+        PYTHON_CMD="python3"
+    elif command -v python &>/dev/null && python --version &>/dev/null; then
+        PYTHON_CMD="python"
+    elif [[ -x "/c/Python314/python" ]]; then
+        PYTHON_CMD="/c/Python314/python"
+    else
+        PYTHON_CMD="python3"
+    fi
+fi
+
 if [[ "$PRETTY" == "1" ]]; then
-    curl "${CURL_ARGS[@]}" "$URL" | python3 -m json.tool
+    curl "${CURL_ARGS[@]}" "$URL" | "$PYTHON_CMD" -m json.tool
 else
     curl "${CURL_ARGS[@]}" "$URL"
 fi

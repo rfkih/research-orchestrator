@@ -28,15 +28,12 @@ class Settings(BaseSettings):
         extra="forbid",  # Misspelled env vars must fail loud, not silently.
     )
 
-    # ── Profile ─────────────────────────────────────────────────────────
     profile: Literal["dev", "prod"] = "dev"
 
-    # ── HTTP surface ────────────────────────────────────────────────────
     host: str = "127.0.0.1"  # Loopback default — service is internal-only.
     port: int = Field(8082, ge=1024, le=65535)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
-    # ── Auth ────────────────────────────────────────────────────────────
     auth_token: SecretStr = Field(
         ...,
         description=(
@@ -45,7 +42,6 @@ class Settings(BaseSettings):
         ),
     )
 
-    # ── Database ────────────────────────────────────────────────────────
     db_dsn: SecretStr = Field(
         ...,
         description="postgresql://blackheart_research:***@host:5432/blackheart",
@@ -53,7 +49,6 @@ class Settings(BaseSettings):
     db_pool_min: int = Field(2, ge=1, le=50)
     db_pool_max: int = Field(10, ge=1, le=100)
 
-    # ── JVM ─────────────────────────────────────────────────────────────
     jvm_base_url: str = "http://127.0.0.1:8081"
     jvm_request_timeout_s: float = Field(30.0, ge=1.0, le=300.0)
     jvm_auth_mode: Literal["dev_bypass", "service_account", "static_jwt"] = "dev_bypass"
@@ -71,7 +66,7 @@ class Settings(BaseSettings):
     # Refresh by re-setting this env var and restarting the orchestrator.
     jvm_static_jwt: SecretStr | None = None
 
-    # ── Research agent identity (V54) ───────────────────────────────────
+    # Research agent identity (V54).
     # The account_id of the dedicated research-agent account seeded by
     # Flyway V54. When set, _resolve_account_strategy filters by this id
     # so concurrent admin-owned rows for the same strategy_code don't get
@@ -79,18 +74,15 @@ class Settings(BaseSettings):
     # the legacy "first matching row" behaviour for local convenience.
     research_account_id: UUID | None = None
 
-    # ── Telegram (optional) ─────────────────────────────────────────────
     telegram_bot_token: SecretStr | None = None
     telegram_chat_id: str | None = None
 
-    # ── Observability (optional) ────────────────────────────────────────
     # When set, ERROR-level log records and unhandled exception handlers
     # ship a row to the trading JVM's /api/v1/errors as
     # source=research-orch. Empty / None = disabled (no-op reporter).
     error_ingest_url: str | None = None
     error_ingest_timeout_s: float = Field(5.0, ge=0.5, le=30.0)
 
-    # ── Redis (optional — activity pub/sub) ─────────────────────────────
     redis_url: str | None = Field(
         None,
         description=(
@@ -100,7 +92,7 @@ class Settings(BaseSettings):
         ),
     )
 
-    # ── blackheart-ingest (compute backend) ─────────────────────────────
+    # blackheart-ingest (compute backend).
     # Loopback by default — the orchestrator and ingest both live on the
     # home box. POST /features/{name}/v/{version}/backfill proxies to
     # ``{ingest_base_url}/compute/{name}/v/{version}``.
@@ -111,7 +103,6 @@ class Settings(BaseSettings):
     # the worker is still running.
     ingest_request_timeout_s: float = Field(600.0, ge=1.0, le=3600.0)
 
-    # ── Validators ──────────────────────────────────────────────────────
     @field_validator("auth_token")
     @classmethod
     def _reject_dev_sentinel_on_prod(cls, v: SecretStr, info) -> SecretStr:
@@ -155,4 +146,60 @@ class Settings(BaseSettings):
                 "(the account_id of the research-agent account seeded by Flyway V54). "
                 "Without it, tick.py would resolve account_strategy rows by "
                 "strategy_code alone and could pick admin-owned rows."
+            )
+
+    def log_dev_mode_warnings(self, logger) -> None:
+        """M7 (2026-05-16) — surface known-dangerous-if-promoted dev defaults.
+
+        ``assert_prod_safe`` refuses to boot a *prod* profile with dev
+        defaults — but a developer can still boot the *dev* profile with
+        every safeguard disabled. If that JVM is then exposed beyond
+        loopback (staging box, Tailscale-shared host, copy-pasted env
+        file), the dev defaults silently become a privilege-escalation
+        path: ``dev_bypass`` JVM auth means the orchestrator
+        authenticates as "the first user" — typically the admin — and
+        every backtest is attributed to that account.
+
+        This method emits a single structured ``WARNING`` per known
+        dev-only setting at startup so the operator sees the gap in
+        their startup logs even when ``ORCH_PROFILE=dev``. No-op on
+        ``ORCH_PROFILE=prod`` (assert_prod_safe has already refused the
+        boot if any of these are unsafe).
+
+        Callers: invoked once from the FastAPI lifespan hook after
+        ``assert_prod_safe``.
+        """
+        if self.profile == "prod":
+            return
+        if self.jvm_auth_mode == "dev_bypass":
+            logger.warning(
+                "orchestrator.dev_warning",
+                detail=(
+                    "ORCH_JVM_AUTH_MODE=dev_bypass — authenticating to the "
+                    "research JVM as the first user via /api/v1/dev/login-as. "
+                    "DO NOT promote this configuration to a shared host. "
+                    "Set ORCH_PROFILE=prod + ORCH_JVM_AUTH_MODE=service_account "
+                    "before exposing this orchestrator beyond loopback."
+                ),
+                jvm_auth_mode=self.jvm_auth_mode,
+                jvm_dev_login_email=self.jvm_dev_login_email,
+            )
+        if self.auth_token.get_secret_value() == DEV_TOKEN_SENTINEL:
+            logger.warning(
+                "orchestrator.dev_warning",
+                detail=(
+                    "ORCH_AUTH_TOKEN is the dev sentinel value. Any caller "
+                    "that knows the sentinel can drive the orchestrator. "
+                    "Generate a real token before exposing beyond loopback: "
+                    "python -c \"import secrets; print(secrets.token_urlsafe(48))\""
+                ),
+            )
+        if self.research_account_id is None:
+            logger.warning(
+                "orchestrator.dev_warning",
+                detail=(
+                    "ORCH_RESEARCH_ACCOUNT_ID is unset — account_strategy "
+                    "lookup falls back to 'first matching row' which can "
+                    "select an admin-owned row on a multi-account host."
+                ),
             )

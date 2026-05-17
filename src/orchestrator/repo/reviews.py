@@ -56,9 +56,6 @@ def graduation_target_id(iteration_id: str | UUID) -> str:
     return f"graduation:{iteration_id}"
 
 
-# ── Writes ────────────────────────────────────────────────────────────
-
-
 async def insert_review_request(
     conn: asyncpg.Connection,
     *,
@@ -156,9 +153,6 @@ async def insert_review_verdict(
             target_id,
         )
     return str(row["journal_id"])
-
-
-# ── Reads ─────────────────────────────────────────────────────────────
 
 
 async def fetch_pending_requests(

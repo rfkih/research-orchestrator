@@ -13,7 +13,6 @@ target_id encoding lives in ``repo/reviews.py``:
 
 from __future__ import annotations
 
-import logging
 from typing import Any, Literal
 from uuid import UUID
 
@@ -24,17 +23,16 @@ from pydantic import BaseModel, Field
 from ..errors import NextAction, OrchestratorError
 from ..repo import reviews as reviews_repo
 from ..services.activity_logger import log_activity
+from ..services.idempotency import cache_response, replay_cached_response
+from ..services.review import Severity
 from .deps import get_agent_name, get_db_conn
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/reviews", tags=["reviews"])
 
-_VALID_TARGET_KIND = {"plan", "graduation"}
-_VALID_VERDICT = {"APPROVED", "CONDITIONAL_APPROVAL", "REJECTED"}
-
-
-# ── Request models ───────────────────────────────────────────────────
+# Allowed target_kind and verdict values live on the Pydantic Literal
+# annotations below (ReviewRequestBody.target_kind, ReviewVerdictBody.verdict)
+# — those drive both schema validation and the OpenAPI doc, so a duplicate
+# frozenset here would just be drift waiting to happen.
 
 
 class PlanRequestPayload(BaseModel):
@@ -60,7 +58,7 @@ class ReviewRequestBody(BaseModel):
 
 class ReviewFindingItem(BaseModel):
     check_name: str
-    severity: Literal["blocker", "warning", "info"]
+    severity: Severity
     passed: bool
     finding: str
     details: dict[str, Any] = Field(default_factory=dict)
@@ -78,9 +76,6 @@ class ReviewVerdictBody(BaseModel):
     strategy_code: str | None = Field(None, max_length=60)
 
 
-# ── POST /reviews/request ────────────────────────────────────────────
-
-
 @router.post("/request", status_code=201)
 async def submit_review_request(
     body: ReviewRequestBody,
@@ -90,12 +85,11 @@ async def submit_review_request(
 ) -> dict[str, Any]:
     """Researcher submits a request for a review. Idempotent on
     Idempotency-Key — a retried request returns the original response."""
-    idempotency_key = getattr(request.state, "idempotency_key", None)
-    store = request.app.state.idempotency
-    if idempotency_key:
-        cached = await store.get(agent, f"review-request:{idempotency_key}")
-        if cached is not None:
-            return cached
+    cached, idempotency_key = await replay_cached_response(
+        request, agent, "review-request"
+    )
+    if cached is not None:
+        return cached
 
     if body.target_kind == "plan":
         if body.plan is None:
@@ -133,25 +127,21 @@ async def submit_review_request(
         requested_by=agent,
     )
 
-    # Activity log: REVIEW_REQUESTED (fire-and-forget)
-    try:
-        redis_client = request.app.state.redis
-        await log_activity(
-            conn,
-            session_id=request.state.session_id,
-            agent_name=agent,
-            activity_type="REVIEW_REQUESTED",
-            title=f"Review requested: {body.target_kind} for {strategy_code}",
-            strategy_code=strategy_code,
-            details={
-                "target_id": target_id,
-                "target_kind": body.target_kind,
-                "journal_id": str(journal_id) if journal_id else None,
-            },
-            redis_client=redis_client,
-        )
-    except Exception as _act_exc:  # noqa: BLE001
-        logger.warning("Activity log insert failed (non-fatal): %s", _act_exc)
+    # Activity log: REVIEW_REQUESTED. log_activity swallows errors internally.
+    await log_activity(
+        conn,
+        session_id=request.state.session_id,
+        agent_name=agent,
+        activity_type="REVIEW_REQUESTED",
+        title=f"Review requested: {body.target_kind} for {strategy_code}",
+        strategy_code=strategy_code,
+        details={
+            "target_id": target_id,
+            "target_kind": body.target_kind,
+            "journal_id": str(journal_id) if journal_id else None,
+        },
+        redis_client=request.app.state.redis,
+    )
 
     response = {
         "journal_id": journal_id,
@@ -176,12 +166,8 @@ async def submit_review_request(
             },
         ],
     }
-    if idempotency_key:
-        await store.put(agent, f"review-request:{idempotency_key}", response)
+    await cache_response(request, agent, "review-request", idempotency_key, response)
     return response
-
-
-# ── POST /reviews ────────────────────────────────────────────────────
 
 
 @router.post("", status_code=201)
@@ -192,12 +178,11 @@ async def submit_review_verdict(
     agent: str = Depends(get_agent_name),
 ) -> dict[str, Any]:
     """Reviewer posts a verdict against a target."""
-    idempotency_key = getattr(request.state, "idempotency_key", None)
-    store = request.app.state.idempotency
-    if idempotency_key:
-        cached = await store.get(agent, f"review-verdict:{idempotency_key}")
-        if cached is not None:
-            return cached
+    cached, idempotency_key = await replay_cached_response(
+        request, agent, "review-verdict"
+    )
+    if cached is not None:
+        return cached
 
     findings = [f.model_dump() for f in body.findings]
     summary = {
@@ -217,28 +202,24 @@ async def submit_review_verdict(
         motivating_request_id=body.motivating_request_id,
     )
 
-    # Activity log: REVIEW_RECEIVED (fire-and-forget)
-    try:
-        redis_client = request.app.state.redis
-        await log_activity(
-            conn,
-            session_id=request.state.session_id,
-            agent_name=agent,
-            activity_type="REVIEW_RECEIVED",
-            title=f"Review verdict: {body.verdict} for {body.target_kind} ({body.target_id[:60]})",
-            strategy_code=body.strategy_code,
-            details={
-                "target_id": body.target_id,
-                "target_kind": body.target_kind,
-                "verdict": body.verdict,
-                "journal_id": str(journal_id) if journal_id else None,
-                "n_blocker_fails": body.summary_n_blocker_fails,
-                "n_warning_fails": body.summary_n_warning_fails,
-            },
-            redis_client=redis_client,
-        )
-    except Exception as _act_exc:  # noqa: BLE001
-        logger.warning("Activity log insert failed (non-fatal): %s", _act_exc)
+    # Activity log: REVIEW_RECEIVED. log_activity swallows errors internally.
+    await log_activity(
+        conn,
+        session_id=request.state.session_id,
+        agent_name=agent,
+        activity_type="REVIEW_RECEIVED",
+        title=f"Review verdict: {body.verdict} for {body.target_kind} ({body.target_id[:60]})",
+        strategy_code=body.strategy_code,
+        details={
+            "target_id": body.target_id,
+            "target_kind": body.target_kind,
+            "verdict": body.verdict,
+            "journal_id": str(journal_id) if journal_id else None,
+            "n_blocker_fails": body.summary_n_blocker_fails,
+            "n_warning_fails": body.summary_n_warning_fails,
+        },
+        redis_client=request.app.state.redis,
+    )
 
     next_actions: list[dict[str, Any]] = []
     if body.target_kind == "plan":
@@ -285,12 +266,8 @@ async def submit_review_verdict(
         "verdict": body.verdict,
         "next_actions": next_actions,
     }
-    if idempotency_key:
-        await store.put(agent, f"review-verdict:{idempotency_key}", response)
+    await cache_response(request, agent, "review-verdict", idempotency_key, response)
     return response
-
-
-# ── GET /reviews/pending ─────────────────────────────────────────────
 
 
 @router.get("/pending")
@@ -301,9 +278,6 @@ async def list_pending_reviews(
     """Reviewer's work queue. Oldest-first."""
     rows = await reviews_repo.fetch_pending_requests(conn, limit=limit)
     return {"items": rows, "count": len(rows)}
-
-
-# ── GET /reviews/by-target ───────────────────────────────────────────
 
 
 @router.get("/by-target")

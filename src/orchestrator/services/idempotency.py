@@ -22,9 +22,12 @@ import json
 import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from ..infra.db import Database
+
+if TYPE_CHECKING:
+    from fastapi import Request
 
 # Tuned for one agent firing daily ticks plus ad-hoc operator curl. 2048
 # entries is generous; entries TTL out so memory stays bounded.
@@ -120,3 +123,48 @@ class PostgresIdempotencyStore:
                 payload,
                 expires_at,
             )
+
+
+# Router-level helpers.
+#
+# Every state-changing POST honours ``Idempotency-Key`` with the same
+# 7-line dance: read the key off request.state, namespace it, ask the
+# store, return on hit, run the work, write the result back. These two
+# helpers collapse that dance to two call sites per handler. The
+# namespace prefix stays per-route so two endpoints can't collide on
+# the same agent + key.
+
+
+async def replay_cached_response(
+    request: "Request", agent: str, key_prefix: str
+) -> tuple[Any | None, str | None]:
+    """Look up a cached response for an Idempotency-Key replay.
+
+    Returns ``(cached_response, idempotency_key)``. If ``cached_response``
+    is not None, return it from the handler directly — the work is
+    already done. The key is passed back so :func:`cache_response` can
+    store the fresh response under it. Both are None when the caller
+    did not send ``Idempotency-Key``.
+    """
+    idempotency_key = getattr(request.state, "idempotency_key", None)
+    if not idempotency_key:
+        return None, None
+    store = request.app.state.idempotency
+    cached = await store.get(agent, f"{key_prefix}:{idempotency_key}")
+    return cached, idempotency_key
+
+
+async def cache_response(
+    request: "Request",
+    agent: str,
+    key_prefix: str,
+    idempotency_key: str | None,
+    value: Any,
+) -> None:
+    """Store a fresh response under the Idempotency-Key. No-op when the
+    caller did not provide a key — the pair-with :func:`replay_cached_response`
+    returns ``None`` as the key in that case, so both calls stay symmetric."""
+    if not idempotency_key:
+        return
+    store = request.app.state.idempotency
+    await store.put(agent, f"{key_prefix}:{idempotency_key}", value)

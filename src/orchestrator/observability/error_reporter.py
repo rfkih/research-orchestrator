@@ -80,8 +80,6 @@ class ErrorReporter:
             except Exception:  # noqa: BLE001
                 pass
 
-    # ── Public API ──────────────────────────────────────────────────────
-
     def report(
         self,
         *,
@@ -181,8 +179,6 @@ class ErrorReporter:
             mdc=mdc,
         )
 
-    # ── Internals ───────────────────────────────────────────────────────
-
     def _build_body(
         self,
         *,
@@ -258,9 +254,6 @@ class ErrorReporter:
             return self._sync_client
 
 
-# ── Helpers ─────────────────────────────────────────────────────────────
-
-
 def _compute_fingerprint(
     logger_name: str, exception_class: str | None, stack: str | None
 ) -> str:
@@ -292,8 +285,6 @@ def _build_mdc(extra: dict[str, str] | None) -> dict[str, str]:
             base[k] = s if len(s) <= 500 else f"{s[:500]}…"
     return base
 
-
-# ── Module-level singleton ──────────────────────────────────────────────
 
 _reporter: ErrorReporter | None = None
 

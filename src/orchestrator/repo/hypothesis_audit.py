@@ -26,9 +26,6 @@ from uuid import UUID
 import asyncpg
 
 
-# ── Hash helpers (pure) ───────────────────────────────────────────────
-
-
 def axis_set_hash(param_names: Iterable[str]) -> str:
     """SHA-256 of the sorted, comma-joined parameter NAMES.
 
@@ -68,9 +65,6 @@ def _canon(v: Any) -> str:
         return str(int(f)) if f.is_integer() else repr(f)
     except (TypeError, ValueError):
         return s
-
-
-# ── Writes ────────────────────────────────────────────────────────────
 
 
 async def insert_audit(
@@ -136,9 +130,6 @@ async def update_audit_verdict(
         statistical_verdict,
         decision_verdict,
     )
-
-
-# ── Reads ─────────────────────────────────────────────────────────────
 
 
 async def count_cumulative_trials(

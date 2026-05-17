@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import UUID
-
-logger = logging.getLogger(__name__)
 
 import asyncpg
 from fastapi import APIRouter, Depends, Query, Request
@@ -19,13 +16,14 @@ from ..repo import queue as queue_repo
 from ..repo import queue_write
 from ..repo import reviews as reviews_repo
 from ..services.activity_logger import log_activity
+from ..services.idempotency import cache_response, replay_cached_response
+from .constants import REVIEW_VERDICTS_PASSING_GATE, VALID_INTERVAL_NAMES
 from .deps import get_agent_name, get_db_conn
 from .pagination import Page, decode_cursor, encode_cursor
 
 router = APIRouter(prefix="/queue", tags=["queue"])
 
 _VALID_STATUS = {"PENDING", "RUNNING", "PARKED", "COMPLETED", "FAILED"}
-_VALID_INTERVALS = {"5m", "15m", "1h", "4h"}
 
 
 class SweepParam(BaseModel):
@@ -210,23 +208,20 @@ async def enqueue(
     conn: asyncpg.Connection = Depends(get_db_conn),
     agent: str = Depends(get_agent_name),
 ) -> dict[str, Any]:
-    if body.interval_name not in _VALID_INTERVALS:
+    if body.interval_name not in VALID_INTERVAL_NAMES:
         raise OrchestratorError(
             status_code=400,
             error_code="bad_interval",
-            message=f"interval_name must be one of {sorted(_VALID_INTERVALS)}.",
+            message=f"interval_name must be one of {sorted(VALID_INTERVAL_NAMES)}.",
             retryable=False,
             hint="Backtest engine ticks 5m; finer granularities will silently miss bars.",
         )
 
     # Idempotency-Key replay: same agent + key returns the original response
     # so a retried enqueue doesn't multiply queue rows.
-    idempotency_key = getattr(request.state, "idempotency_key", None)
-    store = request.app.state.idempotency
-    if idempotency_key:
-        cached = await store.get(agent, f"queue:{idempotency_key}")
-        if cached is not None:
-            return cached
+    cached, idempotency_key = await replay_cached_response(request, agent, "queue")
+    if cached is not None:
+        return cached
 
     sweep_dict = body.sweep_config.model_dump()
     effective_iter_budget, iter_budget_note = resolve_iter_budget(
@@ -263,7 +258,7 @@ async def enqueue(
         latest = await reviews_repo.fetch_latest_verdict(conn, target_id)
         sd = (latest or {}).get("structured_data") or {}
         verdict = sd.get("verdict")
-        if verdict not in ("APPROVED", "CONDITIONAL_APPROVAL"):
+        if verdict not in REVIEW_VERDICTS_PASSING_GATE:
             raise OrchestratorError(
                 status_code=409,
                 error_code="review_required",
@@ -343,31 +338,28 @@ async def enqueue(
         created_by=agent,
     )
 
-    # Activity log: SWEEP_QUEUED (fire-and-forget)
-    try:
-        redis_client = request.app.state.redis
-        await log_activity(
-            conn,
-            session_id=request.state.session_id,
-            agent_name=agent,
-            activity_type="SWEEP_QUEUED",
-            title=f"Sweep queued for {body.strategy_code} ({body.interval_name})",
-            strategy_code=body.strategy_code,
-            details={
-                "queue_id": str(row["queue_id"]),
-                "strategy_code": body.strategy_code,
-                "iter_budget": effective_iter_budget,
-                "sweep_strategy": sweep_dict.get("strategy", "grid"),
-                "interval_name": body.interval_name,
-                "instrument": body.instrument,
-                "hypothesis_id": body.hypothesis_id,
-            },
-            related_id=row["queue_id"] if isinstance(row.get("queue_id"), UUID) else None,
-            related_type="queue",
-            redis_client=redis_client,
-        )
-    except Exception as _act_exc:  # noqa: BLE001
-        logger.warning("Activity log insert failed (non-fatal): %s", _act_exc)
+    # Activity log: SWEEP_QUEUED. log_activity is itself fire-and-forget —
+    # it swallows internal errors so a busted insert can't fail the request.
+    await log_activity(
+        conn,
+        session_id=request.state.session_id,
+        agent_name=agent,
+        activity_type="SWEEP_QUEUED",
+        title=f"Sweep queued for {body.strategy_code} ({body.interval_name})",
+        strategy_code=body.strategy_code,
+        details={
+            "queue_id": str(row["queue_id"]),
+            "strategy_code": body.strategy_code,
+            "iter_budget": effective_iter_budget,
+            "sweep_strategy": sweep_dict.get("strategy", "grid"),
+            "interval_name": body.interval_name,
+            "instrument": body.instrument,
+            "hypothesis_id": body.hypothesis_id,
+        },
+        related_id=row["queue_id"] if isinstance(row.get("queue_id"), UUID) else None,
+        related_type="queue",
+        redis_client=request.app.state.redis,
+    )
 
     response = {
         **row,
@@ -378,8 +370,7 @@ async def enqueue(
     }
     if iter_budget_note:
         response["notes"] = [iter_budget_note]
-    if idempotency_key:
-        await store.put(agent, f"queue:{idempotency_key}", response)
+    await cache_response(request, agent, "queue", idempotency_key, response)
     return response
 
 

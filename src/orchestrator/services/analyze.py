@@ -47,9 +47,6 @@ ANNUALIZED_RETURN_PASS_THRESHOLD_PCT = 10.0
 DAYS_PER_YEAR = 365
 
 
-# ── Coercions ─────────────────────────────────────────────────────────
-
-
 def _f(v: Any) -> float | None:
     if v is None:
         return None
@@ -59,9 +56,6 @@ def _f(v: Any) -> float | None:
         return float(v)
     except (TypeError, ValueError):
         return None
-
-
-# ── PF + bootstrap ────────────────────────────────────────────────────
 
 
 def profit_factor(pnls: list[float]) -> float | None:
@@ -112,9 +106,6 @@ def bootstrap_pf_ci(
         "n_resamples": len(pf_samples),
         "note": None,
     }
-
-
-# ── Sharpe / Sortino / PSR ────────────────────────────────────────────
 
 
 def sharpe_ratio(returns: list[float], ann_factor: float | None = None) -> float | None:
@@ -264,9 +255,6 @@ def deflated_sharpe_ratio(
     return _norm_cdf(z)
 
 
-# ── Slippage sensitivity ──────────────────────────────────────────────
-
-
 def slippage_sensitivity(
     trades: Iterable[dict[str, Any]],
     scenarios: tuple[int, ...] = (5, 10, 20, 50),
@@ -289,9 +277,6 @@ def slippage_sensitivity(
             total += pnl - haircut
         out[f"+{slip_bps}bps"] = round(total, 4)
     return out
-
-
-# ── Regime stratification ─────────────────────────────────────────────
 
 
 def regime_stratify(trades: Iterable[dict[str, Any]]) -> dict[str, dict[str, dict[str, Any]]]:
@@ -328,9 +313,6 @@ def regime_stratify(trades: Iterable[dict[str, Any]]) -> dict[str, dict[str, dic
         }
 
     return {"by_trend_regime": fmt(by_regime), "by_quarter": fmt(by_quarter)}
-
-
-# ── Annualization ─────────────────────────────────────────────────────
 
 
 def annualize_geometric_return(
@@ -370,9 +352,6 @@ def annualize_geometric_return(
         return None
     annualized_multiplier = multiplier ** (1.0 / years)
     return (annualized_multiplier - 1.0) * 100.0
-
-
-# ── Composite verdict ─────────────────────────────────────────────────
 
 
 DSR_SIGNIFICANCE_THRESHOLD = 0.95
@@ -417,9 +396,6 @@ def statistical_verdict(
                 "reason": f"95% CI [{lo}, {hi}] excludes 1.0 adversely"}
     return {"verdict": "INSUFFICIENT_EVIDENCE",
             "reason": f"95% CI [{lo}, {hi}] spans 1.0"}
-
-
-# ── Top-level analyzer ────────────────────────────────────────────────
 
 
 def analyze_run(

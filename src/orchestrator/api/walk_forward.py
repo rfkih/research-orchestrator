@@ -13,7 +13,6 @@ not by request shape) — keep keys unique per logical attempt.
 
 from __future__ import annotations
 
-import logging
 from datetime import date
 from typing import Any
 from uuid import UUID
@@ -24,10 +23,10 @@ from pydantic import BaseModel, Field
 from ..errors import NextAction, OrchestratorError
 from ..repo import reviews as reviews_repo
 from ..services.activity_logger import log_activity
+from ..services.idempotency import cache_response, replay_cached_response
 from ..services.walk_forward import run_walk_forward
+from .constants import REVIEW_VERDICTS_PASSING_GATE
 from .deps import get_agent_name, get_db_conn
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["walk-forward"])
 
@@ -65,12 +64,9 @@ async def post_walk_forward(
     agent: str = Depends(get_agent_name),
     conn=Depends(get_db_conn),
 ) -> dict[str, Any]:
-    idempotency_key = getattr(request.state, "idempotency_key", None)
-    store = request.app.state.idempotency
-    if idempotency_key:
-        cached = await store.get(agent, f"walk:{idempotency_key}")
-        if cached is not None:
-            return cached
+    cached, idempotency_key = await replay_cached_response(request, agent, "walk")
+    if cached is not None:
+        return cached
 
     # Graduation review gate. Walk-forward consumes ~3h of JVM time and
     # is the formal step before promotion. Without an APPROVED reviewer
@@ -98,7 +94,7 @@ async def post_walk_forward(
         latest = await reviews_repo.fetch_latest_verdict(conn, target_id)
         sd = (latest or {}).get("structured_data") or {}
         verdict = sd.get("verdict")
-        if verdict not in ("APPROVED", "CONDITIONAL_APPROVAL"):
+        if verdict not in REVIEW_VERDICTS_PASSING_GATE:
             raise OrchestratorError(
                 status_code=409,
                 error_code="graduation_review_required",
@@ -128,29 +124,27 @@ async def post_walk_forward(
     session_id = request.state.session_id
     redis_client = request.app.state.redis
 
-    # Activity log: WALK_FORWARD_SUBMITTED (fire-and-forget)
-    try:
-        await log_activity(
-            conn,
-            session_id=session_id,
-            agent_name=agent,
-            activity_type="WALK_FORWARD_SUBMITTED",
-            title=f"Walk-forward submitted for {body.strategy_code}",
-            strategy_code=body.strategy_code,
-            details={
-                "motivating_iteration_id": str(body.motivating_iteration_id) if body.motivating_iteration_id else None,
-                "interval_name": body.interval_name,
-                "instrument": body.instrument,
-                "n_folds": body.n_folds,
-                "train_months": body.train_months,
-                "test_months": body.test_months,
-            },
-            related_id=body.motivating_iteration_id,
-            related_type="iteration",
-            redis_client=redis_client,
-        )
-    except Exception as _act_exc:  # noqa: BLE001
-        logger.warning("Activity log insert failed (non-fatal): %s", _act_exc)
+    # Activity logs below: log_activity is itself fire-and-forget — it
+    # swallows internal errors so a busted insert can't fail the request.
+    await log_activity(
+        conn,
+        session_id=session_id,
+        agent_name=agent,
+        activity_type="WALK_FORWARD_SUBMITTED",
+        title=f"Walk-forward submitted for {body.strategy_code}",
+        strategy_code=body.strategy_code,
+        details={
+            "motivating_iteration_id": str(body.motivating_iteration_id) if body.motivating_iteration_id else None,
+            "interval_name": body.interval_name,
+            "instrument": body.instrument,
+            "n_folds": body.n_folds,
+            "train_months": body.train_months,
+            "test_months": body.test_months,
+        },
+        related_id=body.motivating_iteration_id,
+        related_type="iteration",
+        redis_client=redis_client,
+    )
 
     try:
         result = await run_walk_forward(
@@ -171,22 +165,19 @@ async def post_walk_forward(
             motivating_iteration_id=body.motivating_iteration_id,
         )
     except Exception as _wf_exc:
-        try:
-            await log_activity(
-                conn,
-                session_id=session_id,
-                agent_name=agent,
-                activity_type="WALK_FORWARD_RESULT",
-                title=f"Walk-forward failed for {body.strategy_code}",
-                strategy_code=body.strategy_code,
-                details={"error": str(_wf_exc)},
-                related_id=body.motivating_iteration_id,
-                related_type="iteration",
-                status="ERROR",
-                redis_client=redis_client,
-            )
-        except Exception:
-            pass
+        await log_activity(
+            conn,
+            session_id=session_id,
+            agent_name=agent,
+            activity_type="WALK_FORWARD_RESULT",
+            title=f"Walk-forward failed for {body.strategy_code}",
+            strategy_code=body.strategy_code,
+            details={"error": str(_wf_exc)},
+            related_id=body.motivating_iteration_id,
+            related_type="iteration",
+            status="ERROR",
+            redis_client=redis_client,
+        )
         raise
 
     payload = result.to_dict()
@@ -208,31 +199,26 @@ async def post_walk_forward(
         })
     payload["next_actions"] = next_actions
 
-    # Activity log: WALK_FORWARD_RESULT (fire-and-forget)
-    try:
-        await log_activity(
-            conn,
-            session_id=session_id,
-            agent_name=agent,
-            activity_type="WALK_FORWARD_RESULT",
-            title=(
-                f"Walk-forward result for {body.strategy_code}: "
-                f"{result.stability_verdict}"
-            ),
-            strategy_code=body.strategy_code,
-            details={
-                "stability_verdict": result.stability_verdict,
-                "walk_forward_id": payload.get("walk_forward_id"),
-                "motivating_iteration_id": str(body.motivating_iteration_id) if body.motivating_iteration_id else None,
-                "aggregate": payload.get("aggregate"),
-            },
-            related_id=body.motivating_iteration_id,
-            related_type="iteration",
-            redis_client=redis_client,
-        )
-    except Exception as _act_exc:  # noqa: BLE001
-        logger.warning("Activity log insert failed (non-fatal): %s", _act_exc)
+    await log_activity(
+        conn,
+        session_id=session_id,
+        agent_name=agent,
+        activity_type="WALK_FORWARD_RESULT",
+        title=(
+            f"Walk-forward result for {body.strategy_code}: "
+            f"{result.stability_verdict}"
+        ),
+        strategy_code=body.strategy_code,
+        details={
+            "stability_verdict": result.stability_verdict,
+            "walk_forward_id": payload.get("walk_forward_id"),
+            "motivating_iteration_id": str(body.motivating_iteration_id) if body.motivating_iteration_id else None,
+            "aggregate": payload.get("aggregate"),
+        },
+        related_id=body.motivating_iteration_id,
+        related_type="iteration",
+        redis_client=redis_client,
+    )
 
-    if idempotency_key:
-        await store.put(agent, f"walk:{idempotency_key}", payload)
+    await cache_response(request, agent, "walk", idempotency_key, payload)
     return payload

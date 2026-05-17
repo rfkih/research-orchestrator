@@ -48,7 +48,7 @@ class Playbook(BaseModel):
 async def playbook() -> Playbook:
     """Discoverable contract. Public on purpose — no secrets here, only shape."""
     return Playbook(
-        version="1",
+        version="2",
         auth={
             "scheme": "shared-secret",
             "header": "X-Orch-Token",
@@ -532,6 +532,133 @@ async def playbook() -> Playbook:
                 ),
                 idempotent=True,
             ),
+            PlaybookCapability(
+                name="register_model",
+                method="POST",
+                path="/models/register",
+                purpose=(
+                    "Register a trained sub-model artifact in "
+                    "model_registry (V66). Caller (typically the "
+                    "blackheart-train CLI's --register flag) POSTs the "
+                    "training payload's load-bearing fields — the "
+                    "orchestrator does NOT read the pickle off disk. "
+                    "Body: content_sha256 (64-char), artifact_uri, "
+                    "artifact_size_bytes, spec{name,purpose in "
+                    "(regime/positioning/flow/directional/meta_label/"
+                    "stacker), symbol, interval, label_feature, "
+                    "label_version, objective in (binary/regression), "
+                    "train_start, train_end, hyperparams, "
+                    "derived_features}, feature_names, metrics, "
+                    "walk_forward, gauntlet{overall_verdict}, "
+                    "deployment_readiness{deployment_ready, "
+                    "unregistered_input_features, unregistered_label}, "
+                    "horizon_bars (optional override; falls back to a "
+                    "known-label lookup, NULL for unknown), "
+                    "data_fingerprint. Status is DERIVED: gauntlet PASS + "
+                    "deployment_ready=true → 'trained'; PASS + "
+                    "deployment_ready=false → 'awaiting_operator_review'; "
+                    "FAIL → 'rejected_by_operator'; no gauntlet block → "
+                    "'training'. Idempotency-Key (~24h TTL) caches the "
+                    "response; AND content_sha256 is the content-"
+                    "addressed idempotency anchor (same sha always "
+                    "returns the same model_id). Response: model_id, "
+                    "content_sha256, status, version, registered_at, "
+                    "idempotent_replay. 409 on (purpose, symbol, "
+                    "interval, horizon_bars) UNIQUE race."
+                ),
+                idempotent=True,
+            ),
+            PlaybookCapability(
+                name="list_models",
+                method="GET",
+                path="/models",
+                purpose=(
+                    "List model_registry rows with optional filters: "
+                    "status (training/trained/staged/shadow/cooling_down/"
+                    "live/retired/awaiting_operator_review/"
+                    "rejected_by_operator), purpose, symbol, "
+                    "synced (boolean — 'synced=false' answers 'what's "
+                    "registered but not yet rsynced to VPS?', the "
+                    "operator's pre-promotion checklist). Ordered by "
+                    "created_time DESC. Offset-paginated (limit 1-500, "
+                    "offset). Returns {models[], total, limit, offset}."
+                ),
+                idempotent=True,
+            ),
+            PlaybookCapability(
+                name="get_model",
+                method="GET",
+                path="/models/{model_id}",
+                purpose=(
+                    "Read one model_registry row by UUID. Returns the "
+                    "full row including feature_set JSONB, hyperparams, "
+                    "metrics (saved_booster, walk_forward, gauntlet_"
+                    "verdict, data_fingerprint, deployment_readiness), "
+                    "artifact_sha256, artifact_synced_to_vps, status, "
+                    "version, promoted_at, promoted_by, created_time, "
+                    "updated_time. 404 if id unknown."
+                ),
+                idempotent=True,
+            ),
+            PlaybookCapability(
+                name="mark_model_synced",
+                method="POST",
+                path="/models/{model_id}/mark-synced",
+                purpose=(
+                    "Flip artifact_synced_to_vps=true on a model_registry "
+                    "row and set artifact_synced_at. Operator runs the "
+                    "rsync transport manually, then POSTs here to record "
+                    "completion (the orchestrator does NOT itself rsync). "
+                    "Body (all optional, {} valid): remote_path (new "
+                    "artifact_uri; if omitted, the existing URI is "
+                    "preserved), synced_at (defaults to NOW; rejected if "
+                    "more than 5 minutes in the future, MF6 guard). "
+                    "Re-marking refreshes the timestamp (latest wins). "
+                    "Honors Idempotency-Key. Logs a WARNING when applied "
+                    "to a rejected_by_operator row (operationally "
+                    "suspect — rejected artifacts shouldn't be promoted "
+                    "to VPS in the first place)."
+                ),
+                idempotent=True,
+            ),
+            PlaybookCapability(
+                name="promote_model",
+                method="POST",
+                path="/models/{model_id}/promote",
+                purpose=(
+                    "Advance model_registry.status along the V66 "
+                    "lifecycle. State graph (forward-only — no rollback "
+                    "edges; rolling back live models is via fresh "
+                    "registration + kill switch, NOT status reversion):\n"
+                    "  awaiting_operator_review → trained | rejected_by_operator\n"
+                    "  trained                  → staged | rejected_by_operator\n"
+                    "  staged                   → shadow | retired\n"
+                    "  shadow                   → cooling_down | retired\n"
+                    "  cooling_down             → live | retired\n"
+                    "  live                     → retired\n"
+                    "  rejected_by_operator     → retired (no rehab)\n"
+                    "Body: target_status (Literal — 'training' and "
+                    "'awaiting_operator_review' NOT allowed as targets), "
+                    "reason (optional ≤500 char, logged not persisted), "
+                    "reviewer_verdict (optional ≤30 char, COALESCE'd "
+                    "onto row), reviewer_run_id (optional UUID, "
+                    "COALESCE'd). Idempotent in two ways: (1) "
+                    "Idempotency-Key header replays; (2) same target as "
+                    "current status returns transition_applied=false "
+                    "with current promoted_at/promoted_by. SELECT + "
+                    "validate + UPDATE wrapped in a transaction with "
+                    "optimistic locking (WHERE status=expected) — "
+                    "concurrent transition surfaces as 409 "
+                    "'concurrent transition: row status changed after "
+                    "read'. 404 if id unknown. 409 if transition not "
+                    "allowed (response details list valid targets from "
+                    "the current status). Cooldown enforcement (the "
+                    "7-day gate before cooling_down→live per blueprint "
+                    "§ 12) is NOT yet implemented — operator workflow "
+                    "enforces timing for now."
+                ),
+                idempotent=True,
+            ),
         ],
         recipes=[
             PlaybookRecipe(
@@ -709,6 +836,75 @@ async def playbook() -> Playbook:
                     "distribution shift).",
                     "Now safe to reference the feature in a sweep_config and "
                     "POST /queue.",
+                ],
+            ),
+            PlaybookRecipe(
+                name="model-lifecycle",
+                when=(
+                    "An ML sub-model has been trained (blackheart-train "
+                    "CLI ran with --register) and the operator wants to "
+                    "advance it through the V66 status lifecycle: "
+                    "trained → staged → shadow → cooling_down → live. "
+                    "The orchestrator owns writes; the trading JVM reads "
+                    "via direct SELECT on model_registry (V66 grant)."
+                ),
+                steps=[
+                    "GET /models?status=awaiting_operator_review — list "
+                    "rows blocked on a deployment_readiness gap (gauntlet "
+                    "passed but derived features or label aren't in "
+                    "feature_registry yet).",
+                    "GET /models/{model_id} — inspect the row. Check "
+                    "metrics.gauntlet_verdict='PASS', "
+                    "metrics.deployment_readiness.deployment_ready, and "
+                    "metrics.deployment_readiness.unregistered_input_"
+                    "features / unregistered_label.",
+                    "If awaiting_operator_review: either resolve the "
+                    "registry gap (register the missing features/label "
+                    "and re-run --register; idempotent on content_sha256, "
+                    "so a new row is only written if the sha changed), "
+                    "OR force-clear via "
+                    "POST /models/{model_id}/promote {target_status: "
+                    "'trained', reason: '...'} once the gap is "
+                    "addressed. Force-clear is a soft one-way door — "
+                    "you cannot return to awaiting_operator_review.",
+                    "On 'trained': operator rsyncs the artifact to VPS, "
+                    "then POST /models/{model_id}/mark-synced {} (body "
+                    "may be empty; synced_at defaults to NOW). "
+                    "ONLY synced models are visible to the trading JVM's "
+                    "serving path (the read repo filters on "
+                    "artifact_synced_to_vps=true).",
+                    "POST /models/{model_id}/promote "
+                    "{target_status: 'staged', reason: '...', "
+                    "reviewer_verdict?, reviewer_run_id?} — moves to "
+                    "staged. Idempotency-Key recommended (~24h TTL "
+                    "replay).",
+                    "POST .../promote {target_status: 'shadow'} — "
+                    "trading JVM's HYBRID strategies will now see the "
+                    "model via findLatestForServing() when configured "
+                    "with ml_mode_shadow=true (decisions logged, NOT "
+                    "enforced).",
+                    "After shadow validation (paired-delta significance "
+                    "test per blueprint § M6): POST .../promote "
+                    "{target_status: 'cooling_down'}. Cooldown is "
+                    "currently operator-enforced timing — the future "
+                    "model_promotion_gauntlet row will server-side gate "
+                    "the cooling_down → live edge by 7 days.",
+                    "POST .../promote {target_status: 'live'} — model "
+                    "is now the serving model (HYBRID strategies with "
+                    "ml_mode_shadow=false will use it for real "
+                    "decisions).",
+                    "Rollback / abandonment: POST .../promote "
+                    "{target_status: 'retired'} from any state, or "
+                    "'rejected_by_operator' from trained/"
+                    "awaiting_operator_review only. Forward-only — to "
+                    "'roll back' a live model, register a corrected "
+                    "version (new content_sha256) and promote it; the "
+                    "old one moves to retired.",
+                    "On 409 'concurrent transition: row status changed "
+                    "after read': GET /models/{model_id} to read the "
+                    "current status, then retry with a target valid "
+                    "from that source (or accept that another caller's "
+                    "transition is the correct outcome).",
                 ],
             ),
             PlaybookRecipe(

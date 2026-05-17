@@ -62,8 +62,6 @@ class JvmClient:
             raise RuntimeError("JvmClient is not open. Call open() first.")
         return self._client
 
-    # ── Auth ────────────────────────────────────────────────────────────
-
     async def _mint_jwt(self) -> str:
         """Mint a JWT once per process. Re-mint on 401 from a downstream call."""
         if self._settings.jvm_auth_mode == "static_jwt":
@@ -131,8 +129,6 @@ class JvmClient:
             self._jwt = await self._mint_jwt()
         return {"Authorization": f"Bearer {self._jwt}"}
 
-    # ── Calls ───────────────────────────────────────────────────────────
-
     async def health_probe(self) -> bool:
         try:
             # `/actuator/health/{liveness,readiness}` are explicitly carved
@@ -149,8 +145,6 @@ class JvmClient:
 
     async def post(self, path: str, **kwargs: Any) -> httpx.Response:
         return await self._request("POST", path, **kwargs)
-
-    # ── Backtest workflow ───────────────────────────────────────────────
 
     async def submit_backtest(self, payload: dict[str, Any]) -> str:
         """POST /api/v1/backtest. Returns the new ``backtestRunId``."""

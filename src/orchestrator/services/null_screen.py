@@ -73,9 +73,6 @@ DEFAULT_N_DRAWS = 8
 MAX_CONSECUTIVE_FAILURES = 3
 
 
-# ── Random combo generation (pure) ────────────────────────────────────
-
-
 def generate_random_combos(
     param_ranges: list[dict[str, Any]],
     n_draws: int,
@@ -134,9 +131,6 @@ def generate_random_combos(
                 combo[name] = f"{round(v, 4)}"
         out.append(combo)
     return out
-
-
-# ── Distribution + verdict (pure) ─────────────────────────────────────
 
 
 def _percentile(values: list[float], q: float) -> float | None:
@@ -234,9 +228,6 @@ def null_screen_verdict(distribution: dict[str, Any], n_attempted: int) -> dict[
             f"for NO_EDGE_DETECTED. Run a small grid sweep to disambiguate."
         ),
     }
-
-
-# ── Async orchestration ───────────────────────────────────────────────
 
 
 async def _run_one_draw(

@@ -26,6 +26,12 @@ log = get_logger(__name__)
 @asynccontextmanager
 async def lifespan_for(settings: Settings, app: FastAPI) -> AsyncIterator[None]:
     settings.assert_prod_safe()
+    # M7 (2026-05-16) — print operator-visible WARN for dev defaults that
+    # become privilege-escalation paths if the orchestrator is promoted
+    # to a shared host without re-configuring. assert_prod_safe handles
+    # the hard refuse on ORCH_PROFILE=prod; this surfaces the soft
+    # gap on dev. No-op on prod.
+    settings.log_dev_mode_warnings(log)
 
     db = Database(settings)
     jvm = JvmClient(settings)

@@ -32,6 +32,7 @@ from typing import Any
 from uuid import UUID
 
 import asyncpg
+from fastapi.concurrency import run_in_threadpool
 
 from redis.asyncio import Redis as AsyncRedis
 
@@ -565,8 +566,16 @@ async def _execute_after_claim(
         )
     raw_run_dict = dict(raw_run) if raw_run else {}
 
-    analysis = analyze.analyze_run(
-        raw_run_dict, trades, cumulative_trials=cumulative_trials
+    # analyze_run runs a 2000-iter bootstrap on the PnL series + regime
+    # stratification — pure Python, can be 100-500ms on a healthy
+    # backtest. Offload to a threadpool so the event loop stays
+    # responsive for the activity-publisher and concurrent /healthz
+    # probes while it crunches.
+    analysis = await run_in_threadpool(
+        analyze.analyze_run,
+        raw_run_dict,
+        trades,
+        cumulative_trials=cumulative_trials,
     )
     stat_v = analysis["statistical_verdict"]["verdict"]
 

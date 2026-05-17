@@ -17,6 +17,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 
+from ..services.idempotency import cache_response, replay_cached_response
 from ..services.verdict_drift import scan_promoted
 from .deps import get_agent_name
 
@@ -28,16 +29,12 @@ async def post_verdict_drift_scan(
     request: Request,
     agent: str = Depends(get_agent_name),
 ) -> dict[str, Any]:
-    idempotency_key = getattr(request.state, "idempotency_key", None)
-    store = request.app.state.idempotency
-    if idempotency_key:
-        cached = await store.get(agent, f"vdrift:{idempotency_key}")
-        if cached is not None:
-            return cached
+    cached, idempotency_key = await replay_cached_response(request, agent, "vdrift")
+    if cached is not None:
+        return cached
 
     drifts = await scan_promoted(db=request.app.state.db)
     payload = {"drifts": drifts, "count": len(drifts)}
 
-    if idempotency_key:
-        await store.put(agent, f"vdrift:{idempotency_key}", payload)
+    await cache_response(request, agent, "vdrift", idempotency_key, payload)
     return payload

@@ -30,8 +30,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-# ── Constants — operator-controlled, pinned in tests ──────────────────
-
+# Operator-controlled constants, pinned in tests.
 DSR_THRESHOLD: float = 0.95
 PF_CI_LOWER_BOUND_PASS: float = 1.0
 MIN_TRADES_PASS: int = 100
@@ -41,11 +40,14 @@ ROBUSTNESS_NEIGHBOR_TOLERANCE: float = 0.30  # adjacent cell within 30% of optim
 WARNING_FAIL_REJECT_THRESHOLD: int = 2  # 2 warning fails → REJECTED
 
 
-_Severity = Literal["blocker", "warning", "info"]
+# Public — re-exported by api/reviews.py so the request schema and the
+# checklist functions agree on the severity enum by definition. Adding
+# a level (say ``critical``) must happen in exactly one place.
+Severity = Literal["blocker", "warning", "info"]
 
 
 def _check(
-    name: str, severity: _Severity, passed: bool, finding: str, **details: Any
+    name: str, severity: Severity, passed: bool, finding: str, **details: Any
 ) -> dict[str, Any]:
     """Build one check record. Keep keys flat for JSONB-friendliness."""
     return {
@@ -57,9 +59,7 @@ def _check(
     }
 
 
-# ── Plan review checks (run BEFORE the sweep enqueues) ────────────────
-
-
+# Plan review checks — run BEFORE the sweep enqueues.
 def check_pre_registration(
     hypothesis_entry: dict[str, Any] | None, plan_created_time: datetime | None
 ) -> dict[str, Any]:
@@ -225,9 +225,7 @@ def plan_review_checklist(
     ]
 
 
-# ── Graduation review checks (run BEFORE /walk-forward) ───────────────
-
-
+# Graduation review checks — run BEFORE /walk-forward.
 def check_n_trades_ample(iteration_metrics: dict[str, Any]) -> dict[str, Any]:
     """Sanity check on V11. The orchestrator already gates this in
     statistical_verdict — re-checking here catches data drift between
@@ -461,13 +459,11 @@ def check_param_robustness(
             True,
             "No sweep history available to assess robustness; assume neutral.",
         )
-    # Find the optimum among the history.
     opt_pf = max((pf for _, pf in sweep_history), default=None)
     if opt_pf is None:
         return _check(
             "param_robustness", "warning", True, "No PF values in history."
         )
-    # Find the params of the optimum (first match).
     opt_params: dict[str, Any] | None = None
     for params, pf in sweep_history:
         if pf == opt_pf:
@@ -477,7 +473,6 @@ def check_param_robustness(
         return _check(
             "param_robustness", "warning", True, "Could not locate optimum params."
         )
-    # Find Hamming-distance-1 neighbours of opt_params in the history.
     neighbours: list[tuple[dict[str, Any], float]] = []
     for params, pf in sweep_history:
         diffs = sum(1 for k in opt_params if str(params.get(k)) != str(opt_params.get(k)))
@@ -494,7 +489,6 @@ def check_param_robustness(
             opt_params=opt_params,
             opt_pf=opt_pf,
         )
-    # At least one neighbour within tolerance.
     threshold = opt_pf * (1.0 - tolerance)
     near = [(p, pf) for p, pf in neighbours if pf >= threshold]
     if not near:
@@ -537,9 +531,6 @@ def graduation_review_checklist(
         check_portfolio_fit(iteration_metrics),
         check_param_robustness(iteration_params, sweep_history),
     ]
-
-
-# ── Aggregation ───────────────────────────────────────────────────────
 
 
 def aggregate_verdict(checks: list[dict[str, Any]]) -> dict[str, Any]:

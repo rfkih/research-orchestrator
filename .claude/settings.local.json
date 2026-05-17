@@ -23,7 +23,23 @@
       "PowerShell(python --version; python -m orchestrator --help 2>&1 | Select-Object -First 5)",
       "PowerShell(pip *)",
       "PowerShell(py *)",
-      "PowerShell(python -m orchestrator 2>&1)"
+      "PowerShell(python -m orchestrator 2>&1)",
+      "Bash(xargs wc *)",
+      "Bash(Get-ChildItem -Path \"C:/Project/research-orchestrator\" -Recurse -File -Name)",
+      "PowerShell($env:PYTHONPATH = 'src'; python -m pytest -q --no-header 2>&1 | Select-Object -Last 60)",
+      "Bash(ls -la .venv)",
+      "Bash(ls -la venv)",
+      "PowerShell($env:PYTHONPATH = 'src'; & '.\\\\.venv\\\\Scripts\\\\python.exe' -m pytest -q --no-header 2>&1 | Select-Object -Last 100)",
+      "Bash(git stash *)",
+      "Bash(.venv/Scripts/python.exe -m pytest -q tests/test_health.py)",
+      "PowerShell($env:PYTHONPATH = 'src'; & '.\\\\.venv\\\\Scripts\\\\python.exe' -c \"from orchestrator.api import tick, queue, journal, walk_forward, cross_window, verdict_drift, null_screen, reviews; from orchestrator.services.idempotency import cache_response, replay_cached_response; from orchestrator.repo import queue as q; print\\('imports OK'\\)\")",
+      "Bash(Get-ChildItem -Path \"C:\\\\Project\\\\research-orchestrator\" -Recurse -Directory)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "PowerShell($env:PYTHONPATH = 'src'; & '.\\\\.venv\\\\Scripts\\\\python.exe' -m pytest -q --no-header 2>&1 | Select-Object -Last 25)",
+      "PowerShell($env:PYTHONPATH = 'src'; & '.\\\\.venv\\\\Scripts\\\\python.exe' -c \"from orchestrator.api import constants, reviews, queue, null_screen, walk_forward; from orchestrator.services.review import Severity; from orchestrator.errors import NextAction; print\\('Severity:', Severity\\); print\\('NextAction.kind values:', NextAction.model_fields['kind'].annotation\\); print\\('VALID_INTERVAL_NAMES:', constants.VALID_INTERVAL_NAMES\\); print\\('REVIEW_VERDICTS_PASSING_GATE:', constants.REVIEW_VERDICTS_PASSING_GATE\\)\")",
+      "Bash(./gradlew compileJava compileTestJava --console=plain)",
+      "Read(//c/Program Files/**)",
+      "Bash(cmd /c \"where java 2>nul & echo --- & echo %JAVA_HOME%\")"
     ]
   }
 }

@@ -125,14 +125,20 @@ async def insert_model(
 
 async def get_model_by_id(conn, model_id: UUID) -> dict | None:
     """Read one row by primary key. Used by the GET sibling endpoint
-    and by tests."""
+    and by tests.
+
+    Includes ``promoted_at`` / ``promoted_by`` so the promote endpoint's
+    noop branch (same target as current status) can surface the actual
+    last-transition audit values rather than lying with ``None``.
+    """
     row = await conn.fetchrow(
         """
         SELECT id, family, purpose, symbol, interval, horizon_bars,
                feature_set, hyperparams, metrics,
                random_seed, artifact_uri, artifact_sha256, artifact_size_bytes,
                artifact_synced_to_vps, artifact_synced_at,
-               status, version, created_time, created_by, updated_time
+               status, version, promoted_at, promoted_by,
+               created_time, created_by, updated_time
         FROM model_registry
         WHERE id = $1
         """,
@@ -233,6 +239,65 @@ async def count_models(
         *params,
     )
     return int(row["n"])
+
+
+async def update_status(
+    conn,
+    *,
+    model_id: UUID,
+    new_status: str,
+    expected_current_status: str,
+    reviewer_verdict: str | None,
+    reviewer_run_id: UUID | None,
+    actor: str,
+) -> dict | None:
+    """Advance ``model_registry.status`` to ``new_status`` with
+    optimistic locking on ``expected_current_status``.
+
+    Stamps ``promoted_by`` + ``promoted_at`` for the audit trail and
+    refreshes ``updated_time``. ``reviewer_verdict`` and
+    ``reviewer_run_id`` are optional COALESCE'd metadata — passing NULL
+    preserves the existing row value.
+
+    Returns the updated row, or ``None`` in TWO distinct cases:
+
+    * The ``model_id`` doesn't exist.
+    * The row exists but its current ``status`` no longer matches
+      ``expected_current_status`` (another caller raced past us between
+      the API's SELECT and this UPDATE).
+
+    The API layer cannot distinguish these two cases from the return
+    value alone; the calling endpoint re-fetches the row when ``None``
+    is returned and surfaces the appropriate 404 or 409.
+
+    Optimistic-locking strategy (instead of ``SELECT ... FOR UPDATE``)
+    avoids holding a row lock across the validate_transition call. The
+    ``WHERE id = $1 AND status = $6::text`` predicate makes the UPDATE
+    a no-op if the snapshot is stale — caller retries with a fresh read.
+
+    The CHECK constraint ``chk_model_registry_status`` rejects any
+    value outside the V66 enum; the API layer also validates against
+    its Literal, but the DB-level guard remains authoritative.
+    """
+    row = await conn.fetchrow(
+        """
+        UPDATE model_registry
+        SET status = $2::text,
+            promoted_by = $3,
+            promoted_at = NOW(),
+            reviewer_verdict = COALESCE($4, reviewer_verdict),
+            reviewer_run_id = COALESCE($5, reviewer_run_id),
+            updated_by = $3,
+            updated_time = NOW()
+        WHERE id = $1
+          AND status = $6::text
+        RETURNING id, status, version, promoted_by, promoted_at,
+                  reviewer_verdict, reviewer_run_id, updated_time
+        """,
+        model_id, new_status, actor, reviewer_verdict, reviewer_run_id,
+        expected_current_status,
+    )
+    return dict(row) if row else None
 
 
 async def mark_synced(

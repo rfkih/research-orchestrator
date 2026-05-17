@@ -60,9 +60,6 @@ BASELINE_CACHE_TTL_S: int = 24 * 3600
 BASELINE_MAX_AGE_DAYS: int = 30
 
 
-# ── Pure functions ────────────────────────────────────────────────────
-
-
 def daily_returns_from_trades(
     trades: list[dict[str, Any]], initial_capital: float = 100.0
 ) -> dict[date, float]:
@@ -284,9 +281,6 @@ def apply_portfolio_gate(
             f"{'demoted (effective <= 1.0)' if eff <= 1.0 else 'cleared (effective > 1.0)'}."
         ),
     }
-
-
-# ── Async fetcher ─────────────────────────────────────────────────────
 
 
 # Module-level cache. Recreated on process restart; stale-but-recent
