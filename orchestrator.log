@@ -1,0 +1,44 @@
+INFO:     Started server process [22720]
+INFO:     Waiting for application startup.
+{"detail": "ORCH_AUTH_TOKEN is the dev sentinel value. Any caller that knows the sentinel can drive the orchestrator. Generate a real token before exposing beyond loopback: python -c \"import secrets; print(secrets.token_urlsafe(48))\"", "event": "orchestrator.dev_warning", "level": "warning", "ts": "2026-05-18T04:57:45.253479Z"}
+{"detail": "ORCH_RESEARCH_ACCOUNT_ID is unset \u2014 account_strategy lookup falls back to 'first matching row' which can select an admin-owned row on a multi-account host.", "event": "orchestrator.dev_warning", "level": "warning", "ts": "2026-05-18T04:57:45.253542Z"}
+{"redis_url": "redis://127.0.0.1:6379/0", "event": "orchestrator.redis_connected", "level": "info", "ts": "2026-05-18T04:57:45.553600Z"}
+{"profile": "dev", "host": "127.0.0.1", "port": 8082, "jvm_base_url": "http://127.0.0.1:8081", "jvm_auth_mode": "static_jwt", "event": "orchestrator.startup", "level": "info", "ts": "2026-05-18T04:57:45.553667Z"}
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8082 (Press CTRL+C to quit)
+{"event": "HTTP Request: GET http://127.0.0.1:8081/actuator/health/liveness \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-18T04:58:53.995226Z"}
+{"event": "HTTP Request: GET http://127.0.0.1:8081/actuator/health/liveness \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-18T04:58:58.176669Z"}
+{"event": "HTTP Request: GET http://127.0.0.1:8081/actuator/health/liveness \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-18T04:59:42.519249Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-18T05:02:41.316938Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-18T05:06:54.844175Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-18T05:07:31.690510Z"}
+{"queue_id": "a6eb6731-1f8d-4bb1-8aa5-8e32e4d8ce2e", "strategy_code": "ATR_MOM", "iter": 1, "budget": 4, "event": "tick.claimed", "level": "info", "ts": "2026-05-18T05:08:08.569344Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 400 \"", "level": "info", "ts": "2026-05-18T05:08:08.609951Z"}
+{"event": "HTTP Request: GET http://127.0.0.1:8081/actuator/health/liveness \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-18T05:08:23.721200Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-18T05:10:22.661478Z"}
+{"queue_id": "0c89edcc-14c8-489e-9879-1ed1bc563ab7", "strategy_code": "ATR_MOM", "iter": 1, "budget": 4, "event": "tick.claimed", "level": "info", "ts": "2026-05-18T05:10:29.550122Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-18T05:10:29.767531Z"}
+{"queue_id": "0c89edcc-14c8-489e-9879-1ed1bc563ab7", "run_id": "83a1397f-1e42-4b19-a3b3-5559b152422a", "combo": {"atrExpansionMult": "1.40", "erTrendMin": "0.35", "adxFloor": "22", "tpR": "1.8"}, "event": "tick.submitted", "level": "info", "ts": "2026-05-18T05:10:29.768222Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-18T05:10:29.770138Z"}
+{"queue_id": "0c89edcc-14c8-489e-9879-1ed1bc563ab7", "iteration_id": "63e2a8ab-f5c5-4d27-bbc7-7d83909247d7", "statistical_verdict": "INSUFFICIENT_EVIDENCE", "verdict": "ITERATE", "event": "tick.iteration_logged", "level": "info", "ts": "2026-05-18T05:12:35.157644Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-18T05:12:35.159289Z"}
+{"queue_id": "0c89edcc-14c8-489e-9879-1ed1bc563ab7", "strategy_code": "ATR_MOM", "iter": 2, "budget": 4, "event": "tick.claimed", "level": "info", "ts": "2026-05-18T05:13:07.809927Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-18T05:13:07.929728Z"}
+{"queue_id": "0c89edcc-14c8-489e-9879-1ed1bc563ab7", "run_id": "4f7893e1-4b16-4034-a803-fedc23e1bd21", "combo": {"atrExpansionMult": "1.40", "erTrendMin": "0.35", "adxFloor": "26", "tpR": "1.8"}, "event": "tick.submitted", "level": "info", "ts": "2026-05-18T05:13:07.930417Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-18T05:13:07.932071Z"}
+{"queue_id": "0c89edcc-14c8-489e-9879-1ed1bc563ab7", "iteration_id": "eb57ef3b-5479-41b2-b1d5-2ece98deb2f3", "statistical_verdict": "INSUFFICIENT_EVIDENCE", "verdict": "ITERATE", "event": "tick.iteration_logged", "level": "info", "ts": "2026-05-18T05:15:23.348500Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-18T05:15:23.350419Z"}
+{"queue_id": "0c89edcc-14c8-489e-9879-1ed1bc563ab7", "strategy_code": "ATR_MOM", "iter": 3, "budget": 4, "event": "tick.claimed", "level": "info", "ts": "2026-05-18T05:15:39.377993Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-18T05:15:39.473312Z"}
+{"queue_id": "0c89edcc-14c8-489e-9879-1ed1bc563ab7", "run_id": "7489f0c6-6624-4b3f-b0ec-a71979705c4a", "combo": {"atrExpansionMult": "1.50", "erTrendMin": "0.35", "adxFloor": "22", "tpR": "1.8"}, "event": "tick.submitted", "level": "info", "ts": "2026-05-18T05:15:39.474260Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-18T05:15:39.476257Z"}
+{"queue_id": "0c89edcc-14c8-489e-9879-1ed1bc563ab7", "iteration_id": "ed9ec742-5111-46f1-b3e4-c114cd601611", "statistical_verdict": "INSUFFICIENT_EVIDENCE", "verdict": "ITERATE", "event": "tick.iteration_logged", "level": "info", "ts": "2026-05-18T05:17:54.835074Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-18T05:17:54.836882Z"}
+{"queue_id": "0c89edcc-14c8-489e-9879-1ed1bc563ab7", "strategy_code": "ATR_MOM", "iter": 4, "budget": 4, "event": "tick.claimed", "level": "info", "ts": "2026-05-18T05:18:08.227373Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-18T05:18:08.323966Z"}
+{"queue_id": "0c89edcc-14c8-489e-9879-1ed1bc563ab7", "run_id": "070f4d07-0a1d-4d07-af56-84cbbdce71a8", "combo": {"atrExpansionMult": "1.50", "erTrendMin": "0.35", "adxFloor": "26", "tpR": "1.8"}, "event": "tick.submitted", "level": "info", "ts": "2026-05-18T05:18:08.324656Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-18T05:18:08.326355Z"}
+{"queue_id": "0c89edcc-14c8-489e-9879-1ed1bc563ab7", "iteration_id": "9ef0b4a0-65a7-484c-9d96-0a6e59719386", "statistical_verdict": "INSUFFICIENT_EVIDENCE", "verdict": "ITERATE", "event": "tick.iteration_logged", "level": "info", "ts": "2026-05-18T05:20:23.664110Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-18T05:20:23.665568Z"}
+{"event": "HTTP Request: GET http://127.0.0.1:8081/actuator/health/liveness \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-18T05:35:00.864957Z"}
+{"event": "HTTP Request: GET http://127.0.0.1:8081/actuator/health/liveness \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-18T05:44:32.277963Z"}

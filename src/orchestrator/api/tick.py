@@ -25,6 +25,19 @@ from .deps import get_agent_name
 router = APIRouter(tags=["tick"])
 
 
+class TickSummary(BaseModel):
+    """One-liner distilled from the tick result.
+
+    Designed for the quant-runner (Stage B, haiku-tier) which polls /tick
+    repeatedly and needs a single field — ``next_action`` — to decide
+    whether to keep ticking or escalate to the researcher.
+    """
+
+    verdict_line: str
+    next_action: str  # CONTINUE | GRADUATE | PIVOT | EMPTY_QUEUE | WAIT | INFRA_FAIL
+    decision_hint: str
+
+
 class TickResponse(BaseModel):
     """Loose schema — fields are ``None`` for empty-queue ticks."""
 
@@ -36,6 +49,11 @@ class TickResponse(BaseModel):
     verdict: str | None = None
     notes: list[str]
     next_actions: list[dict[str, Any]]
+    # Optional for back-compat: the idempotency cache (TTL 24h) may hold
+    # pre-Phase-2 responses without this field. Live calls always populate
+    # it via ``TickResult.to_dict()``; only stale cached replays from the
+    # deploy-transition window can land here as None.
+    summary: TickSummary | None = None
 
 
 @router.post("/tick", response_model=TickResponse)

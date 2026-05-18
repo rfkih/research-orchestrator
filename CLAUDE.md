@@ -41,7 +41,7 @@ research-orchestrator/
 | **V11 statistical gate** (`MIN_TRADES_FOR_SIG`, PF 95% CI, PSR/DSR thresholds, walk-forward stability cutoffs) + **V60 economic gate** (`ANNUALIZED_RETURN_PASS_THRESHOLD_PCT=10.0` on annualized geometric_return_pct_at_alloc_90, 365-day year) | Methodology contract. Loosening to fit a candidate is fraud. +20bps slippage check was retired — slippage_haircut_pnl is still logged for audit but no longer gates the verdict. |
 | **Auth shape** (`X-Orch-Token` header, `Settings.assert_prod_safe()`, dev-token sentinel) | Security boundary. |
 | **Settings defaults** (DB role, port, host binding `127.0.0.1`, profile gating) | Loopback-only is deliberate ops choice. |
-| **DB schema** | Migrations live in `blackheart/src/main/resources/db/flyway/`. Orchestrator is a DML-only client. New table = new Flyway migration in the trading-JVM repo. |
+| **DB schema** | Migrations live in `blackheart-trading-engine/src/main/resources/db/flyway/`. Orchestrator is a DML-only client. New table = new Flyway migration in the trading-JVM repo. |
 | **Idempotency contract** (`Idempotency-Key` header semantics, `idempotency_record` schema, replay shape, ~24h TTL) | Cron-driven callers depend on it. |
 | **Append-only tables** — `research_iteration_log`, `research_journal`, `research_queue` rows. | Audit evidence. |
 
@@ -108,8 +108,8 @@ When adding analytical functions (DSR, bootstrap CI, regime stratify): pin opera
 
 ## Links
 
-- Project root: `../blackheart/CLAUDE.md` (Java JVM, schema owner)
-- Architecture context: `../blackheart/docs/agent-context/ARCHITECTURE.md`
-- Migration history: `../blackheart/docs/agent-context/MIGRATIONS.md`
-- Agent-facing playbook: `../blackheart/research/agent-playbooks/quant-researcher-workflow.md`
+- Project root: `../blackheart-trading-engine/CLAUDE.md` (Java JVM, schema owner)
+- Architecture context: `../blackheart-trading-engine/docs/agent-context/ARCHITECTURE.md`
+- Migration history: `../blackheart-trading-engine/docs/agent-context/MIGRATIONS.md`
+- Agent-facing playbook: `../blackheart-trading-engine/research/agent-playbooks/quant-researcher-workflow.md`
 - Live API contract for callers: `GET /agent/playbook` (auth-free; the canonical source — keep it in sync with what handlers actually do)

@@ -41,7 +41,7 @@ The agent is treated as a first-class user, not an afterthought:
 ## Quickstart (dev)
 
 ```bash
-cd research-orchestrator
+cd blackheart-research-orchestrator
 uv venv && uv pip install -e ".[dev]"
 cp .env.example .env       # then edit ORCH_AUTH_TOKEN, ORCH_DB_DSN
 python -m orchestrator     # serves on 127.0.0.1:8082
@@ -80,7 +80,7 @@ will use `pytest-postgresql` for a per-test DB and `respx` to fake the JVM.
 - **Prod profile refuses dev secrets.** `Settings.assert_prod_safe` blocks
   startup if `ORCH_PROFILE=prod` and the auth token is the dev sentinel,
   or `ORCH_JVM_AUTH_MODE=dev_bypass`.
-- **Migrations live in `blackheart/`.** This service is a DML-only client
+- **Migrations live in `blackheart-trading-engine/`.** This service is a DML-only client
   of the trading JVM's schema. Do not add Flyway here. Reads/writes go
   through the `blackheart_research` role (V14).
 

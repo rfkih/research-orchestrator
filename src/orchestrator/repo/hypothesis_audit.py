@@ -71,6 +71,8 @@ async def insert_audit(
     conn: asyncpg.Connection,
     *,
     strategy_code: str,
+    symbol: str,
+    interval_name: str,
     params_snapshot: dict[str, Any],
     queue_id: UUID | None,
     created_by: str,
@@ -81,6 +83,13 @@ async def insert_audit(
 
     Empty combos are still recorded (axis_set is empty string hash) —
     a no-param sweep still consumes one trial of multiplicity.
+
+    ``symbol`` + ``interval_name`` denormalise the data-universe identity
+    onto the audit row (V93). Required so ``count_data_universe_trials``
+    can scope DSR n_trials by (symbol, interval) without a JOIN to
+    research_queue. The hard-rule allowlist (BTCUSDT/ETHUSDT × 5m/15m/
+    1h/4h) is enforced at the DB layer by V93's CHECK constraints — pass
+    junk values and the INSERT will raise.
     """
     names = list(params_snapshot.keys())
     a_hash = axis_set_hash(names)
@@ -88,14 +97,17 @@ async def insert_audit(
     row = await conn.fetchrow(
         """
         INSERT INTO hypothesis_audit (
-            audit_id, strategy_code, axis_set_hash, param_combo_hash,
+            audit_id, strategy_code, symbol, interval_name,
+            axis_set_hash, param_combo_hash,
             params_snapshot, queue_id, created_by, created_time, updated_time
         ) VALUES (
-            gen_random_uuid(), $1, $2, $3, $4, $5, $6, NOW(), NOW()
+            gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW()
         )
         RETURNING audit_id
         """,
         strategy_code,
+        symbol,
+        interval_name,
         a_hash,
         c_hash,
         params_snapshot,  # asyncpg's jsonb codec encodes the dict (infra/db.py)
@@ -138,6 +150,13 @@ async def count_cumulative_trials(
     """COMPLETED trials for this strategy. Drives the ``n_trials`` argument
     to ``deflated_sharpe_ratio``.
 
+    DEPRECATED (V93, S3-pending): scoping by strategy_code resets the
+    multiplicity counter every time the autonomous loop pivots to a new
+    archetype, which is exactly when selection-bias compounds. Prefer
+    ``count_data_universe_trials`` which scopes by (symbol, interval) and
+    matches the actual data universe the loop inspects. This function is
+    kept in place because tick.py still calls it; S3 swaps the caller.
+
     iteration_id IS NOT NULL means the tick reached step 5 and wrote an
     iteration_log row (see ``update_audit_verdict``). Crashed/aborted
     audit rows (JVM offline, polling timeout, SIGKILL) are kept for
@@ -151,6 +170,42 @@ async def count_cumulative_trials(
         "SELECT COUNT(*)::int FROM hypothesis_audit "
         "WHERE strategy_code = $1 AND iteration_id IS NOT NULL",
         strategy_code,
+    )
+    return int(val or 0)
+
+
+async def count_data_universe_trials(
+    conn: asyncpg.Connection, symbol: str, interval_name: str
+) -> int:
+    """COMPLETED trials on this data universe. Scopes DSR ``n_trials`` by
+    (symbol, interval_name) — the set of bars the autonomous loop has
+    actually inspected — rather than by strategy_code (which resets on
+    every archetype pivot, leaking selection bias).
+
+    Pre-V93 audit rows whose data-universe identity is NULL are excluded
+    implicitly: the equality comparison ``symbol = $1`` returns NULL (not
+    true) when ``symbol`` is NULL, so those rows never match. The partial
+    index ``idx_hypothesis_audit_data_universe`` (V93) is defined with
+    ``symbol IS NOT NULL AND interval_name IS NOT NULL AND iteration_id
+    IS NOT NULL`` so the planner can prove the query predicate implies the
+    index predicate when $1 / $2 are non-NULL.
+
+    iteration_id IS NOT NULL semantics match ``count_cumulative_trials``:
+    crashed/aborted ticks are kept for forensics but don't count toward
+    multiplicity (an infra failure isn't selection bias).
+
+    Callers must add 1 for the in-flight trial they're about to log;
+    its audit row has iteration_id=NULL until step 5 backfills it.
+    """
+    val = await conn.fetchval(
+        """
+        SELECT COUNT(*)::int FROM hypothesis_audit
+         WHERE symbol = $1
+           AND interval_name = $2
+           AND iteration_id IS NOT NULL
+        """,
+        symbol,
+        interval_name,
     )
     return int(val or 0)
 

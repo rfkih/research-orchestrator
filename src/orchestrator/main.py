@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from .api.activity import router as activity_router
 from .api.agent import router as agent_router
 from .api.cross_window import router as cross_window_router
+from .api.experiments import router as experiments_router
 from .api.features import router as features_router
 from .api.health import router as health_router
 from .api.iterations import router as iterations_router
@@ -70,6 +71,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(activity_router)
     app.include_router(features_router)
     app.include_router(models_router)
+    app.include_router(experiments_router)
     app.include_router(raw_router)
     return app
 

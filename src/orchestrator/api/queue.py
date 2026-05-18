@@ -46,6 +46,22 @@ class SweepParam(BaseModel):
     high: str | None = Field(None, max_length=40)
 
 
+class BacktestWindow(BaseModel):
+    """Optional backtest-window override. When set on a SweepConfig, /tick
+    forwards ``start_time`` into the JVM submit payload instead of the
+    default ``2024-01-01T00:00:00`` floor — used after a historical
+    backfill so the sweep exercises the extra bars. ``end_time`` is left
+    to the tick-time "yesterday UTC midnight" derivation.
+    """
+
+    start_time: str = Field(
+        ...,
+        description="ISO-8601 timestamp, e.g. 2020-01-01T00:00:00",
+        min_length=10,
+        max_length=32,
+    )
+
+
 class SweepConfig(BaseModel):
     """Sweep specification. Backwards-compatible: existing callers that
     omit ``strategy`` get the original grid behaviour and need not pass
@@ -62,6 +78,8 @@ class SweepConfig(BaseModel):
     # TPE only — ignored for grid (which derives length from cross-product):
     n_trials: int = Field(20, ge=4, le=200)
     seed: int = Field(42, ge=0)
+    # Optional: override the backtest start window. None ⇒ default 2024-01-01.
+    backtest_window: BacktestWindow | None = None
 
     @model_validator(mode="after")
     def _check_param_shape(self) -> "SweepConfig":

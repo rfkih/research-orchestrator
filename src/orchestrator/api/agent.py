@@ -12,10 +12,13 @@ prior session memory. These endpoints exist so the agent can:
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
+
+from ..repo import agent_state as agent_state_repo
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -154,7 +157,19 @@ async def playbook() -> Playbook:
                 name="agent_state",
                 method="GET",
                 path="/agent/state",
-                purpose="One-shot snapshot of research state.",
+                purpose=(
+                    "One-shot research-state digest. Returns: db_ok, jvm_ok, "
+                    "queue_counts (PENDING/RUNNING/PARKED/COMPLETED/FAILED), "
+                    "last_iterations (5 most-recent with statistical_verdict, "
+                    "verdict, pf, n_trades), recent_sig_edge_iteration_ids "
+                    "(7d window), active_hypotheses (journal entry_type="
+                    "HYPOTHESIS status=ACTIVE), last_run_summary (latest "
+                    "RUN_SUMMARY journal row), last_null_screen_per_surface "
+                    "(DISTINCT ON (strategy, instrument, interval) of the "
+                    "latest NULL_SCREEN_RESULT). Replaces the legacy "
+                    "5-query cold-boot chain — call once on session start "
+                    "before designing the next iteration."
+                ),
                 idempotent=True,
             ),
             PlaybookCapability(
@@ -261,15 +276,21 @@ async def playbook() -> Playbook:
                     "real cumulative trial count, decide next state. "
                     "Synchronous; up to 30 min for the JVM to finish. "
                     "Honours Idempotency-Key. Outcomes: iterated, empty_queue, "
-                    "sweep_exhausted. metrics_snapshot.analysis includes "
-                    "dsr (Deflated Sharpe per Bailey & Lopez de Prado 2014) "
-                    "and dsr_n_trials (the real selection-bias multiplicity) "
-                    "alongside the legacy psr field. Portfolio gate (added "
-                    "2026-05-05): SIGNIFICANT_EDGE candidates are demoted to "
-                    "INSUFFICIENT_EVIDENCE when their daily-return correlation "
-                    "with the protected book (LSR/VCB/VBO) yields "
-                    "pf_lo × (1 - 0.5·|max_corr|) <= 1.0 — gate output stashed "
-                    "on metrics_snapshot.portfolio_corr."
+                    "sweep_exhausted. Response carries a 'summary' field "
+                    "{verdict_line, next_action, decision_hint} — next_action "
+                    "is one of CONTINUE | GRADUATE | PIVOT | EMPTY_QUEUE | "
+                    "WAIT | INFRA_FAIL. The quant-runner sub-agent (haiku) "
+                    "branches on next_action alone to decide whether to "
+                    "keep ticking or escalate. metrics_snapshot.analysis "
+                    "includes dsr (Deflated Sharpe per Bailey & Lopez de "
+                    "Prado 2014) and dsr_n_trials (the real selection-bias "
+                    "multiplicity) alongside the legacy psr field. "
+                    "Portfolio gate (added 2026-05-05): SIGNIFICANT_EDGE "
+                    "candidates are demoted to INSUFFICIENT_EVIDENCE when "
+                    "their daily-return correlation with the protected "
+                    "book (LSR/VCB/VBO) yields pf_lo × (1 - 0.5·|max_corr|) "
+                    "<= 1.0 — gate output stashed on "
+                    "metrics_snapshot.portfolio_corr."
                 ),
                 idempotent=False,
             ),
@@ -920,8 +941,56 @@ async def playbook() -> Playbook:
     )
 
 
+class IterationDigest(BaseModel):
+    iteration_id: str
+    strategy_code: str | None = None
+    iteration_number: int | None = None
+    statistical_verdict: str | None = None
+    verdict: str | None = None
+    created_time: datetime
+    pf: float | None = None
+    n_trades: int | None = None
+
+
+class HypothesisDigest(BaseModel):
+    journal_id: str
+    strategy_code: str | None = None
+    title: str
+    created_time: datetime
+
+
+class RunSummaryDigest(BaseModel):
+    journal_id: str
+    strategy_code: str | None = None
+    title: str
+    content: str | None = None
+    structured_data: dict[str, Any] | None = None
+    created_time: datetime
+
+
+class NullScreenDigest(BaseModel):
+    journal_id: str
+    strategy_code: str | None = None
+    instrument: str | None = None
+    interval_name: str | None = None
+    verdict: str | None = None
+    title: str
+    created_time: datetime
+
+
 class AgentState(BaseModel):
-    """Phase-1 placeholder. Phase 2 fills in queue + iteration counts."""
+    """One-shot research-state digest (Phase 2).
+
+    Composes queue counts + last 5 iterations + 7d SIGNIFICANT_EDGE ids +
+    ACTIVE hypotheses + latest RUN_SUMMARY + latest NULL_SCREEN_RESULT
+    per (strategy_code, instrument, interval_name). Designed to replace
+    the legacy cold-boot SQL-script chain — one HTTP call, one round-trip
+    bundle for the researcher and runner sub-agents.
+
+    ``digest`` is the populated payload when DB is reachable; ``None``
+    when ``db_ok=false``, in which case ``notes`` and ``next_actions``
+    carry the failure signal (back-compat with the Phase-1 contract).
+    """
 
     agent: str
     profile: str
@@ -930,6 +999,13 @@ class AgentState(BaseModel):
     current_session_id: str
     notes: list[str]
     next_actions: list[dict[str, Any]]
+
+    queue_counts: dict[str, int] | None = None
+    last_iterations: list[IterationDigest] | None = None
+    recent_sig_edge_iteration_ids: list[str] | None = None
+    active_hypotheses: list[HypothesisDigest] | None = None
+    last_run_summary: RunSummaryDigest | None = None
+    last_null_screen_per_surface: list[NullScreenDigest] | None = None
 
 
 @router.get("/state", response_model=AgentState)
@@ -944,8 +1020,21 @@ async def agent_state(request: Request) -> AgentState:
     if not jvm_ok:
         notes.append("Research JVM is unreachable — /tick will fail.")
         next_actions.append({"kind": "retry", "wait_s": 30.0})
+
+    digest: dict[str, Any] | None = None
+    if db_ok:
+        try:
+            async with request.app.state.db.acquire() as conn:
+                digest = await agent_state_repo.get_state_digest(conn)
+        except Exception as exc:  # noqa: BLE001
+            # Digest is best-effort. If a slice query fails we still return
+            # health flags so the caller can fall back to the legacy queries.
+            notes.append(f"State digest unavailable: {exc.__class__.__name__}.")
+            digest = None
+
     if not notes:
-        notes.append("Service is healthy. Phase-2 endpoints (/queue, /iterations) ship next.")
+        notes.append("Service is healthy.")
+
     return AgentState(
         agent=request.state.agent_name,
         profile=request.app.state.settings.profile,
@@ -954,4 +1043,14 @@ async def agent_state(request: Request) -> AgentState:
         current_session_id=str(request.state.session_id) if request.state.session_id else "",
         notes=notes,
         next_actions=next_actions,
+        queue_counts=(digest or {}).get("queue_counts") if digest else None,
+        last_iterations=(digest or {}).get("last_iterations") if digest else None,
+        recent_sig_edge_iteration_ids=(
+            (digest or {}).get("recent_sig_edge_iteration_ids") if digest else None
+        ),
+        active_hypotheses=(digest or {}).get("active_hypotheses") if digest else None,
+        last_run_summary=(digest or {}).get("last_run_summary") if digest else None,
+        last_null_screen_per_surface=(
+            (digest or {}).get("last_null_screen_per_surface") if digest else None
+        ),
     )

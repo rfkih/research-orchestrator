@@ -50,6 +50,7 @@ from ..repo import (
 )
 from . import analyze, portfolio, sweep
 from .activity_logger import log_activity
+from .tick_summary import compute_tick_summary
 
 log = get_logger(__name__)
 
@@ -74,7 +75,13 @@ def _terminal(err: OrchestratorError) -> OrchestratorError:
 
 
 class TickResult:
-    """Plain container — the API layer renders this through Pydantic."""
+    """Plain container — the API layer renders this through Pydantic.
+
+    ``pf`` and ``n_trades`` are optional surface metrics pulled out of the
+    iteration's ``metrics_snapshot`` when available; they feed the
+    ``summary.verdict_line`` so the runner agent can read a one-liner
+    instead of the whole iteration JSON.
+    """
 
     def __init__(
         self,
@@ -87,6 +94,8 @@ class TickResult:
         verdict: str | None = None,
         notes: list[str] | None = None,
         next_actions: list[dict[str, Any]] | None = None,
+        pf: float | None = None,
+        n_trades: int | None = None,
     ) -> None:
         self.outcome = outcome
         self.queue_id = queue_id
@@ -96,6 +105,8 @@ class TickResult:
         self.verdict = verdict
         self.notes = notes or []
         self.next_actions = next_actions or []
+        self.pf = pf
+        self.n_trades = n_trades
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -107,6 +118,14 @@ class TickResult:
             "verdict": self.verdict,
             "notes": self.notes,
             "next_actions": self.next_actions,
+            "summary": compute_tick_summary(
+                outcome=self.outcome,
+                statistical_verdict=self.statistical_verdict,
+                verdict=self.verdict,
+                next_actions=self.next_actions,
+                pf=self.pf,
+                n_trades=self.n_trades,
+            ),
         }
 
 
@@ -256,17 +275,19 @@ def _build_submit_payload(
     settings: Settings,  # noqa: ARG001 — reserved for prod-window/capital config
     allow_long: bool = True,
     allow_short: bool = True,
+    start_time_override: str | None = None,
 ) -> dict[str, Any]:
     # Window + sizing match research-tick.sh lines 340-359. endTime is
     # "yesterday UTC midnight" so we never test on a partial bar; bash
     # had a hardcoded date that drifted with each rebuild, this doesn't.
     end_time = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT00:00:00")
+    start_time = start_time_override or "2024-01-01T00:00:00"
     return {
         "accountStrategyId": account_strategy_id,
         "strategyCode": strategy_code,
         "asset": asset,
         "interval": interval_name,
-        "startTime": "2024-01-01T00:00:00",
+        "startTime": start_time,
         "endTime": end_time,
         "initialCapital": 100,
         "riskPerTradePct": 2.0,
@@ -480,6 +501,8 @@ async def _execute_after_claim(
             audit_id = await audit_repo.insert_audit(
                 conn,
                 strategy_code=strategy_code,
+                symbol=instrument,
+                interval_name=interval_name,
                 params_snapshot=combo,
                 queue_id=queue_id,
                 created_by=agent_name,
@@ -492,6 +515,12 @@ async def _execute_after_claim(
             ) + 1
 
     # ── Step 4: submit backtest, poll for completion ──────────────────
+    # Optional extended-window override carried on sweep_config. Used when
+    # the operator backfills earlier history (e.g. ETH pre-2024) and wants
+    # the sweep to exercise the extra bars instead of the default 2024-01-01
+    # floor. None ⇒ default.
+    window_cfg = sweep_config.get("backtest_window") or {}
+    start_time_override = window_cfg.get("start_time")
     payload = _build_submit_payload(
         account_strategy_id=as_row["account_strategy_id"],
         strategy_code=strategy_code,
@@ -501,6 +530,7 @@ async def _execute_after_claim(
         settings=settings,
         allow_long=as_row["allow_long"],
         allow_short=as_row["allow_short"],
+        start_time_override=start_time_override,
     )
     backtest_run_id = await jvm.submit_backtest(payload)
     log.info(
@@ -741,6 +771,18 @@ async def _execute_after_claim(
         statistical_verdict=stat_v,
     )
 
+    _pf_pt = analysis.get("pf_point_estimate") if isinstance(analysis, dict) else None
+    _pf_f: float | None
+    try:
+        _pf_f = float(_pf_pt) if _pf_pt is not None else None
+    except (TypeError, ValueError):
+        _pf_f = None
+    _n_trades = analysis.get("n_trades") if isinstance(analysis, dict) else None
+    try:
+        _n_trades_i = int(_n_trades) if _n_trades is not None else None
+    except (TypeError, ValueError):
+        _n_trades_i = None
+
     return TickResult(
         outcome="iterated",
         queue_id=str(queue_id),
@@ -749,6 +791,8 @@ async def _execute_after_claim(
         statistical_verdict=stat_v,
         verdict=dec_v,
         next_actions=next_actions,
+        pf=_pf_f,
+        n_trades=_n_trades_i,
     )
 
 

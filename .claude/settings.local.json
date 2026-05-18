@@ -39,7 +39,12 @@
       "PowerShell($env:PYTHONPATH = 'src'; & '.\\\\.venv\\\\Scripts\\\\python.exe' -c \"from orchestrator.api import constants, reviews, queue, null_screen, walk_forward; from orchestrator.services.review import Severity; from orchestrator.errors import NextAction; print\\('Severity:', Severity\\); print\\('NextAction.kind values:', NextAction.model_fields['kind'].annotation\\); print\\('VALID_INTERVAL_NAMES:', constants.VALID_INTERVAL_NAMES\\); print\\('REVIEW_VERDICTS_PASSING_GATE:', constants.REVIEW_VERDICTS_PASSING_GATE\\)\")",
       "Bash(./gradlew compileJava compileTestJava --console=plain)",
       "Read(//c/Program Files/**)",
-      "Bash(cmd /c \"where java 2>nul & echo --- & echo %JAVA_HOME%\")"
+      "Bash(cmd /c \"where java 2>nul & echo --- & echo %JAVA_HOME%\")",
+      "Bash(.venv/Scripts/python.exe --version)",
+      "PowerShell(Get-NetTCPConnection *)",
+      "PowerShell(Stop-Process *)",
+      "PowerShell(Get-Process *)",
+      "PowerShell($ts = Get-Date -Format \"yyyyMMdd-HHmmss\"; $out = \"logs\\\\orchestrator-$ts.out.log\"; $err = \"logs\\\\orchestrator-$ts.err.log\"; $env:PYTHONPATH = \"src\"; $p = Start-Process -FilePath \"C:\\\\Python314\\\\python.exe\" -ArgumentList \"-m\",\"orchestrator\" -WorkingDirectory \"C:\\\\Project\\\\blackheart-research-orchestrator\" -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru; Write-Output \"Started PID $\\($p.Id\\), logs: $out / $err\")"
     ]
   }
 }

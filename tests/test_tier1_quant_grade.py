@@ -18,8 +18,12 @@ from datetime import datetime
 
 import pytest
 
+import inspect
+
 from orchestrator.repo.hypothesis_audit import (
     axis_set_hash,
+    count_data_universe_trials,
+    insert_audit,
     param_combo_hash,
 )
 from orchestrator.services.analyze import (
@@ -298,3 +302,38 @@ def test_pass_threshold_constant_is_ten_percent() -> None:
     # CLAUDE.md profitability bar — encode the contract so a stray edit
     # to the constant doesn't silently change which strategies promote.
     assert ANNUALIZED_RETURN_PASS_THRESHOLD_PCT == 10.0
+
+
+# ── V93 data-universe scoping — signature pins ────────────────────────
+
+
+def test_insert_audit_requires_symbol_and_interval_name() -> None:
+    # V93: every new audit row must carry the data-universe identity so
+    # count_data_universe_trials can scope DSR n_trials by (symbol,
+    # interval). The V93 CHECK constraint allows NULL (it only rejects
+    # non-NULL values outside the BTCUSDT/ETHUSDT allowlist), so NULL
+    # symbol won't be caught at the DB layer - the only guards against
+    # an accidental drop of these kwargs are (1) this pin test and (2)
+    # the asyncpg arity mismatch the INSERT would raise. Catching it
+    # here fails fastest and closest to the source.
+    sig = inspect.signature(insert_audit)
+    params = sig.parameters
+    assert "symbol" in params, "insert_audit must take symbol"
+    assert "interval_name" in params, "insert_audit must take interval_name"
+    # Keyword-only so caller can't pass them positionally and accidentally
+    # swap with strategy_code.
+    assert params["symbol"].kind == inspect.Parameter.KEYWORD_ONLY
+    assert params["interval_name"].kind == inspect.Parameter.KEYWORD_ONLY
+    # Required (no default) — NULL data-universe defeats the whole point
+    # of the V93 fix.
+    assert params["symbol"].default is inspect.Parameter.empty
+    assert params["interval_name"].default is inspect.Parameter.empty
+
+
+def test_count_data_universe_trials_signature() -> None:
+    # The replacement for count_cumulative_trials. Pin the args so a
+    # rename in S3 (when tick.py swaps the caller) doesn't silently
+    # break.
+    sig = inspect.signature(count_data_universe_trials)
+    params = sig.parameters
+    assert list(params.keys()) == ["conn", "symbol", "interval_name"]
