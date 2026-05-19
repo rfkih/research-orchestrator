@@ -276,20 +276,105 @@ def test_regime_concentration_thin_regime_ignored() -> None:
 
 
 # ── portfolio_fit ─────────────────────────────────────────────────────
+#
+# Methodology (updated 2026-05-19): the gate measures duplication risk
+# via the *max-positive* correlation with the protected book, not
+# |corr|. Negative correlations are diversification benefits and must
+# pass — prior |corr| semantics produced false REJECTs on legitimate
+# hedges (iter 88b4c6a3 was the first case to surface this drift).
+# Operator-escalation journal c58a4b8a documents the diagnosis.
 
 
-def test_portfolio_fit_low_corr_passes() -> None:
+def test_portfolio_fit_low_positive_corr_passes() -> None:
     out = check_portfolio_fit(
-        {"portfolio_corr": {"applied": True, "max_abs_corr": 0.3}}
+        {
+            "portfolio_corr": {
+                "applied": True,
+                "per_code_corr": {"VBO": 0.3, "VCB": 0.1, "LSR": -0.1},
+            }
+        }
     )
     assert out["passed"] is True
+    assert out["details"]["max_positive_corr"] == 0.3
+    assert out["details"]["most_positive_code"] == "VBO"
 
 
-def test_portfolio_fit_high_corr_warns() -> None:
+def test_portfolio_fit_high_positive_corr_warns() -> None:
     out = check_portfolio_fit(
-        {"portfolio_corr": {"applied": True, "max_abs_corr": 0.7}}
+        {
+            "portfolio_corr": {
+                "applied": True,
+                "per_code_corr": {"VBO": 0.7, "VCB": 0.2, "LSR": 0.1},
+            }
+        }
     )
     assert out["passed"] is False
+    assert out["details"]["max_positive_corr"] == 0.7
+    assert out["details"]["most_positive_code"] == "VBO"
+
+
+def test_portfolio_fit_high_negative_corr_passes_as_diversifier() -> None:
+    """The bug fix: a candidate with strongly NEGATIVE correlation
+    against a book member is a diversifier (improves portfolio Sharpe),
+    not a duplicate. It must pass the portfolio_fit check.
+
+    Before the 2026-05-19 fix, this case was rejected because the gate
+    used |corr|, treating -0.55 the same as +0.55. Iter 88b4c6a3 was
+    the first candidate to expose this drift in production.
+    """
+    out = check_portfolio_fit(
+        {
+            "portfolio_corr": {
+                "applied": True,
+                "per_code_corr": {"VBO": 0.2, "VCB": -0.55, "LSR": -0.1},
+            }
+        }
+    )
+    assert out["passed"] is True, (
+        "Negative correlations are diversification benefits and must pass "
+        "the portfolio_fit check. If this assertion fires, the |corr| bug "
+        "has regressed (see operator-escalation journal c58a4b8a)."
+    )
+    assert out["details"]["max_positive_corr"] == 0.2
+    assert out["details"]["most_negative_corr"] == -0.55
+    assert out["details"]["most_negative_code"] == "VCB"
+
+
+def test_portfolio_fit_all_negative_corrs_passes_as_pure_diversifier() -> None:
+    """All correlations non-positive → pure diversifier. Pass with a
+    'no duplication risk' finding explicitly naming the most-negative
+    code so the journal entry reads clearly."""
+    out = check_portfolio_fit(
+        {
+            "portfolio_corr": {
+                "applied": True,
+                "per_code_corr": {"VBO": -0.1, "VCB": -0.43, "LSR": -0.2},
+            }
+        }
+    )
+    assert out["passed"] is True
+    assert out["details"]["max_positive_corr"] == 0.0
+    assert out["details"]["most_positive_code"] is None
+    assert out["details"]["most_negative_code"] == "VCB"
+    assert "pure diversifier" in out["finding"]
+
+
+def test_portfolio_fit_mixed_high_pos_and_high_neg_warns_on_positive() -> None:
+    """When a candidate has BOTH a high-positive correlation (vs one
+    book member) AND a high-negative correlation (vs another), the
+    positive duplication risk dominates — the hedge against the other
+    member does NOT compensate for being a duplicate of the first."""
+    out = check_portfolio_fit(
+        {
+            "portfolio_corr": {
+                "applied": True,
+                "per_code_corr": {"VBO": 0.65, "VCB": -0.7, "LSR": 0.1},
+            }
+        }
+    )
+    assert out["passed"] is False
+    assert out["details"]["max_positive_corr"] == 0.65
+    assert out["details"]["most_negative_corr"] == -0.7
 
 
 def test_portfolio_fit_gate_skipped_passes_with_note() -> None:
@@ -298,6 +383,24 @@ def test_portfolio_fit_gate_skipped_passes_with_note() -> None:
     )
     assert out["passed"] is True
     assert "manually inspect" in out["finding"].lower() or "manually" in out["finding"].lower()
+
+
+def test_portfolio_fit_legacy_iteration_passes_with_note() -> None:
+    """Iterations from before 2026-05-19 do not have per_code_corr
+    surfaced consistently. The check must fall back gracefully — pass
+    with an explicit note — rather than retroactively REJECT historical
+    candidates on missing data."""
+    out = check_portfolio_fit(
+        {
+            "portfolio_corr": {
+                "applied": True,
+                "max_abs_corr": 0.7,  # legacy field; no per_code_corr
+            }
+        }
+    )
+    assert out["passed"] is True
+    finding = out["finding"].lower()
+    assert "legacy" in finding or "pre-2026-05-19" in finding
 
 
 # ── param_robustness ──────────────────────────────────────────────────

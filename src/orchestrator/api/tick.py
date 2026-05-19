@@ -16,10 +16,16 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..services.idempotency import cache_response, replay_cached_response
 from ..services.tick import run_tick
+from ..services.tick_drain import (
+    DEFAULT_MAX_CONSECUTIVE_WAITS,
+    DEFAULT_MAX_ITERS,
+    DEFAULT_MAX_WALL_CLOCK_S,
+    drain_ticks,
+)
 from .deps import get_agent_name
 
 router = APIRouter(tags=["tick"])
@@ -76,3 +82,64 @@ async def post_tick(
     response = result.to_dict()
     await cache_response(request, agent, "tick", idempotency_key, response)
     return response
+
+
+class TickDrainBody(BaseModel):
+    """Input for ``POST /tick/drain``.
+
+    All fields are optional with runner-playbook-aligned defaults. The
+    caps protect the orchestrator from a stuck sweep holding a worker
+    indefinitely; callers expecting a long drain should re-call on
+    ``MAX_ITERS_REACHED`` / ``MAX_WALL_CLOCK_REACHED`` rather than
+    raising the caps unbounded.
+    """
+
+    max_iters: int = Field(DEFAULT_MAX_ITERS, ge=1, le=200)
+    max_wall_clock_s: int = Field(DEFAULT_MAX_WALL_CLOCK_S, ge=60, le=21600)
+    max_consecutive_waits: int = Field(DEFAULT_MAX_CONSECUTIVE_WAITS, ge=1, le=10)
+
+
+@router.post("/tick/drain")
+async def post_tick_drain(
+    request: Request,
+    body: TickDrainBody | None = None,
+    agent: str = Depends(get_agent_name),
+) -> dict[str, Any]:
+    """Drive ``run_tick`` until a terminal ``next_action`` or a cap fires.
+
+    Returns the structured digest the quant-runner sub-agent used to
+    return as text (Status / Iters / Verdicts / Last / Next). The
+    researcher can switch on ``terminal_action`` directly:
+
+      * ``GRADUATE``  → POST /reviews/auto-run-checklist target_kind='graduation'
+      * ``PIVOT``     → pick next archetype/axis
+      * ``EMPTY_QUEUE`` → POST /queue with a new sweep
+      * ``INFRA_FAIL`` → journal INFRA_FAILURE
+      * ``MAX_ITERS_REACHED`` / ``MAX_WALL_CLOCK_REACHED`` → re-call
+
+    Idempotency: ``Idempotency-Key`` is honoured for the drain envelope.
+    A replay of the same key returns the original digest WITHOUT
+    re-driving the queue. Each underlying ``/tick`` call retains its
+    own queue-claim semantics (``FOR UPDATE SKIP LOCKED``); concurrent
+    drains never collide on the same row.
+    """
+    cached, idempotency_key = await replay_cached_response(
+        request, agent, "tick-drain"
+    )
+    if cached is not None:
+        return cached
+
+    params = body or TickDrainBody()
+    digest = await drain_ticks(
+        db=request.app.state.db,
+        jvm=request.app.state.jvm,
+        settings=request.app.state.settings,
+        agent_name=agent,
+        session_id=request.state.session_id,
+        redis_client=request.app.state.redis,
+        max_iters=params.max_iters,
+        max_wall_clock_s=params.max_wall_clock_s,
+        max_consecutive_waits=params.max_consecutive_waits,
+    )
+    await cache_response(request, agent, "tick-drain", idempotency_key, digest)
+    return digest

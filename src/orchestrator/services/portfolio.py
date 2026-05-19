@@ -173,6 +173,12 @@ def max_abs_correlation(
 ) -> tuple[float | None, dict[str, float | None]]:
     """Compute per-baseline correlation; return (max_abs, per_code).
 
+    LEGACY (pre-2026-05-19 portfolio_fit methodology fix). Kept for
+    forensics / external callers; the binding gate now uses
+    ``max_positive_correlation`` (negative correlations are
+    diversification benefits, not duplication risk). See operator-
+    escalation journal ``c58a4b8a`` for the diagnosis.
+
     ``method`` defaults to ``spearman`` (robust). Pass ``pearson`` for
     the linear estimator. ``per_code`` is exposed so the journal entry
     names which protected strategy is the binding constraint.
@@ -185,24 +191,62 @@ def max_abs_correlation(
     return (max(finite) if finite else None, per_code)
 
 
+def max_positive_correlation(
+    candidate_returns: dict[date, float],
+    baselines: dict[str, dict[date, float]],
+    method: str = "spearman",
+) -> tuple[float | None, dict[str, float | None]]:
+    """Compute per-baseline correlation; return
+    ``(max_positive_or_zero, per_code_signed)``.
+
+    Returns ``(None, {})`` if no baselines have a finite correlation.
+    Otherwise ``max_positive_or_zero`` is the maximum of POSITIVE
+    per-code correlations, or ``0.0`` if every finite correlation is
+    non-positive. ``per_code_signed`` retains the SIGNED values for
+    forensics — the journal entry surfaces both the duplication risk
+    (positive side) AND the diversification benefit (negative side).
+
+    Methodology (added 2026-05-19): the gate's purpose is to detect
+    candidates that DUPLICATE existing book exposure. Duplication =
+    positive correlation; diversification = negative correlation. Only
+    positive correlations count against the threshold; negative ones
+    are diversification benefits (improve portfolio Sharpe, no
+    penalty). Previously the gate used ``|corr|`` which conflated the
+    two — see operator-escalation journal ``c58a4b8a``.
+    """
+    fn = spearman_corr if method == "spearman" else pearson_corr
+    per_code: dict[str, float | None] = {}
+    for code, baseline_returns in baselines.items():
+        per_code[code] = fn(candidate_returns, baseline_returns)
+    finite = [c for c in per_code.values() if c is not None]
+    if not finite:
+        return (None, per_code)
+    positives = [c for c in finite if c > 0]
+    return (max(positives) if positives else 0.0, per_code)
+
+
 def effective_pf_lo(
-    pf_lo: float, max_abs_corr: float, k: float = PORTFOLIO_DISCOUNT_K
+    pf_lo: float, max_positive_corr: float, k: float = PORTFOLIO_DISCOUNT_K
 ) -> float:
-    """Discount the lower CI bound by correlation with the book.
+    """Discount the lower CI bound by max-POSITIVE correlation with the book.
 
     rho=0      → unchanged.
-    rho=1      → halved (default K=0.5).
-    rho<0      → unchanged (the absolute value is what matters: a
-                 perfectly anti-correlated strategy is also a hedge,
-                 but for graduation we only penalize redundancy).
+    rho=+1     → halved (default K=0.5).
+    rho<0      → unchanged (negative correlations are diversification
+                 benefits, not duplication; do not penalize hedges).
+
+    Inputs < 0 are clamped to 0 (defensive — callers should pass
+    non-negative values from ``max_positive_correlation``, but the
+    clamp prevents accidental ``|abs|`` reintroduction silently
+    re-creating the pre-2026-05-19 methodology drift).
     """
-    capped = max(0.0, min(1.0, abs(max_abs_corr)))
+    capped = max(0.0, min(1.0, max_positive_corr))
     return pf_lo * (1.0 - k * capped)
 
 
 def apply_portfolio_gate(
     pf_ci: dict[str, Any],
-    max_abs_corr: float | None,
+    max_positive_corr: float | None,
     per_code_corr: dict[str, float | None] | None = None,
     k: float = PORTFOLIO_DISCOUNT_K,
     method: str = "spearman",
@@ -210,21 +254,42 @@ def apply_portfolio_gate(
 ) -> dict[str, Any]:
     """Decide whether the correlation gate demotes a SIGNIFICANT_EDGE.
 
-    ``max_abs_corr`` and ``per_code_corr`` are the *binding* correlation
-    (Spearman by default; robust to outliers). ``pearson_per_code`` is
-    the parallel Pearson series — exposed for forensics so the operator
-    can see when robust and linear disagree.
+    Parameters
+    ----------
+    max_positive_corr
+        Maximum POSITIVE correlation across the protected book (0.0 if
+        no per-code correlation is positive — i.e. the candidate is a
+        pure diversifier). Produced by ``max_positive_correlation``.
+        Negative correlations DO NOT trigger demote (diversification
+        benefit, see methodology note in ``max_positive_correlation``).
+    per_code_corr
+        Signed per-code dict (Spearman by default). Both positive and
+        negative entries are preserved so the journal entry surfaces
+        the full picture — which book member is the duplication risk
+        AND which is the strongest hedge.
+    pearson_per_code
+        Parallel Pearson series exposed for forensics so the operator
+        can see when robust and linear estimators disagree.
 
     Returns a structured payload that the caller stashes on
-    metrics_snapshot.portfolio_corr — and reads `demote=True` to
-    rewrite the statistical_verdict back to INSUFFICIENT_EVIDENCE.
+    ``metrics_snapshot.portfolio_corr`` — and reads ``demote=True`` to
+    rewrite the statistical_verdict back to INSUFFICIENT_EVIDENCE. The
+    payload includes both ``max_positive_corr`` (new binding field
+    used by the gate) AND a legacy ``max_abs_corr`` field (computed
+    from per_code_corr) so older consumers still parse cleanly.
     """
     def _round_per_code(d: dict[str, float | None] | None) -> dict[str, float | None]:
         return {
             c: (round(v, 4) if v is not None else None) for c, v in (d or {}).items()
         }
 
-    if max_abs_corr is None:
+    def _legacy_max_abs_from_signed(
+        d: dict[str, float | None] | None,
+    ) -> float | None:
+        finite = [abs(v) for v in (d or {}).values() if v is not None]
+        return max(finite) if finite else None
+
+    if max_positive_corr is None:
         return {
             "applied": False,
             "demote": False,
@@ -239,6 +304,9 @@ def apply_portfolio_gate(
             "pearson_per_code": _round_per_code(pearson_per_code),
             "k": k,
         }
+
+    legacy_max_abs = _legacy_max_abs_from_signed(per_code_corr)
+
     pf_lo = pf_ci.get("low")
     if pf_lo is None:
         return {
@@ -248,7 +316,10 @@ def apply_portfolio_gate(
             "reason": "PF 95% CI lower bound unavailable.",
             "per_code_corr": _round_per_code(per_code_corr),
             "pearson_per_code": _round_per_code(pearson_per_code),
-            "max_abs_corr": round(max_abs_corr, 4),
+            "max_positive_corr": round(max_positive_corr, 4),
+            "max_abs_corr": (
+                round(legacy_max_abs, 4) if legacy_max_abs is not None else None
+            ),
             "k": k,
         }
     try:
@@ -261,24 +332,36 @@ def apply_portfolio_gate(
             "reason": "PF lower bound not coercible to float.",
             "per_code_corr": _round_per_code(per_code_corr),
             "pearson_per_code": _round_per_code(pearson_per_code),
-            "max_abs_corr": round(max_abs_corr, 4),
+            "max_positive_corr": round(max_positive_corr, 4),
+            "max_abs_corr": (
+                round(legacy_max_abs, 4) if legacy_max_abs is not None else None
+            ),
             "k": k,
         }
-    eff = effective_pf_lo(pf_lo_f, max_abs_corr, k)
+    eff = effective_pf_lo(pf_lo_f, max_positive_corr, k)
     return {
         "applied": True,
         "demote": eff <= 1.0,
         "method": method,
         "pf_lo_raw": round(pf_lo_f, 4),
         "pf_lo_effective": round(eff, 4),
-        "max_abs_corr": round(max_abs_corr, 4),
+        "max_positive_corr": round(max_positive_corr, 4),
+        # Legacy forensic field — computed from per_code_corr for
+        # backward-compat with consumers reading old payloads. The
+        # binding gate value is max_positive_corr, NOT max_abs_corr.
+        "max_abs_corr": (
+            round(legacy_max_abs, 4) if legacy_max_abs is not None else None
+        ),
         "per_code_corr": _round_per_code(per_code_corr),
         "pearson_per_code": _round_per_code(pearson_per_code),
         "k": k,
         "reason": (
-            f"pf_lo {round(pf_lo_f, 4)} × (1 - {k}·|{round(max_abs_corr, 4)}|) "
+            f"pf_lo {round(pf_lo_f, 4)} × (1 - {k}·"
+            f"max_positive_corr={round(max_positive_corr, 4)}) "
             f"= {round(eff, 4)}; "
-            f"{'demoted (effective <= 1.0)' if eff <= 1.0 else 'cleared (effective > 1.0)'}."
+            f"{'demoted (effective <= 1.0)' if eff <= 1.0 else 'cleared (effective > 1.0)'}. "
+            f"Negative correlations (diversification benefits) are NOT "
+            f"penalized — see per_code_corr for the full signed breakdown."
         ),
     }
 
@@ -357,15 +440,15 @@ async def evaluate_portfolio_gate(
         initial_capital = 100.0
     candidate_returns = daily_returns_from_trades(trades, initial_capital)
     baselines = await fetch_book_baselines(db)
-    spearman_max, spearman_per_code = max_abs_correlation(
+    spearman_max_positive, spearman_per_code = max_positive_correlation(
         candidate_returns, baselines, method="spearman"
     )
-    _, pearson_per_code = max_abs_correlation(
+    _, pearson_per_code = max_positive_correlation(
         candidate_returns, baselines, method="pearson"
     )
     return apply_portfolio_gate(
         pf_ci,
-        max_abs_corr=spearman_max,
+        max_positive_corr=spearman_max_positive,
         per_code_corr=spearman_per_code,
         pearson_per_code=pearson_per_code,
         method="spearman",

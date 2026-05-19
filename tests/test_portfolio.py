@@ -27,6 +27,7 @@ from orchestrator.services.portfolio import (
     daily_returns_from_trades,
     effective_pf_lo,
     max_abs_correlation,
+    max_positive_correlation,
     pearson_corr,
     spearman_corr,
 )
@@ -243,6 +244,53 @@ def test_max_abs_correlation_no_baselines_returns_none() -> None:
     assert per_code == {}
 
 
+# ── max_positive_correlation (2026-05-19 methodology fix) ─────────────
+
+
+def test_max_positive_correlation_picks_largest_positive() -> None:
+    # Candidate is rank-perfectly anti-correlated with LSR (-1.0) and
+    # perfectly correlated with VBO (+1.0). max_positive must be +1.0
+    # and per_code preserves the SIGNED values (no |abs|).
+    cand = _series([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0), (5, 5.0)])
+    base = {
+        "LSR": _series([(1, 5.0), (2, 4.0), (3, 3.0), (4, 2.0), (5, 1.0)]),
+        "VBO": _series([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0), (5, 5.0)]),
+    }
+    max_positive, per_code = max_positive_correlation(cand, base)
+    assert max_positive is not None and abs(max_positive - 1.0) < 1e-9
+    assert per_code["LSR"] is not None and abs(per_code["LSR"] + 1.0) < 1e-9
+    assert per_code["VBO"] is not None and abs(per_code["VBO"] - 1.0) < 1e-9
+
+
+def test_max_positive_correlation_all_negative_returns_zero() -> None:
+    # Every per-code correlation is negative (pure-diversifier candidate).
+    # max_positive returns 0.0 (no positive correlation present), not
+    # the |abs| value — i.e. the gate won't discount pf_lo at all.
+    cand = _series([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0), (5, 5.0)])
+    base = {
+        "LSR": _series([(1, 5.0), (2, 4.0), (3, 3.0), (4, 2.0), (5, 1.0)]),
+        "VCB": _series([(1, 4.0), (2, 3.5), (3, 3.0), (4, 2.5), (5, 2.0)]),
+    }
+    max_positive, per_code = max_positive_correlation(cand, base)
+    assert max_positive == 0.0
+    assert all(v is not None and v < 0 for v in per_code.values())
+
+
+def test_max_positive_correlation_no_baselines_returns_none() -> None:
+    cand = _series([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0), (5, 5.0)])
+    max_positive, per_code = max_positive_correlation(cand, {})
+    assert max_positive is None
+    assert per_code == {}
+
+
+def test_max_positive_correlation_method_pearson_explicit() -> None:
+    cand = _series([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0), (5, 5.0)])
+    base = {"LSR": _series([(1, 2.0), (2, 4.0), (3, 6.0), (4, 8.0), (5, 10.0)])}
+    max_positive, per_code = max_positive_correlation(cand, base, method="pearson")
+    assert max_positive is not None and abs(max_positive - 1.0) < 1e-9
+    assert per_code["LSR"] is not None and abs(per_code["LSR"] - 1.0) < 1e-9
+
+
 # ── effective_pf_lo ───────────────────────────────────────────────────
 
 
@@ -255,9 +303,15 @@ def test_effective_pf_lo_full_corr_halved() -> None:
     assert effective_pf_lo(1.5, 1.0) == 0.75
 
 
-def test_effective_pf_lo_negative_corr_uses_abs() -> None:
-    # |-0.6| = 0.6 → (1 - 0.5*0.6) = 0.7
-    assert effective_pf_lo(2.0, -0.6) == 1.4
+def test_effective_pf_lo_negative_input_clamps_to_zero_no_discount() -> None:
+    # Methodology fix (2026-05-19): negative correlation = diversification
+    # benefit, NOT duplication. effective_pf_lo's input is expected to be
+    # ``max_positive_corr`` (>=0); a negative input clamps to 0 (no
+    # discount) rather than reintroducing the |abs| semantic that
+    # falsely demoted hedges. See operator-escalation journal c58a4b8a.
+    assert effective_pf_lo(2.0, -0.6) == 2.0
+    # Behaviour mirror: 0.0 also yields no discount.
+    assert effective_pf_lo(2.0, 0.0) == 2.0
 
 
 def test_effective_pf_lo_clamps_corr_above_one() -> None:
@@ -269,7 +323,7 @@ def test_effective_pf_lo_clamps_corr_above_one() -> None:
 
 
 def test_apply_gate_no_baseline_skips() -> None:
-    out = apply_portfolio_gate({"low": 1.2, "high": 2.0}, max_abs_corr=None)
+    out = apply_portfolio_gate({"low": 1.2, "high": 2.0}, max_positive_corr=None)
     assert out["applied"] is False
     assert out["demote"] is False
 
@@ -298,14 +352,22 @@ def test_apply_gate_missing_pf_lo_skips() -> None:
 
 
 def test_apply_gate_emits_per_code_breakdown() -> None:
+    # max_positive_corr=0.20 (the only positive value; LSR at -0.55 is a
+    # hedge, not duplication). Verify both the signed per_code_corr
+    # breakdown AND the legacy max_abs_corr field (computed from the
+    # signed dict; |-0.55|=0.55) are surfaced for forensics.
     out = apply_portfolio_gate(
         {"low": 1.05, "high": 1.5},
-        max_abs_corr=0.55,
+        max_positive_corr=0.20,
         per_code_corr={"LSR": -0.55, "VCB": 0.20, "VBO": None},
     )
     assert out["per_code_corr"]["LSR"] == -0.55
     assert out["per_code_corr"]["VCB"] == 0.20
     assert out["per_code_corr"]["VBO"] is None
+    # Legacy forensic field still present (computed from signed dict).
+    assert out["max_abs_corr"] == 0.55
+    # New binding field.
+    assert out["max_positive_corr"] == 0.20
 
 
 def test_apply_gate_pf_lo_just_above_threshold_demotes_when_corr_high() -> None:
@@ -315,13 +377,47 @@ def test_apply_gate_pf_lo_just_above_threshold_demotes_when_corr_high() -> None:
     assert out["demote"] is True
 
 
-def test_apply_gate_anti_correlated_does_not_protect_only_redundant_ones() -> None:
-    # |rho|=0.7 with anti-corr; the gate uses absolute value, so still
-    # demoted. This is intentional — for graduation, redundancy is the
-    # concern; hedging value is a separate consideration the operator
-    # weighs at promotion time, not at edge confirmation.
-    out = apply_portfolio_gate({"low": 1.1, "high": 1.6}, abs(-0.7))
+def test_apply_gate_anti_correlated_does_not_demote_2026_05_19_fix() -> None:
+    # Methodology fix (2026-05-19): a candidate with strongly NEGATIVE
+    # correlation against book members is a diversifier (improves
+    # portfolio Sharpe), not duplication. Demoting it would falsely
+    # reject hedges. The gate now uses max-positive (not |abs|), so an
+    # anti-correlated candidate with NO positive correlations clears.
+    #
+    # Concretely: per_code_corr={"LSR": -0.7} → max_positive_corr = 0.0
+    # (no positive entries) → no discount → pf_lo_effective = pf_lo.
+    out = apply_portfolio_gate(
+        {"low": 1.1, "high": 1.6},
+        max_positive_corr=0.0,
+        per_code_corr={"LSR": -0.7},
+    )
+    assert out["applied"] is True
+    assert out["demote"] is False, (
+        "Anti-correlated candidate must NOT demote — diversification is "
+        "a benefit, not a duplication signal. If this assertion fires, "
+        "the |corr| bug has regressed (see operator-escalation journal "
+        "c58a4b8a)."
+    )
+    # Forensic: the signed per-code value is preserved.
+    assert out["per_code_corr"]["LSR"] == -0.7
+    # Legacy max_abs_corr field computed from signed dict for backward
+    # compat — readers of old payloads still get a familiar field.
+    assert out["max_abs_corr"] == 0.7
+
+
+def test_apply_gate_mixed_high_pos_and_high_neg_demotes_on_positive() -> None:
+    # Mirror of the review.py test: when a candidate has BOTH a
+    # high-positive correlation (duplication risk) AND a high-negative
+    # correlation (hedge), the positive duplication risk dominates —
+    # the hedge against one book member does NOT compensate for being
+    # a duplicate of another. pf_lo=1.1, max_positive=0.65 → discount.
+    out = apply_portfolio_gate(
+        {"low": 1.1, "high": 1.6},
+        max_positive_corr=0.65,
+        per_code_corr={"LSR": -0.70, "VCB": 0.65, "VBO": 0.10},
+    )
     assert out["demote"] is True
+    assert out["max_positive_corr"] == 0.65
 
 
 # ── evaluate_portfolio_gate (wiring integration) ──────────────────────

@@ -276,13 +276,23 @@ def _build_submit_payload(
     allow_long: bool = True,
     allow_short: bool = True,
     start_time_override: str | None = None,
+    ml_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Build the BacktestRunRequest payload for one sweep cell.
+
+    Phase B (V100, 2026-05-19): ``ml_overrides`` carries optional ML
+    gate overrides for this cell — gate enabled toggle, signal_name
+    variant, shadow-mode toggle. None / empty means "no override; JVM
+    uses account_strategy persisted values". The map is built by
+    :func:`sweep.build_ml_override_maps` from the sentinel keys in
+    the combo.
+    """
     # Window + sizing match research-tick.sh lines 340-359. endTime is
     # "yesterday UTC midnight" so we never test on a partial bar; bash
     # had a hardcoded date that drifted with each rebuild, this doesn't.
     end_time = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT00:00:00")
     start_time = start_time_override or "2024-01-01T00:00:00"
-    return {
+    payload: dict[str, Any] = {
         "accountStrategyId": account_strategy_id,
         "strategyCode": strategy_code,
         "asset": asset,
@@ -307,6 +317,12 @@ def _build_submit_payload(
         # their own. Backend defaults missing values to USER.
         "triggeredBy": "RESEARCHER",
     }
+    if ml_overrides:
+        # ml_overrides already has the JVM-side keys
+        # (strategyMl*Overrides) → {strategy_code: value}. Spread into
+        # the payload; absent keys are NOT added.
+        payload.update(ml_overrides)
+    return payload
 
 
 async def run_tick(
@@ -521,16 +537,26 @@ async def _execute_after_claim(
     # floor. None ⇒ default.
     window_cfg = sweep_config.get("backtest_window") or {}
     start_time_override = window_cfg.get("start_time")
+    # Phase B (V100, 2026-05-19): split sentinel ML keys out of the
+    # combo so they don't pollute strategyParamOverrides. The split
+    # values land on the JVM's strategyMl*Overrides fields instead.
+    # On non-ML sweeps both halves are dict + empty dict, no change.
+    regular_combo, ml_combo = sweep.split_ml_overrides(combo)
+    ml_override_payload = sweep.build_ml_override_maps(
+        strategy_code=strategy_code,
+        ml_overrides=ml_combo,
+    )
     payload = _build_submit_payload(
         account_strategy_id=as_row["account_strategy_id"],
         strategy_code=strategy_code,
         asset=instrument,
         interval_name=interval_name,
-        overrides=combo,
+        overrides=regular_combo,
         settings=settings,
         allow_long=as_row["allow_long"],
         allow_short=as_row["allow_short"],
         start_time_override=start_time_override,
+        ml_overrides=ml_override_payload,
     )
     backtest_run_id = await jvm.submit_backtest(payload)
     log.info(

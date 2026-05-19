@@ -392,10 +392,33 @@ def check_regime_concentration(iteration_metrics: dict[str, Any]) -> dict[str, A
 
 
 def check_portfolio_fit(iteration_metrics: dict[str, Any]) -> dict[str, Any]:
-    """Spearman max-|corr| with the protected book must be < threshold.
-    Highly redundant candidates don't justify a slot. The portfolio
-    gate in tick.py already demotes pre-graduation; the reviewer's
-    check confirms the gate ran and the call is correct. WARNING."""
+    """Spearman max-POSITIVE correlation with the protected book must be
+    < threshold. Highly redundant candidates (positively correlated with
+    existing book members) don't justify a slot. Negative correlations
+    are diversification benefits, not penalties — a strategy that hedges
+    the book IMPROVES portfolio Sharpe and must pass this check.
+
+    Updated 2026-05-19 (methodology fix): previously used
+    ``max_abs_corr`` which treated hedges and duplicates identically,
+    producing false REJECTs on legitimate diversifiers. Iter
+    ``88b4c6a3-d6d9-4836-91e9-ead4cf67d231`` (DCB BTC 4h, signed corr
+    -0.43 vs VCB) was the first such case to surface this drift.
+    Operator-escalation journal ``c58a4b8a-3d14-4b37-b1fe-ab5eb45cb3f7``
+    documents the diagnosis.
+
+    Methodology: the gate's purpose is to reject candidates that
+    DUPLICATE existing book exposure. Duplication = positive
+    correlation. Diversification = negative correlation. Only positive
+    correlations count against the threshold; negative ones are
+    informational (diversification benefit).
+
+    Note on the tick-time portfolio gate
+    (``portfolio.evaluate_portfolio_gate``): that gate is still using
+    ``|corr|`` and may demote legitimate diversifiers pre-graduation.
+    Discovered-during-implementation; tracked as follow-up. This
+    reviewer check uses the corrected methodology regardless.
+
+    WARNING."""
     pc = iteration_metrics.get("portfolio_corr") or {}
     if not pc.get("applied"):
         # Gate didn't fire (no baselines or no PF CI). Pass with note.
@@ -408,33 +431,73 @@ def check_portfolio_fit(iteration_metrics: dict[str, Any]) -> dict[str, Any]:
             "are expected.",
             applied=False,
         )
-    max_abs = pc.get("max_abs_corr")
-    if max_abs is None:
+
+    raw_per_code = pc.get("per_code_corr") or {}
+    # Coerce to floats; ignore None and non-numeric entries (forensics
+    # only — payload upstream is already rounded).
+    signed: dict[str, float] = {}
+    for code, value in raw_per_code.items():
+        if value is None:
+            continue
+        try:
+            signed[code] = float(value)
+        except (TypeError, ValueError):
+            continue
+
+    if not signed:
+        # No usable per-code correlations. Fall back to legacy
+        # ``max_abs_corr`` for diagnostic visibility but pass with
+        # explicit note — historical iterations predate per_code
+        # surfacing and should not be retroactively rejected.
+        legacy_max_abs = pc.get("max_abs_corr")
         return _check(
             "portfolio_fit",
             "warning",
             True,
-            "Portfolio gate ran but max_abs_corr is None.",
+            f"per_code_corr empty or unusable; legacy max_abs_corr"
+            f"={legacy_max_abs}. Cannot compute signed-correlation gate; "
+            f"passing with note (likely a pre-2026-05-19 iteration).",
             applied=True,
+            per_code=raw_per_code,
         )
-    try:
-        m = float(max_abs)
-    except (TypeError, ValueError):
-        return _check(
-            "portfolio_fit",
-            "warning",
-            False,
-            f"max_abs_corr {max_abs!r} not coercible to float.",
+
+    # Max positive correlation = duplication risk (penalized).
+    # Negative correlations = diversification benefit (not penalized).
+    positives = {code: v for code, v in signed.items() if v > 0}
+    max_positive = max(positives.values(), default=0.0)
+    most_positive_code = (
+        max(positives, key=positives.get) if positives else None
+    )
+    most_negative = min(signed.values())
+    most_negative_code = min(signed, key=signed.get)
+
+    passed = max_positive < PORTFOLIO_CORR_THRESHOLD
+    if not positives:
+        finding = (
+            f"All correlations are non-positive (most-negative: "
+            f"{round(most_negative, 4)} vs {most_negative_code}). "
+            f"Candidate is a pure diversifier vs the book — no "
+            f"duplication risk."
         )
-    passed = m < PORTFOLIO_CORR_THRESHOLD
+    else:
+        finding = (
+            f"max_positive_corr = {round(max_positive, 4)} (vs "
+            f"{most_positive_code}); "
+            f"{'< ' if passed else '>= '}{PORTFOLIO_CORR_THRESHOLD} "
+            f"threshold. Most-negative: {round(most_negative, 4)} vs "
+            f"{most_negative_code} (diversification benefit, not "
+            f"penalized)."
+        )
     return _check(
         "portfolio_fit",
         "warning",
         passed,
-        f"max_abs_corr = {round(m, 4)}; "
-        f"{'< ' if passed else '>= '}{PORTFOLIO_CORR_THRESHOLD} threshold.",
-        max_abs_corr=m,
-        per_code=pc.get("per_code_corr"),
+        finding,
+        max_positive_corr=round(max_positive, 4),
+        most_negative_corr=round(most_negative, 4),
+        most_positive_code=most_positive_code,
+        most_negative_code=most_negative_code,
+        per_code=raw_per_code,
     )
 
 

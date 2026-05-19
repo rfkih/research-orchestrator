@@ -295,6 +295,230 @@ async def playbook() -> Playbook:
                 idempotent=False,
             ),
             PlaybookCapability(
+                name="skeptic_prescreen",
+                method="POST",
+                path="/skeptic-prescreen",
+                purpose=(
+                    "Mechanical pattern checks on a graduation candidate "
+                    "BEFORE deciding whether to invoke the LLM "
+                    "quant-skeptic sub-agent. Body: {iteration_id, "
+                    "strategy_code, motivating_hypothesis_id?}. Returns "
+                    "five check blocks (archetype_churn_24h, "
+                    "repeat_axis_attempts, narrow_param_window, "
+                    "post_hoc_hypothesis_edit, dsr_trial_undercount) plus "
+                    "{any_flag_fired, n_flags, recommendation}. "
+                    "Researcher uses recommendation ∈ "
+                    "{invoke_skeptic_agent, skip_skeptic_agent} to decide "
+                    "whether to spawn the sonnet skeptic sub-agent. "
+                    "Saves Max-plan token budget on routine-clean grads."
+                ),
+                idempotent=False,
+            ),
+            PlaybookCapability(
+                name="portfolio_correlations",
+                method="POST",
+                path="/portfolio/correlations",
+                purpose=(
+                    "Pairwise Spearman correlation matrix over recent "
+                    "daily-return series of each strategy_code. Body: "
+                    "{strategy_codes (1-20), min_overlap_days (2-60, "
+                    "default 5)}. Returns {codes, matrix, "
+                    "max_abs_per_code, missing_strategies}. NaN entries "
+                    "indicate insufficient overlap — do NOT impute as "
+                    "zero. Pure NumPy; no LLM cost. Same data the V11 "
+                    "portfolio gate already consumes, exposed at the "
+                    "agent surface."
+                ),
+                idempotent=True,
+            ),
+            PlaybookCapability(
+                name="portfolio_optimize",
+                method="POST",
+                path="/portfolio/optimize",
+                purpose=(
+                    "Run three portfolio optimisers (equal_weight, HRP, "
+                    "mean_variance) over the candidate + protected book. "
+                    "Body: {strategy_codes, min_overlap_days, "
+                    "mu_by_code (optional expected daily returns), "
+                    "risk_aversion (default 1.0)}. Returns three weight "
+                    "vectors side-by-side, each with a summary "
+                    "{n_assets, max_weight, min_weight, "
+                    "concentration_hhi, n_effective}. The "
+                    "quant-portfolio-manager sub-agent reads these and "
+                    "picks one; this endpoint does NOT decide which "
+                    "optimiser to use. Pure NumPy; no LLM cost."
+                ),
+                idempotent=True,
+            ),
+            PlaybookCapability(
+                name="log_agent_decision",
+                method="POST",
+                path="/agent-decisions/log",
+                purpose=(
+                    "Append-only audit-row writer for the agent_decisions "
+                    "table (Flyway V97). Researcher posts here after "
+                    "each spawned specialist sub-agent returns its "
+                    "verdict (quant-skeptic, quant-portfolio-manager, "
+                    "quant-capacity-judge, quant-data-scout). Body: "
+                    "{specialist, endpoint, model_name?, "
+                    "request_payload, response_payload?, verdict?, "
+                    "latency_ms?, status ∈ {ok, parse_error, api_error, "
+                    "timeout, refused}, error_envelope?, "
+                    "motivating_iteration_id?, target_id?}. "
+                    "Idempotency-Key honoured for safe retry. Returns "
+                    "{decision_id}. The audit table is the durable "
+                    "record of every specialist invocation regardless "
+                    "of transport (sub-agent, HTTP, or future API)."
+                ),
+                idempotent=False,
+            ),
+            PlaybookCapability(
+                name="paired_delta",
+                method="POST",
+                path="/paired-delta",
+                purpose=(
+                    "Phase E (2026-05-19) — paired-delta analytics on "
+                    "an ML sweep. Partitions iteration_log rows into "
+                    "matched (gate-on, gate-off) pairs holding ALL non-"
+                    "ML params constant; computes per-pair delta on the "
+                    "chosen metric; paired-bootstrap CI; emits a verdict "
+                    "in {POSITIVE_DELTA, NEGATIVE_DELTA, NEUTRAL, "
+                    "INDETERMINATE}. Body: {queue_id OR iteration_ids, "
+                    "primary_metric ('sharpe' default), treatment_key "
+                    "(default '_ml_gate_enabled'), treatment_on_value "
+                    "(default true), treatment_off_value (default false), "
+                    "bootstrap_reps (default 1000), ci_level (0.95), "
+                    "rng_seed (42)}. NEGATIVE_DELTA is BINDING — the "
+                    "researcher's loop must journal STRATEGY_OUTCOME and "
+                    "back out to step 1 (Phase 4 Stage H signature: "
+                    "Sharpe -1.23 → -3.13 = model destroyed value). "
+                    "trade_count metric is always NEUTRAL (no clear "
+                    "good/bad direction)."
+                ),
+                idempotent=True,
+            ),
+            PlaybookCapability(
+                name="ml_prescreen",
+                method="POST",
+                path="/ml-prescreen",
+                purpose=(
+                    "Phase C (2026-05-19) — 5 mechanical overfit/leakage "
+                    "checks on a trained model artifact. Body: "
+                    "{model_id (UUID, optional), experiment_run_id (UUID, "
+                    "optional)} — at least one required. Reads "
+                    "model_registry + experiment_run rows. Returns "
+                    "{checks: [{check_name, severity (HARD|SOFT|PASS), "
+                    "flag, metric, threshold, finding}, ...], "
+                    "any_flag_fired, n_hard_flags, n_soft_flags, "
+                    "recommendation: 'invoke_ml_judge' | 'skip_ml_judge'}. "
+                    "The 5 checks: label_leakage_signature (leaking "
+                    "features in experiment_run.leakage_report), "
+                    "train_oof_auc_gap (saved_booster vs walk_forward "
+                    "mean), walk_forward_fold_cv (primary_std/mean), "
+                    "gauntlet_verdict (FAIL/WARN/PASS), "
+                    "deployment_ready_flag. Idempotency-Key honored. "
+                    "404 ml_artifacts_not_found = upstream training "
+                    "didn't register — do NOT proceed to wire the "
+                    "model into a sweep."
+                ),
+                idempotent=True,
+            ),
+            PlaybookCapability(
+                name="start_ml_training_run",
+                method="POST",
+                path="/ml/training-runs",
+                purpose=(
+                    "Spawn a blackheart-train subprocess to train one "
+                    "ModelSpec (Phase A of researcher-drives-ML, V99 "
+                    "ml_training_runs). Body: {spec_name, walk_forward?=true, "
+                    "gauntlet?=true, folds?, bayesian?=false, "
+                    "do_register?=true, allow_leakage?=false, no_write?=false, "
+                    "notes?, motivating_hypothesis_id?}. Returns 202 with "
+                    "{training_run_id, status:'PENDING', spec_name, cli_args, "
+                    "poll_url}. Subprocess runs out-of-band; poll the GET "
+                    "endpoint until status reaches a terminal value "
+                    "({COMPLETED, FAILED, TIMED_OUT, ORPHANED}). Per-agent "
+                    "daily cap (default 4/24h) enforced; FAILED rows don't "
+                    "count toward the cap. Idempotency-Key honoured."
+                ),
+                idempotent=True,
+            ),
+            PlaybookCapability(
+                name="get_ml_training_run",
+                method="GET",
+                path="/ml/training-runs/{training_run_id}",
+                purpose=(
+                    "Poll a single training run for status. Returns the "
+                    "full V99 row: status, exit_code, duration_seconds, "
+                    "stdout_tail (last 16KB), stderr_tail, content_sha256 "
+                    "(set on COMPLETED), model_id (set on COMPLETED when "
+                    "do_register was true), experiment_run_id (joinable "
+                    "to V92 experiment_run for gauntlet detail), "
+                    "error_envelope (set on FAILED/TIMED_OUT/ORPHANED)."
+                ),
+                idempotent=True,
+            ),
+            PlaybookCapability(
+                name="list_ml_model_specs",
+                method="GET",
+                path="/ml/model-specs",
+                purpose=(
+                    "Phase D (2026-05-19) — researcher discovery. Returns "
+                    "the operator-curated list of blackheart-train model "
+                    "spec names that can be passed as spec_name to POST "
+                    "/ml/training-runs. Mirrors the train CLI's "
+                    "_spec_choices() but lives in orchestrator settings "
+                    "(available_model_specs) so the read is cheap. The "
+                    "subprocess validates the name at training time; the "
+                    "orchestrator does not — invalid names fail with a "
+                    "FAILED row carrying argparse's error in stderr_tail."
+                ),
+                idempotent=True,
+            ),
+            PlaybookCapability(
+                name="list_ml_training_runs",
+                method="GET",
+                path="/ml/training-runs",
+                purpose=(
+                    "Recent training runs for the calling agent, newest "
+                    "first. Resume protocol: read this on session start "
+                    "to pick up RUNNING/PENDING work from a prior session "
+                    "rather than starting a duplicate. ?limit= up to 200."
+                ),
+                idempotent=True,
+            ),
+            PlaybookCapability(
+                name="auto_run_review_checklist",
+                method="POST",
+                path="/reviews/auto-run-checklist",
+                purpose=(
+                    "Run the reviewer checklist server-side and persist "
+                    "the verdict — the orchestrator-owned alternative to "
+                    "spawning a quant-reviewer sub-agent. Body: "
+                    "{target_id, target_kind ('plan'|'graduation')}. The "
+                    "request row written by POST /reviews/request must "
+                    "exist for the target_id; the auto-reviewer reads its "
+                    "payload to know which axis_names / hypothesis_id / "
+                    "iteration_id to audit. Runs the same pure-function "
+                    "checks as the standalone reviewer agent "
+                    "(plan: pre_registration + mechanism_named + "
+                    "axis_not_recently_failed; graduation: n_trades + "
+                    "pf_ci + dsr + cost_realism + regime_concentration + "
+                    "portfolio_fit + param_robustness) and the same "
+                    "aggregate_verdict rule, then writes a "
+                    "STRATEGY_OUTCOME journal row with reviewer="
+                    "'research-orchestrator-auto-reviewer' and closes the "
+                    "matching open request row. Idempotency-Key supported. "
+                    "Returns the verdict shape POST /reviews returns "
+                    "(verdict, findings, next_actions, etc.). The /queue "
+                    "and /walk-forward gates branch on the verdict string "
+                    "only — they do NOT discriminate auto-run verdicts "
+                    "from human-reviewer verdicts, so behavior downstream "
+                    "is unchanged."
+                ),
+                idempotent=False,
+            ),
+            PlaybookCapability(
                 name="submit_review_request",
                 method="POST",
                 path="/reviews/request",
@@ -348,6 +572,34 @@ async def playbook() -> Playbook:
                 idempotent=True,
             ),
             PlaybookCapability(
+                name="drain_tick_queue",
+                method="POST",
+                path="/tick/drain",
+                purpose=(
+                    "Drive POST /tick in a loop until summary.next_action "
+                    "reaches a terminal value (GRADUATE | PIVOT | "
+                    "EMPTY_QUEUE | INFRA_FAIL) or a cap fires. Replaces "
+                    "the quant-runner sub-agent — the researcher posts "
+                    "/tick/drain instead of spawning a haiku-tier "
+                    "polling agent. Body (all optional): max_iters "
+                    "(1-200, default 40), max_wall_clock_s (60-21600, "
+                    "default 10800 = 3h), max_consecutive_waits (1-10, "
+                    "default 3). Returns a structured digest: "
+                    "{terminal_action, iters_completed, verdicts "
+                    "{sig, insuf, no_edge, discard}, last_iteration_id, "
+                    "last_verdict_line, last_decision_hint, "
+                    "handoff_sentence, next_actions}. terminal_action "
+                    "values include MAX_ITERS_REACHED and "
+                    "MAX_WALL_CLOCK_REACHED — re-call to continue. "
+                    "Each internal /tick honours its own queue-claim "
+                    "semantics (FOR UPDATE SKIP LOCKED); concurrent "
+                    "drains never collide on the same row. "
+                    "Idempotency-Key replays the cached digest envelope "
+                    "without re-driving the queue."
+                ),
+                idempotent=False,
+            ),
+            PlaybookCapability(
                 name="run_null_screen",
                 method="POST",
                 path="/null-screen",
@@ -361,6 +613,50 @@ async def playbook() -> Playbook:
                     "multiplicity budget for the confirmatory sweep that "
                     "follows). Result journaled as NULL_SCREEN_RESULT. "
                     "Synchronous; ~30-60min for K=8."
+                ),
+                idempotent=False,
+            ),
+            PlaybookCapability(
+                name="run_inference",
+                method="POST",
+                path="/inference/run",
+                purpose=(
+                    "Single-bar inference. Proxies to blackheart-inference "
+                    "sidecar (:8000) which resolves signal_id → model → "
+                    "artifact, fetches features from feature_values at ts, "
+                    "runs Booster.predict(), and UPSERTs one signal_history "
+                    "row. Body: {signal_id (UUID), symbol, ts (ISO-8601), "
+                    "interval_name (5m|15m|1h|4h), source ('stream'|"
+                    "'catchup_scan'|'historical_replay', default 'stream')}. "
+                    "Idempotency-Key honoured. Returns {value, confidence, "
+                    "model_id, artifact_sha256, spec_name, objective}. "
+                    "Refuses retired signals/models, missing artifacts, "
+                    "missing feature_registry entries (409 with specific "
+                    "error_code). Use /features/{name}/v/{version}/backfill "
+                    "to populate gaps before retrying."
+                ),
+                idempotent=False,
+            ),
+            PlaybookCapability(
+                name="run_inference_backfill",
+                method="POST",
+                path="/inference/backfill",
+                purpose=(
+                    "Window inference. Same resolution path as /inference/run "
+                    "but iterates over [start, end). Used to populate "
+                    "signal_history over the historical range a paired-"
+                    "backtest will replay. Body: {signal_id, symbol, "
+                    "interval_name, start (ISO-8601), end (exclusive ISO-"
+                    "8601), source ('catchup_scan'|'historical_replay', "
+                    "default 'historical_replay')}. Capped at "
+                    "INFERENCE_MAX_BACKFILL_ROWS (default 50000) to prevent "
+                    "runaway windows; split + re-call on 413. Returns "
+                    "{rows_in_window, rows_written, "
+                    "rows_skipped_missing_features, model_id, "
+                    "artifact_sha256}. Skipped rows are gaps in "
+                    "feature_values — surface a /features backfill to fill "
+                    "them, then re-run inference backfill (UPSERT semantics "
+                    "make replay safe)."
                 ),
                 idempotent=False,
             ),
@@ -746,40 +1042,50 @@ async def playbook() -> Playbook:
                 name="paired-research-loop",
                 when=(
                     "User invokes quant-researcher; goal is a 4th profitable "
-                    "strategy (>=10%/yr ROBUST). Researcher drives the loop, "
-                    "reviewer audits at each gate."
+                    "strategy (>=10%/yr ROBUST). Researcher drives the loop "
+                    "via HTTP — the reviewer + runner are orchestrator "
+                    "endpoints, not sub-agents."
                 ),
                 steps=[
-                    "RESEARCHER: read state (journal, leaderboard, queue).",
-                    "RESEARCHER: write HYPOTHESIS journal entry (status=ACTIVE) BEFORE designing the plan.",
-                    "RESEARCHER: write RESEARCH_PLAN_<date>.md.",
-                    "RESEARCHER: POST /reviews/request with target_kind='plan' "
-                    "{strategy_code, axis_names, hypothesis_id}.",
-                    "RESEARCHER: spawn quant-reviewer subagent (Agent tool) "
-                    "with target_id from the response.",
-                    "REVIEWER: GET /reviews/pending → fetch the request.",
-                    "REVIEWER: GET /journal/{hypothesis_id} → read pre-registered "
-                    "HYPOTHESIS.",
-                    "REVIEWER: run plan_review_checklist (services/review.py) "
-                    "against artifacts.",
-                    "REVIEWER: POST /reviews with verdict + findings.",
-                    "RESEARCHER: GET /reviews/by-target?target_id=... → read verdict.",
-                    "If APPROVED: POST /queue (gated on APPROVED), POST /tick "
-                    "loop until SIGNIFICANT_EDGE or sweep exhausted.",
-                    "If REJECTED (round 1): address findings, re-submit; "
-                    "(round 2): pivot to next archetype/axis.",
-                    "On SIGNIFICANT_EDGE iteration: POST /reviews/request with "
-                    "target_kind='graduation' {iteration_id}.",
-                    "REVIEWER: graduation_review_checklist; POST /reviews.",
-                    "If APPROVED: POST /walk-forward (gated). If "
+                    "GET /agent/state — read queue depth + last verdict + "
+                    "active hypotheses.",
+                    "Write a HYPOTHESIS journal entry (status=ACTIVE) BEFORE "
+                    "designing the plan. Use POST /journal entry_type=HYPOTHESIS.",
+                    "Write RESEARCH_PLAN_<date>.md to disk.",
+                    "POST /reviews/request {target_kind:'plan', plan:"
+                    "{strategy_code, axis_names, hypothesis_id, plan_path}}.",
+                    "POST /reviews/auto-run-checklist {target_id, "
+                    "target_kind:'plan'} — orchestrator runs the checks, "
+                    "writes the verdict, closes the request row in one call.",
+                    "If verdict APPROVED or CONDITIONAL_APPROVAL: POST /queue "
+                    "(gated; rejects 409 review_required otherwise).",
+                    "If REJECTED (round 1): address findings, re-request, "
+                    "re-run /reviews/auto-run-checklist; (round 2 reject) "
+                    "pivot to next archetype/axis.",
+                    "POST /tick/drain — orchestrator loops /tick until "
+                    "terminal_action ∈ {GRADUATE, PIVOT, EMPTY_QUEUE, "
+                    "INFRA_FAIL, MAX_ITERS_REACHED, MAX_WALL_CLOCK_REACHED}. "
+                    "Returns the runner digest as JSON.",
+                    "On GRADUATE: POST /reviews/request {target_kind:"
+                    "'graduation', graduation:{iteration_id from digest}}, "
+                    "then POST /reviews/auto-run-checklist {target_id, "
+                    "target_kind:'graduation'}.",
+                    "If graduation APPROVED: POST /walk-forward (gated). If "
                     "stability=ROBUST AND return >= 10%/yr: WIN, exit loop.",
-                    "Else: journal lesson, pick next archetype, restart from "
-                    "step 1.",
+                    "On PIVOT / non-ROBUST: journal STRATEGY_OUTCOME, pick "
+                    "next archetype, restart from the HYPOTHESIS step.",
+                    "On MAX_ITERS_REACHED / MAX_WALL_CLOCK_REACHED: re-call "
+                    "/tick/drain to continue the same queue.",
                 ],
             ),
             PlaybookRecipe(
                 name="reviewer-cold-boot",
-                when="Reviewer agent is invoked (directly or via Agent subcall).",
+                when=(
+                    "Operator invokes a quant-reviewer agent manually (the "
+                    "qualitative-judgement path). The autonomous loop uses "
+                    "POST /reviews/auto-run-checklist instead and does NOT "
+                    "spawn a reviewer sub-agent."
+                ),
                 steps=[
                     "GET /agent/playbook — confirm contract.",
                     "GET /reviews/pending — fetch work queue (oldest first).",
@@ -926,6 +1232,59 @@ async def playbook() -> Playbook:
                     "current status, then retry with a target valid "
                     "from that source (or accept that another caller's "
                     "transition is the correct outcome).",
+                ],
+            ),
+            PlaybookRecipe(
+                name="ml-inference-backfill",
+                when=(
+                    "Researcher wants to populate signal_history for an "
+                    "ML model over a historical window — required for any "
+                    "downstream paired-backtest evaluation. Requires a "
+                    "registered model with status NOT IN (retired, "
+                    "rejected_by_operator), a signal_definition referencing "
+                    "it, and the features in feature_set already populated "
+                    "in feature_values across the target window."
+                ),
+                steps=[
+                    "GET /models?status=trained — find the registered model.",
+                    "GET /models/{model_id} — confirm artifact_sha256 + "
+                    "feature_set + objective.",
+                    "For each feature in feature_set, POST "
+                    "/features/{name}/v/{version}/backfill if coverage "
+                    "is short of the target window. GET "
+                    "/features/{name}/v/{version} first to see current "
+                    "row_count + earliest_ts + latest_ts.",
+                    "POST /inference/backfill {signal_id, symbol, "
+                    "interval_name, start, end, source: 'historical_replay'} "
+                    "— populate signal_history over the window. Estimated "
+                    "row count is pre-checked from interval + window; 413 "
+                    "backfill_window_too_large means split into chunks. "
+                    "rows_skipped_missing_features in the response tells "
+                    "you which timestamps had at least one feature absent "
+                    "— surface a /features backfill for the gap and re-run "
+                    "(UPSERT semantics make replay safe).",
+                    "Verify with GET /raw/signal_history or psql: rows "
+                    "should be present across the window with source="
+                    "'historical_replay' and your X-Agent-Name in "
+                    "created_by.",
+                    "PAIRED-BACKTEST IS NOT YET AUTOMATED. V79 wired the "
+                    "ML regime gate on account_strategy (mlGateEnabled / "
+                    "mlGateShadowMode) but did NOT add a corresponding "
+                    "strategy_ml_overrides JSONB on backtest_run — so a "
+                    "WITH-ML vs WITHOUT-ML comparison cannot be toggled "
+                    "per-backtest the way V62 lets you toggle "
+                    "kill_switch / correlation / regime / concurrent_cap. "
+                    "Options: (a) ask the operator to flip mlGateEnabled "
+                    "on the research-agent's account_strategy row "
+                    "between the two backtests, or (b) journal a "
+                    "DATA_WISHLIST for a V8N migration adding "
+                    "strategy_ml_overrides + JVM consumer changes. "
+                    "Do NOT touch production account_strategy rows.",
+                    "Per the Phase 4 Stage H lesson (regime_btc_v3 "
+                    "destroyed value on DCB-BTCUSDT-1h, Sharpe -1.23 -> "
+                    "-3.13), a NEGATIVE paired-delta is a real signal — "
+                    "journal STRATEGY_OUTCOME and abandon the gate, do "
+                    "not loosen thresholds to fit it.",
                 ],
             ),
             PlaybookRecipe(

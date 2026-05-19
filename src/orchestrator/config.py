@@ -103,6 +103,78 @@ class Settings(BaseSettings):
     # the worker is still running.
     ingest_request_timeout_s: float = Field(600.0, ge=1.0, le=3600.0)
 
+    # blackheart-inference (ML sidecar — Phase 4 stage A3, 2026-05-18).
+    # Loopback by default. POST /inference/run + /inference/backfill on the
+    # orchestrator proxy to ``{inference_base_url}/inference/*``. The token
+    # is the inference service's X-Inference-Token; the orchestrator owns
+    # its own ORCH_INFERENCE_AUTH_TOKEN env so caller-side and service-side
+    # secrets stay separate (matches the JVM auth pattern).
+    inference_base_url: str = "http://127.0.0.1:8000"
+    inference_request_timeout_s: float = Field(120.0, ge=1.0, le=3600.0)
+    # Sidecar's default INFERENCE_AUTH_TOKEN is the literal string "dev-token"
+    # (see blackheart-inference/src/blackheart_inference/settings.py). The
+    # orchestrator's own auth-token sentinel is a different value, so we
+    # can't reuse DEV_TOKEN_SENTINEL here — defaulting to "dev-token" keeps
+    # local dev frictionless. Production deployments MUST set both
+    # ORCH_INFERENCE_AUTH_TOKEN (here) and INFERENCE_AUTH_TOKEN (sidecar)
+    # to the same fresh secret; the sidecar's assert_prod_safe enforces
+    # that its own value isn't the dev sentinel under PROFILE=prod.
+    inference_auth_token: SecretStr = SecretStr("dev-token")
+
+    # Specialist agent model pins (Path A, Max-plan-only — 2026-05-19).
+    # No API client; specialists run as Claude Code Agent-tool sub-agents
+    # (or, as a fallback, via /claude -p subprocess) so every token bills
+    # against the operator's Max plan. The model names below get pinned
+    # in each specialist's .claude/agents/<name>.md frontmatter — keeping
+    # them here as well lets test_config catch any drift to opus that
+    # would silently bloat per-decision cost.
+    specialist_model_skeptic: str = "claude-sonnet-4-6"
+    specialist_model_portfolio: str = "claude-sonnet-4-6"
+    specialist_model_capacity: str = "claude-sonnet-4-6"
+    specialist_model_data_scout: str = "claude-sonnet-4-6"
+
+    # ML training orchestration (Phase A, 2026-05-19).
+    # POST /ml/training-runs spawns blackheart-train as a subprocess.
+    # The CLI lives at ``{ml_training_repo_path}/src/blackheart_train/cli.py``
+    # and is invoked via the project's own venv interpreter so dependency
+    # boundaries stay clean. Daily cap is per-agent to prevent any one
+    # researcher session from racking up unbounded train-runs; FAILED rows
+    # don't count toward the budget (infra failures shouldn't punish
+    # exploration).
+    ml_training_python_path: str = (
+        r"C:\Project\blackheart-train\.venv\Scripts\python.exe"
+    )
+    ml_training_repo_path: str = r"C:\Project\blackheart-train"
+    ml_training_daily_cap: int = Field(4, ge=1, le=100)
+    ml_training_daily_window_hours: int = Field(24, ge=1, le=168)
+    # Wall-clock cap per training subprocess. blackheart-train walk-
+    # forward + gauntlet on a 1h-bar 2-year dataset typically finishes
+    # in 30-90 min; the 4h ceiling covers Bayesian + 6-fold without
+    # leaving runaway processes alive forever.
+    ml_training_max_seconds: int = Field(14400, ge=60, le=86400)
+    # Per-row stdout/stderr capture cap. Tail-only — the artifact and
+    # experiment_run rows carry the structured detail.
+    ml_training_stdio_tail_bytes: int = Field(16384, ge=1024, le=1048576)
+    # Phase D (2026-05-19) — researcher discovers what model specs it can
+    # train via GET /ml/model-specs. This list mirrors
+    # blackheart-train/src/blackheart_train/specs.py's _spec_choices().
+    # Override via env: ORCH_AVAILABLE_MODEL_SPECS='["regime_btc_v3","regime_btc_v4"]'
+    # The orchestrator does NOT validate spec_name on POST /ml/training-runs
+    # — the subprocess argparse handles that. This list is a discovery
+    # helper; it's the researcher's job not to ask for a spec not on it.
+    available_model_specs: list[str] = Field(
+        default_factory=lambda: [
+            "regime_btc_v1",
+            "regime_btc_v2",
+            "regime_btc_v3",
+            "positioning_btc_v1",
+            "positioning_btc_v2",
+            "flow_btc_v1",
+            "flow_btc_v2",
+            "directional_btc_1h_v1",
+        ]
+    )
+
     @field_validator("auth_token")
     @classmethod
     def _reject_dev_sentinel_on_prod(cls, v: SecretStr, info) -> SecretStr:

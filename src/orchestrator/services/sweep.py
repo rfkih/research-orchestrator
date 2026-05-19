@@ -21,6 +21,73 @@ from __future__ import annotations
 from itertools import product
 from typing import Any
 
+# Phase B (2026-05-19) — sentinel param names recognized inside a
+# sweep combo and routed to BacktestRunRequest.strategyMl*Overrides
+# instead of strategyParamOverrides. Researchers vary these alongside
+# strategy params to paired-backtest ML on/off, model variant A/B/none,
+# and shadow vs blocking mode in one drain.
+ML_SENTINEL_GATE_ENABLED: str = "_ml_gate_enabled"
+ML_SENTINEL_SIGNAL_NAME: str = "_ml_signal_name"
+ML_SENTINEL_SHADOW_MODE: str = "_ml_shadow_mode"
+
+ML_SENTINELS: frozenset[str] = frozenset(
+    {ML_SENTINEL_GATE_ENABLED, ML_SENTINEL_SIGNAL_NAME, ML_SENTINEL_SHADOW_MODE}
+)
+
+
+def split_ml_overrides(
+    combo: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Split a sweep combo into (regular_params, ml_overrides).
+
+    Regular params go into ``strategyParamOverrides``. ML overrides go
+    into ``strategyMl*Overrides`` (the V100 columns). The split is
+    name-based: any key in :data:`ML_SENTINELS` is an ML override.
+
+    ``None`` values are preserved in the ML map — a None for
+    ``_ml_signal_name`` means "no override for this cell" (falls back
+    to ``account_strategy.ml_regime_signal_name``). The
+    :func:`build_ml_override_maps` step downstream filters None for the
+    JVM-side null-empty pruning.
+    """
+    if not combo:
+        return {}, {}
+    regular: dict[str, Any] = {}
+    ml: dict[str, Any] = {}
+    for k, v in combo.items():
+        if k in ML_SENTINELS:
+            ml[k] = v
+        else:
+            regular[k] = v
+    return regular, ml
+
+
+def build_ml_override_maps(
+    *,
+    strategy_code: str,
+    ml_overrides: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Translate the sentinel-keyed dict into the three V100 JVM maps.
+
+    Returns a dict with up to three keys (``strategyMlGateOverrides``,
+    ``strategyMlSignalNameOverrides``, ``strategyMlShadowModeOverrides``),
+    each pointing to ``{strategy_code: value}``. Sentinel values that
+    are None are omitted entirely (matches the JVM's null-key handling).
+    Empty input returns an empty dict so the caller can ``**spread`` it
+    into the payload without polluting it with three null fields.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    gate = ml_overrides.get(ML_SENTINEL_GATE_ENABLED)
+    if gate is not None:
+        out["strategyMlGateOverrides"] = {strategy_code: bool(gate)}
+    signal = ml_overrides.get(ML_SENTINEL_SIGNAL_NAME)
+    if signal is not None:
+        out["strategyMlSignalNameOverrides"] = {strategy_code: str(signal)}
+    shadow = ml_overrides.get(ML_SENTINEL_SHADOW_MODE)
+    if shadow is not None:
+        out["strategyMlShadowModeOverrides"] = {strategy_code: bool(shadow)}
+    return out
+
 
 def derive_combo(sweep_config: dict[str, Any], iter_index: int) -> dict[str, Any] | None:
     """Return the combo for ``iter_index`` (0-based), or None if exhausted.

@@ -151,3 +151,20 @@ def test_assert_prod_safe_noop_on_dev():
         research_account_id=None,
     )
     settings.assert_prod_safe()  # no raise — dev profile
+
+
+# ── Specialist model pins (Path A, Max-plan-only — 2026-05-19) ────────────
+
+
+def test_specialist_model_defaults_are_sonnet():
+    """Pin: default specialist models are sonnet-4-6 across the board.
+    A drift here (e.g. someone bumps skeptic to opus) shows up in the
+    operator's Max-plan token budget before anywhere else; the pin
+    catches it pre-deploy. The values get propagated into each
+    .claude/agents/<specialist>.md frontmatter — single source of truth
+    here means a model swap is one PR, not five."""
+    settings = _settings()
+    assert settings.specialist_model_skeptic == "claude-sonnet-4-6"
+    assert settings.specialist_model_portfolio == "claude-sonnet-4-6"
+    assert settings.specialist_model_capacity == "claude-sonnet-4-6"
+    assert settings.specialist_model_data_scout == "claude-sonnet-4-6"

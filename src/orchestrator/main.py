@@ -17,14 +17,17 @@ from .api.cross_window import router as cross_window_router
 from .api.experiments import router as experiments_router
 from .api.features import router as features_router
 from .api.health import router as health_router
+from .api.inference import router as inference_router
 from .api.iterations import router as iterations_router
 from .api.journal import router as journal_router
 from .api.json_response import TypedJSONResponse
+from .api.ml_training import router as ml_training_router
 from .api.models import router as models_router
 from .api.null_screen import router as null_screen_router
 from .api.queue import router as queue_router
 from .api.raw import router as raw_router
 from .api.reviews import router as reviews_router
+from .api.specialists import router as specialists_router
 from .api.tick import router as tick_router
 from .api.verdict_drift import router as verdict_drift_router
 from .api.walk_forward import router as walk_forward_router
@@ -73,6 +76,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(models_router)
     app.include_router(experiments_router)
     app.include_router(raw_router)
+    app.include_router(inference_router)
+    app.include_router(specialists_router)
+    app.include_router(ml_training_router)
     return app
 
 

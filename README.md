@@ -101,6 +101,9 @@ src/orchestrator/
     queue.py         — /queue, /queue/{queue_id}
     iterations.py    — /iterations, /iterations/{id}, /leaderboard
     journal.py       — /journal, /journal/{id}
+    reviews.py       — /reviews/request, /reviews, /reviews/by-target,
+                       /reviews/auto-run-checklist (server-side reviewer)
+    tick.py          — /tick, /tick/drain (server-side runner)
     pagination.py    — opaque cursor encode/decode
     json_response.py — Decimal/UUID/datetime-aware encoder
     deps.py          — DB connection + agent-name dependencies

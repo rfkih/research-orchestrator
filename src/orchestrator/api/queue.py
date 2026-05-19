@@ -15,6 +15,7 @@ from ..repo import hypothesis_audit as audit_repo
 from ..repo import queue as queue_repo
 from ..repo import queue_write
 from ..repo import reviews as reviews_repo
+from ..services import portfolio, sweep
 from ..services.activity_logger import log_activity
 from ..services.idempotency import cache_response, replay_cached_response
 from .constants import REVIEW_VERDICTS_PASSING_GATE, VALID_INTERVAL_NAMES
@@ -233,6 +234,38 @@ async def enqueue(
             message=f"interval_name must be one of {sorted(VALID_INTERVAL_NAMES)}.",
             retryable=False,
             hint="Backtest engine ticks 5m; finer granularities will silently miss bars.",
+        )
+
+    # Phase B (V100, 2026-05-19): ML override sentinels in sweep_config
+    # are research-mode-only. The production book (LSR/VCB/VBO) cannot
+    # be paired-backtested with an ML gate toggled on/off via the
+    # research queue — that would race against the live serving path
+    # and risk corrupting persisted state. Operator may use the
+    # standalone /api/v1/admin or psql to flip a production row.
+    sweep_param_names = {
+        p["name"] for p in body.sweep_config.model_dump().get("params", [])
+    }
+    ml_sentinels_used = sweep_param_names & sweep.ML_SENTINELS
+    if ml_sentinels_used and body.strategy_code in portfolio.PROTECTED_STRATEGY_CODES:
+        raise OrchestratorError(
+            status_code=409,
+            error_code="ml_sentinels_on_production_strategy",
+            message=(
+                f"ML override sentinels {sorted(ml_sentinels_used)} cannot "
+                f"target the production strategy {body.strategy_code!r}. "
+                f"ML paired-backtests are research-mode only."
+            ),
+            retryable=False,
+            hint=(
+                "Create a research-mode strategy_code variant (enabled=false, "
+                "simulated=true) and target that. Or, if you just want to "
+                "vary regular params on the production strategy, remove the "
+                "ML sentinel keys from sweep_config.params."
+            ),
+            details={
+                "sentinels_seen": sorted(ml_sentinels_used),
+                "protected_strategies": sorted(portfolio.PROTECTED_STRATEGY_CODES),
+            },
         )
 
     # Idempotency-Key replay: same agent + key returns the original response

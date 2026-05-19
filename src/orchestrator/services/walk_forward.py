@@ -266,7 +266,7 @@ async def run_walk_forward(
                 "test_start": test_start.isoformat(),
                 "test_end": test_end.isoformat(),
                 "run_id": None,
-                "error": e.error_code,
+                "error": e.envelope.error_code,
             })
             continue
 
