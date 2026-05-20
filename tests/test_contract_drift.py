@@ -125,14 +125,15 @@ def test_agent_prompt_cites_v60_economic_gate_field_name(
     )
 
 
-def test_agent_prompt_terminal_count_header_says_six(
+def test_agent_prompt_terminal_count_header_says_seven(
     agent_prompt_text: str,
 ) -> None:
-    """As of 2026-05-19 (operator-escalation addition) the terminals are
-    GOAL_HIT, WALL_CLOCK_CAP, INFRA_HARD_FAIL, HARD_RULE_VIOLATION,
-    ARCHETYPE_EXHAUSTION, OPERATOR_ESCALATION. The "Terminal conditions"
-    header must say "ONLY six ways" — if a future edit adds a 7th
-    terminal without updating the header, this fails loud.
+    """As of 2026-05-20 (Path C async specialist review) the terminals are
+    GOAL_HIT, SPECIALIST_REVIEW_PENDING, WALL_CLOCK_CAP, INFRA_HARD_FAIL,
+    HARD_RULE_VIOLATION, ARCHETYPE_EXHAUSTION, OPERATOR_ESCALATION. The
+    "Terminal conditions" header must say "ONLY seven ways" — if a future
+    edit adds an 8th terminal (or removes one) without updating the header,
+    this fails loud.
     """
     match = re.search(
         r"Terminal conditions \(the ONLY (\w+) ways the loop ends\)",
@@ -143,27 +144,32 @@ def test_agent_prompt_terminal_count_header_says_six(
         "ends)' header in the agent prompt. Either the header was renamed "
         "or the prompt structure drifted."
     )
-    assert match.group(1) == "six", (
+    assert match.group(1) == "seven", (
         f"Terminal conditions header says ONLY {match.group(1)} ways; "
-        f"expected six. Update the header AND the terminals table AND "
+        f"expected seven. Update the header AND the terminals table AND "
         f"the 'no Nth exit' paragraph together, or update none of them."
     )
 
 
-def test_agent_prompt_terminal_table_has_six_rows(
+def test_agent_prompt_terminal_table_has_seven_rows(
     agent_prompt_text: str,
 ) -> None:
-    """The 'Terminal conditions' table must have exactly six data rows
-    (GOAL_HIT, WALL_CLOCK_CAP, INFRA_HARD_FAIL, HARD_RULE_VIOLATION,
-    ARCHETYPE_EXHAUSTION, OPERATOR_ESCALATION). Complements
-    ``test_agent_prompt_terminal_count_header_says_six`` — that test
-    pins the *header word*, this one pins the actual *table content*.
-    Drift signal: a 7th row added silently without updating the header
-    would pass the header-only test but fail this one.
+    """The 'Terminal conditions' table must have exactly seven data rows
+    (GOAL_HIT, SPECIALIST_REVIEW_PENDING, WALL_CLOCK_CAP, INFRA_HARD_FAIL,
+    HARD_RULE_VIOLATION, ARCHETYPE_EXHAUSTION, OPERATOR_ESCALATION).
+    Complements ``test_agent_prompt_terminal_count_header_says_seven`` —
+    that test pins the *header word*, this one pins the actual *table
+    content*. Drift signal: an 8th row added silently without updating
+    the header would pass the header-only test but fail this one.
     """
+    # Accept either the legacy bold-paragraph header (**Terminal conditions
+    # (the ONLY N ways the loop ends):**) or the post-2026-05-20 slim-prompt
+    # h2 header (## Terminal conditions (the ONLY N ways the loop ends)).
+    # Both shapes were canonical at different points; the table content is
+    # what this test pins, not the header style.
     section_match = re.search(
-        r"\*\*Terminal conditions \(the ONLY \w+ ways the loop ends\):\*\*"
-        r"(.+?)(?=\n\*\*|\n## )",
+        r"(?:\*\*|##\s+)Terminal conditions \(the ONLY \w+ ways the loop ends\)"
+        r"(?::\*\*|\s*)\n(.+?)(?=\n\*\*|\n## )",
         agent_prompt_text,
         re.DOTALL,
     )
@@ -174,9 +180,9 @@ def test_agent_prompt_terminal_table_has_six_rows(
     row_headers = re.findall(
         r"^\|\s+\*\*[A-Z_]+\*\*\s+\|", section, re.MULTILINE
     )
-    assert len(row_headers) == 6, (
+    assert len(row_headers) == 7, (
         f"Terminal conditions table has {len(row_headers)} data rows; "
-        f"expected 6. Rows found: {row_headers}. Update the header word "
+        f"expected 7. Rows found: {row_headers}. Update the header word "
         f"AND the table together — drift between them is the failure "
         f"mode this test is designed to catch."
     )
@@ -265,4 +271,156 @@ def test_agent_prompt_hard_rule_count_matches_terminal_reference(
         f"Hard constraints section has {len(rule_headers)} numbered rules, "
         f"but the HARD_RULE_VIOLATION terminal references {declared_count}. "
         f"Update both together — they must agree."
+    )
+
+
+# ── 2026-05-20 slim-prompt drift tests ─────────────────────────────────
+#
+# After the 2026-05-20 refactor, the researcher prompt is the "immutable
+# lens" (mission, gates, terminals, hard rules) and the playbook is the
+# "procedure" (HTTP recipes, step bodies). These three tests pin the
+# partitioning so a future edit doesn't either (a) silently drop a
+# load-bearing constant from the prompt or (b) silently put recipe-detail
+# back into the prompt.
+
+# Constants the prompt MUST cite verbatim. Drift on any of these is a
+# contract failure — the gate or terminal that depends on it would fire
+# wrong if the agent re-derived the value from prose.
+_LOAD_BEARING_CONSTANTS = (
+    "annualized_geometric_return_pct_at_alloc_90",  # V60 economic gate field
+    "MIN_TRADES_FOR_SIG",                           # V11 stat-rigor field
+    "BTCUSDT and ETHUSDT only",                     # universe constraint
+    "5m / 15m / 1h / 4h",                           # interval constraint
+    "LSR, VCB, VBO",                                # protected book
+    "7.5",                                          # wall-clock cap (hours)
+    "10%",                                          # profitability bar prose
+    "PF lower 95% CI > 1.0",                        # V11 PF gate
+    "DSR ≥ 0.95",                                   # V11 DSR threshold
+    "research-mode",                                # never auto-promote
+    "/specialist-review/request",                   # Path C trigger endpoint
+    "PATH_C_RESUMING_",                             # crash-safety marker
+)
+
+# Terminal names that MUST appear in the prompt. The resume protocol
+# branches on title prefixes; if a terminal name disappears from the
+# prompt, the agent has no instruction to fire it even though the
+# orchestrator may still expect it.
+_TERMINAL_NAMES = (
+    "GOAL_HIT",
+    "SPECIALIST_REVIEW_PENDING",
+    "WALL_CLOCK_CAP",
+    "INFRA_HARD_FAIL",
+    "HARD_RULE_VIOLATION",
+    "ARCHETYPE_EXHAUSTION",
+    "OPERATOR_ESCALATION",
+)
+
+
+def test_agent_prompt_cites_all_load_bearing_constants(
+    agent_prompt_text: str,
+) -> None:
+    """Every load-bearing constant must appear verbatim in the prompt.
+
+    Drift signal: if any of these silently disappears, the agent might
+    re-derive the constant from prose ("10%/yr" → "10 percent per year")
+    and the gate that consumes the verbatim field name (e.g. V60's
+    `annualized_geometric_return_pct_at_alloc_90 >= 10`) won't trigger
+    correctly.
+    """
+    missing = [c for c in _LOAD_BEARING_CONSTANTS if c not in agent_prompt_text]
+    assert not missing, (
+        "Slim prompt no longer cites load-bearing constants verbatim: "
+        f"{missing}. Either restore them inline or update this pin list "
+        "with a clear rationale (e.g. the constant moved into the "
+        "playbook as part of a deliberate contract change)."
+    )
+
+
+def test_agent_prompt_names_all_seven_terminals(
+    agent_prompt_text: str,
+) -> None:
+    """All 7 terminal names must appear in the prompt body — the
+    resume protocol depends on each one being declared."""
+    missing = [t for t in _TERMINAL_NAMES if t not in agent_prompt_text]
+    assert not missing, (
+        f"Slim prompt no longer names terminal(s) {missing}. The resume "
+        "protocol matches by title prefix; missing names mean the agent "
+        "cannot fire those terminals."
+    )
+
+
+# Heuristic regexes that indicate the prompt has absorbed procedural
+# content that belongs in the playbook. Each pattern is conservative
+# (single literal anchors) so the test doesn't false-positive on the
+# loop-outline pseudocode block.
+_RECIPE_LEAK_PATTERNS = (
+    # Inline orch.sh invocations (recipe-shaped):
+    re.compile(r"scripts/orch\.sh\s+(?:GET|POST)", re.IGNORECASE),
+    # uuidgen-style idempotency keys (the deterministic-key formulae
+    # belong in the playbook §Idempotency keys reference table):
+    re.compile(r"\$\(uuidgen\)"),
+    # python heredoc bodies (recipe-shaped):
+    re.compile(r"python\s+-\s+<<'PY'", re.IGNORECASE),
+    # jq pipelines:
+    re.compile(r"\|\s*jq\s+"),
+)
+
+
+def test_agent_prompt_does_not_leak_recipe_content(
+    agent_prompt_text: str,
+) -> None:
+    """The slim prompt is the invariant lens; HTTP recipes / shell
+    commands / jq pipelines belong in the playbook. Any leak here means
+    the partitioning is degrading — the prompt is silently re-absorbing
+    procedural detail and we'll be back at 500+ lines in a few sessions.
+    """
+    leaks: list[tuple[str, str]] = []
+    for pattern in _RECIPE_LEAK_PATTERNS:
+        for match in pattern.finditer(agent_prompt_text):
+            ctx_start = max(0, match.start() - 60)
+            ctx_end = min(len(agent_prompt_text), match.end() + 60)
+            leaks.append(
+                (pattern.pattern, agent_prompt_text[ctx_start:ctx_end])
+            )
+    assert not leaks, (
+        f"Slim prompt absorbed recipe content. {len(leaks)} leak(s) "
+        f"found. First context:\n{leaks[0][1] if leaks else ''}\n\n"
+        "Move the recipe to research/agent-playbooks/quant-researcher-"
+        "workflow.md and keep the prompt outline-only."
+    )
+
+
+def test_playbook_has_section_for_every_loop_step_named_in_prompt(
+    agent_prompt_text: str, playbook_text: str
+) -> None:
+    """Every loop step referenced in the prompt's outline must have a
+    matching `### Step N` (or equivalent) heading in the playbook. The
+    prompt is intentionally outline-only; if it names step 7.6 (Path C
+    async checkpoint) without the playbook describing it, the agent
+    has nothing to execute against.
+    """
+    # Step labels the prompt's outline references. Anchored on the
+    # loop-pseudocode block — these are the steps the agent has to
+    # execute. Format: tuple of (prompt_label, playbook_heading_hint).
+    expected_steps = (
+        ("step 1", "### 1."),
+        ("step 2", "### 2."),
+        ("step 3", "### 3."),
+        ("step 4", "### 4."),
+        ("step 7", "### 5"),     # playbook merges steps 5 + 6 + 7
+        ("step 9", "### 7.45"),  # paired-delta gate at 9.0
+        ("step 9d", "### 7.6"),  # Path C async checkpoint
+        ("step 10", "### 7.5"),  # walk-forward request (step 7.5 in playbook covers this)
+    )
+    missing: list[tuple[str, str]] = []
+    for prompt_label, playbook_hint in expected_steps:
+        if prompt_label not in agent_prompt_text:
+            missing.append((prompt_label, "absent from prompt"))
+            continue
+        if playbook_hint not in playbook_text:
+            missing.append((prompt_label, f"playbook hint {playbook_hint!r} absent"))
+    assert not missing, (
+        f"Prompt-playbook step partitioning broken: {missing}. Either "
+        "restore the missing playbook heading or update the prompt's "
+        "loop outline to not reference it."
     )

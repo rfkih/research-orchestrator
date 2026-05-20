@@ -121,6 +121,53 @@ def test_slippage_sensitivity_handles_empty() -> None:
     assert out == {"+20bps": 0.0}
 
 
+def test_slippage_sensitivity_uses_notional_size_when_present() -> None:
+    """Methodology fix (2026-05-20): when ``trade.notional_size`` is
+    present, slippage_sensitivity uses the engine-sized notional
+    instead of the legacy ``max(|pnl|, 10) × 50`` proxy.
+
+    100 trades, $1 PnL each (gross +$100), $50 notional each.
+    +50bps: haircut = 100 × $50 × 0.005 = $25 → net +$75.
+    Legacy proxy would compute notional = $500/trade → haircut $250
+    → net -$150 (falsely classifies as cost-fragile). This pins the
+    corrected behaviour — see memory
+    ``project_retired_cost_gate_methodology_bug``.
+    """
+    trades = [{"realized_pnl_amount": 1.0, "notional_size": 50.0}] * 100
+    out = slippage_sensitivity(trades, scenarios=(50,))
+    assert out["+50bps"] == 75.0, (
+        f"Expected net +75 with real notional, got {out['+50bps']}. "
+        f"If close to -150 the legacy proxy has regressed."
+    )
+
+
+def test_slippage_sensitivity_mixed_notional_falls_back_per_trade() -> None:
+    """Mixed input: 50 trades carry ``notional_size``, 50 are legacy
+    rows. Each trade uses its own data source — fallback is per-trade,
+    not all-or-nothing.
+    """
+    trades = (
+        [{"realized_pnl_amount": 1.0, "notional_size": 50.0}] * 50
+        + [{"realized_pnl_amount": 1.0}] * 50
+    )
+    out = slippage_sensitivity(trades, scenarios=(50,))
+    # Modern half: gross 50, haircut 50×50×0.005 = 12.5 → net 37.5
+    # Legacy half: gross 50, haircut 50×500×0.005 = 125 → net -75
+    # Total: 37.5 + (-75) = -37.5
+    assert out["+50bps"] == -37.5
+
+
+def test_slippage_sensitivity_legacy_unchanged_when_no_notional() -> None:
+    """Backwards compat: trades without ``notional_size`` get the
+    legacy proxy untouched. 10 trades of $2 PnL each.
+    Legacy: notional = max(2, 10) × 50 = $500, haircut $2.50/trade,
+    total haircut $25. Gross 20. Net -5.
+    """
+    trades = [{"realized_pnl_amount": 2.0}] * 10
+    out = slippage_sensitivity(trades, scenarios=(50,))
+    assert out["+50bps"] == -5.0
+
+
 # ── regimes ─────────────────────────────────────────────────────────────
 
 

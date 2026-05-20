@@ -45,6 +45,8 @@ class FakeConn:
         self.hypothesis_rows: list[dict[str, Any]] = []
         self.run_summary_row: dict[str, Any] | None = None
         self.null_screen_rows: list[dict[str, Any]] = []
+        self.pending_specialist_rows: list[dict[str, Any]] = []
+        self.recent_specialist_verdict_rows: list[dict[str, Any]] = []
 
     async def fetch(self, sql: str, *args: Any) -> list[_Row]:
         s = sql.lower()
@@ -58,6 +60,10 @@ class FakeConn:
             return [_Row(r) for r in self.hypothesis_rows]
         if "entry_type = 'null_screen_result'" in s:
             return [_Row(r) for r in self.null_screen_rows]
+        if "entry_type = 'idea_backlog'" in s and "specialist_review_request" in s:
+            return [_Row(r) for r in self.pending_specialist_rows]
+        if "entry_type = 'strategy_outcome'" in s and "specialist_review_verdict" in s:
+            return [_Row(r) for r in self.recent_specialist_verdict_rows]
         raise AssertionError(f"Unexpected fetch SQL fragment:\n{sql}")
 
     async def fetchrow(self, sql: str, *args: Any) -> _Row | None:
@@ -280,6 +286,8 @@ async def test_get_state_digest_composes_all_slices() -> None:
         "active_hypotheses",
         "last_run_summary",
         "last_null_screen_per_surface",
+        "pending_specialist_reviews",
+        "recent_specialist_verdicts",
     }
     assert out["queue_counts"]["PENDING"] == 2
     assert len(out["last_iterations"]) == 1
@@ -287,3 +295,80 @@ async def test_get_state_digest_composes_all_slices() -> None:
     assert out["active_hypotheses"] == []
     assert out["last_run_summary"] is None
     assert out["last_null_screen_per_surface"] == []
+    assert out["pending_specialist_reviews"] == []
+    assert out["recent_specialist_verdicts"] == []
+
+
+# ── _pending_specialist_reviews / _recent_specialist_verdicts ───────
+
+
+@pytest.mark.asyncio
+async def test_pending_specialist_reviews_shape() -> None:
+    """Path C resume-protocol slice: a candidate iteration with a still-
+    open quant-skeptic review must surface in the digest so step 1a can
+    detect it and exit again on SPECIALIST_REVIEW_PENDING."""
+    conn = FakeConn()
+    jid = uuid4()
+    iid = uuid4()
+    conn.pending_specialist_rows = [
+        {
+            "journal_id": jid,
+            "strategy_code": "ATR_MOM",
+            "specialist_name": "quant-skeptic",
+            "iteration_id": str(iid),
+            "target_id": f"specialist:quant-skeptic:{iid}",
+            "created_time": datetime.now(timezone.utc),
+        }
+    ]
+    out = await repo._pending_specialist_reviews(conn)  # type: ignore[arg-type]
+    assert len(out) == 1
+    assert out[0]["specialist_name"] == "quant-skeptic"
+    assert out[0]["iteration_id"] == str(iid)
+    assert out[0]["target_id"].startswith("specialist:quant-skeptic:")
+
+
+@pytest.mark.asyncio
+async def test_recent_specialist_verdicts_veto_flag() -> None:
+    """is_veto=True on an OVERRIDE_REJECT is the load-bearing field the
+    researcher reads to decide whether to journal STRATEGY_OUTCOME and
+    pivot. Pin it explicitly."""
+    conn = FakeConn()
+    iid = uuid4()
+    conn.recent_specialist_verdict_rows = [
+        {
+            "journal_id": uuid4(),
+            "strategy_code": "ATR_MOM",
+            "specialist_name": "quant-skeptic",
+            "iteration_id": str(iid),
+            "target_id": f"specialist:quant-skeptic:{iid}",
+            "verdict": "OVERRIDE_REJECT",
+            "is_veto": True,
+            "created_time": datetime.now(timezone.utc),
+        }
+    ]
+    out = await repo._recent_specialist_verdicts(conn)  # type: ignore[arg-type]
+    assert len(out) == 1
+    assert out[0]["verdict"] == "OVERRIDE_REJECT"
+    assert out[0]["is_veto"] is True
+
+
+@pytest.mark.asyncio
+async def test_recent_specialist_verdicts_handles_null_is_veto() -> None:
+    """A row written before the is_veto column was added (or by buggy
+    upstream code) should default to is_veto=False — the researcher
+    must not treat NULL as veto-by-accident."""
+    conn = FakeConn()
+    conn.recent_specialist_verdict_rows = [
+        {
+            "journal_id": uuid4(),
+            "strategy_code": "ATR_MOM",
+            "specialist_name": "quant-portfolio-manager",
+            "iteration_id": str(uuid4()),
+            "target_id": "specialist:quant-portfolio-manager:abc",
+            "verdict": "ADD",
+            "is_veto": None,
+            "created_time": datetime.now(timezone.utc),
+        }
+    ]
+    out = await repo._recent_specialist_verdicts(conn)  # type: ignore[arg-type]
+    assert out[0]["is_veto"] is False

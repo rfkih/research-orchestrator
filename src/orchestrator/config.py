@@ -172,6 +172,13 @@ class Settings(BaseSettings):
             "flow_btc_v1",
             "flow_btc_v2",
             "directional_btc_1h_v1",
+            # 2026-05-20: first per-symbol ETH ML spec. Authored after
+            # bar-OHLCV parametric search hit lifecycle exhaustion across
+            # BTC+ETH × 4 intervals. Backed by V110 migration which
+            # expanded 5 derived features+label to symbols=
+            # ('BTCUSDT','ETHUSDT'). See specs.py docstring on
+            # regime_eth_v1 for design notes.
+            "regime_eth_v1",
         ]
     )
 

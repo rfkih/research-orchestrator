@@ -1337,6 +1337,42 @@ class NullScreenDigest(BaseModel):
     created_time: datetime
 
 
+class PendingSpecialistReviewDigest(BaseModel):
+    """One open ``specialist_review_request`` row.
+
+    Researcher's step-1a resume protocol reads these to know if the
+    operator's ``/run-pending-specialists`` slash command still owes a
+    verdict on a candidate that hit the SPECIALIST_REVIEW_PENDING
+    terminal in a prior session.
+    """
+
+    journal_id: str
+    strategy_code: str | None = None
+    specialist_name: str | None = None
+    iteration_id: str | None = None
+    target_id: str | None = None
+    created_time: datetime
+
+
+class RecentSpecialistVerdictDigest(BaseModel):
+    """One recent ``specialist_review_verdict`` row (≤72h window).
+
+    ``is_veto=True`` means the specialist returned OVERRIDE_REJECT
+    (skeptic / ml-judge) or REJECT (portfolio). The researcher's resume
+    protocol journals STRATEGY_OUTCOME and pivots back to step 1 on any
+    veto for the active candidate iteration.
+    """
+
+    journal_id: str
+    strategy_code: str | None = None
+    specialist_name: str | None = None
+    iteration_id: str | None = None
+    target_id: str | None = None
+    verdict: str | None = None
+    is_veto: bool
+    created_time: datetime
+
+
 class AgentState(BaseModel):
     """One-shot research-state digest (Phase 2).
 
@@ -1365,6 +1401,8 @@ class AgentState(BaseModel):
     active_hypotheses: list[HypothesisDigest] | None = None
     last_run_summary: RunSummaryDigest | None = None
     last_null_screen_per_surface: list[NullScreenDigest] | None = None
+    pending_specialist_reviews: list[PendingSpecialistReviewDigest] | None = None
+    recent_specialist_verdicts: list[RecentSpecialistVerdictDigest] | None = None
 
 
 @router.get("/state", response_model=AgentState)
@@ -1411,5 +1449,11 @@ async def agent_state(request: Request) -> AgentState:
         last_run_summary=(digest or {}).get("last_run_summary") if digest else None,
         last_null_screen_per_surface=(
             (digest or {}).get("last_null_screen_per_surface") if digest else None
+        ),
+        pending_specialist_reviews=(
+            (digest or {}).get("pending_specialist_reviews") if digest else None
+        ),
+        recent_specialist_verdicts=(
+            (digest or {}).get("recent_specialist_verdicts") if digest else None
         ),
     )

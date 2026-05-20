@@ -261,14 +261,32 @@ def slippage_sensitivity(
 ) -> dict[str, float]:
     """Project net PnL across slippage haircut scenarios.
 
-    Approximation: notional ≈ max(|pnl|, $10) × 50. The bash analyzer
-    uses the same proxy because backtest_trade doesn't expose per-trade
-    notional cleanly; this is order-of-magnitude correct and gives a
-    relative ranking, which is what the verdict gate uses.
+    Notional source (updated 2026-05-20):
+      * Primary: ``trade.notional_size`` (the per-trade quote-notional
+        the engine actually sized to — exact, not a proxy).
+      * Fallback: ``max(|pnl|, $10) × 50`` legacy proxy for trades
+        missing notional_size (older partial-fill rows or pre-fix
+        callers that don't surface the column).
+
+    Background: the legacy proxy overstated notional 5-50x at small
+    initial_capital (e.g. $100-capital backtests with $1-10 trade PnL
+    floored to $10 × 50 = $500 minimum notional vs realistic $50-100).
+    That overstatement made ``check_cost_realism`` produce false
+    REJECTs on otherwise-passing V11+V60 candidates — see memory
+    ``project_retired_cost_gate_methodology_bug`` and operator-
+    escalation journal ``c58a4b8a-3d14-4b37-b1fe-ab5eb45cb3f7``.
     """
     trades_list = list(trades)
     pnls = [_f(t.get("realized_pnl_amount")) or 0.0 for t in trades_list]
-    notionals = [max(abs(p), 10.0) * 50.0 for p in pnls]
+    # Prefer the engine-sized notional; fall back to the legacy proxy
+    # only when notional_size is missing (partial fills / legacy rows).
+    notionals: list[float] = []
+    for trade, pnl in zip(trades_list, pnls, strict=True):
+        n = _f(trade.get("notional_size"))
+        if n is not None and n > 0:
+            notionals.append(n)
+        else:
+            notionals.append(max(abs(pnl), 10.0) * 50.0)
     out: dict[str, float] = {}
     for slip_bps in scenarios:
         total = 0.0

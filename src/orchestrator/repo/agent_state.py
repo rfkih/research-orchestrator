@@ -130,6 +130,92 @@ async def _last_run_summary(conn: asyncpg.Connection) -> dict[str, Any] | None:
     }
 
 
+async def _pending_specialist_reviews(
+    conn: asyncpg.Connection, *, hard_cap: int = 50
+) -> list[dict[str, Any]]:
+    """Open ``specialist_review_request`` rows (Path C async checkpoint).
+
+    Surfaces what the operator's /run-pending-specialists slash command
+    has to drain before the researcher can resume past step 9d. Oldest-
+    first matches the slash-command queue order so this digest is the
+    canonical source of truth on session boot.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT journal_id, strategy_code,
+               structured_data->>'specialist_name'  AS specialist_name,
+               structured_data->>'iteration_id'     AS iteration_id,
+               structured_data->>'target_id'        AS target_id,
+               created_time
+          FROM research_journal
+         WHERE entry_type = 'IDEA_BACKLOG'
+           AND status = 'ACTIVE'
+           AND structured_data->>'kind' = 'specialist_review_request'
+         ORDER BY created_time ASC
+         LIMIT $1
+        """,
+        hard_cap,
+    )
+    return [
+        {
+            "journal_id": str(r["journal_id"]),
+            "strategy_code": r["strategy_code"],
+            "specialist_name": r["specialist_name"],
+            "iteration_id": r["iteration_id"],
+            "target_id": r["target_id"],
+            "created_time": r["created_time"],
+        }
+        for r in rows
+    ]
+
+
+async def _recent_specialist_verdicts(
+    conn: asyncpg.Connection, *, window_hours: int = 72, hard_cap: int = 50
+) -> list[dict[str, Any]]:
+    """Recent specialist verdicts (Path C). Researcher reads these on
+    resume to decide whether the candidate iteration's adversarial
+    review is fully complete.
+
+    Window: 72h. Verdicts older than that almost always belong to a
+    previously-resolved candidate; the researcher would have either
+    graduated or pivoted before then. Bounding the slice keeps the
+    digest small.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT journal_id, strategy_code,
+               structured_data->>'specialist_name'  AS specialist_name,
+               structured_data->>'iteration_id'     AS iteration_id,
+               structured_data->>'target_id'        AS target_id,
+               structured_data->>'verdict'          AS verdict,
+               (structured_data->>'is_veto')::boolean AS is_veto,
+               created_time
+          FROM research_journal
+         WHERE entry_type = 'STRATEGY_OUTCOME'
+           AND status = 'ACTIVE'
+           AND structured_data->>'kind' = 'specialist_review_verdict'
+           AND created_time > NOW() - ($1::int * INTERVAL '1 hour')
+         ORDER BY created_time DESC
+         LIMIT $2
+        """,
+        window_hours,
+        hard_cap,
+    )
+    return [
+        {
+            "journal_id": str(r["journal_id"]),
+            "strategy_code": r["strategy_code"],
+            "specialist_name": r["specialist_name"],
+            "iteration_id": r["iteration_id"],
+            "target_id": r["target_id"],
+            "verdict": r["verdict"],
+            "is_veto": bool(r["is_veto"]) if r["is_veto"] is not None else False,
+            "created_time": r["created_time"],
+        }
+        for r in rows
+    ]
+
+
 async def _last_null_screen_per_surface(
     conn: asyncpg.Connection,
 ) -> list[dict[str, Any]]:
@@ -186,6 +272,8 @@ async def get_state_digest(
     hypotheses = await _active_hypotheses(conn)
     run_summary = await _last_run_summary(conn)
     null_screens = await _last_null_screen_per_surface(conn)
+    pending_specialist_reviews = await _pending_specialist_reviews(conn)
+    recent_specialist_verdicts = await _recent_specialist_verdicts(conn)
 
     return {
         "queue_counts": queue_counts,
@@ -194,4 +282,6 @@ async def get_state_digest(
         "active_hypotheses": hypotheses,
         "last_run_summary": run_summary,
         "last_null_screen_per_surface": null_screens,
+        "pending_specialist_reviews": pending_specialist_reviews,
+        "recent_specialist_verdicts": recent_specialist_verdicts,
     }

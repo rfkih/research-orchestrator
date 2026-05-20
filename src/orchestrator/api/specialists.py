@@ -39,6 +39,11 @@ from ..services.portfolio import (
     daily_returns_from_trades,
 )
 from ..services.paired_delta import compute_paired_delta
+from ..services.rebalance import (
+    MAX_WEIGHT as REBALANCE_MAX_WEIGHT,
+    MIN_WEIGHT as REBALANCE_MIN_WEIGHT,
+    rebalance_book,
+)
 from ..services.specialists import (
     equal_weight,
     hrp_weights,
@@ -388,6 +393,191 @@ async def post_portfolio_optimize(
         },
         "computed_at": datetime.utcnow().isoformat() + "Z",
     }
+
+
+# ── /portfolio/weights (Phase A, V109) ──────────────────────────────
+
+
+@router.get("/portfolio/weights")
+async def get_portfolio_weights(
+    account_id: UUID | None = None,
+    conn: asyncpg.Connection = Depends(get_db_conn),
+    agent: str = Depends(get_agent_name),
+) -> dict[str, Any]:
+    """Current portfolio_weight per live, non-simulated, non-deleted
+    account_strategy row. Read-only -- no journal write -- so the
+    portfolio page can poll it cheaply on render.
+
+    ``account_id`` is optional on the read path so the admin "view all
+    accounts" surface still works; the write path (``POST
+    /portfolio/rebalance``) requires it explicitly. Per-user UIs MUST
+    pass account_id so users see only their own book.
+
+    Sorted by (strategy_code, symbol, interval_name) so the table
+    rendering is stable across requests. Includes the operator
+    guardrails so the UI can label clamp bounds without a second
+    round-trip.
+    """
+    where = [
+        "is_deleted = FALSE",
+        "enabled = TRUE",
+        "simulated = FALSE",
+    ]
+    args: list[Any] = []
+    if account_id is not None:
+        args.append(str(account_id))
+        where.append(f"account_id = ${len(args)}::uuid")
+    rows = await conn.fetch(
+        f"""
+        SELECT account_strategy_id,
+               account_id,
+               strategy_code,
+               symbol,
+               interval_name,
+               enabled,
+               simulated,
+               portfolio_weight,
+               weight_source,
+               weight_updated_at
+          FROM account_strategy
+         WHERE {' AND '.join(where)}
+         ORDER BY strategy_code, symbol, interval_name
+        """,
+        *args,
+    )
+    items = [
+        {
+            "account_strategy_id": str(r["account_strategy_id"]),
+            "account_id": str(r["account_id"]),
+            "strategy_code": r["strategy_code"],
+            "symbol": r["symbol"],
+            "interval_name": r["interval_name"],
+            "enabled": r["enabled"],
+            "simulated": r["simulated"],
+            "portfolio_weight": float(r["portfolio_weight"]),
+            "weight_source": r["weight_source"],
+            "weight_updated_at": (
+                r["weight_updated_at"].isoformat() if r["weight_updated_at"] else None
+            ),
+        }
+        for r in rows
+    ]
+    return {
+        "items": items,
+        "guardrails": {
+            "min_weight": REBALANCE_MIN_WEIGHT,
+            "max_weight": REBALANCE_MAX_WEIGHT,
+        },
+        "fetched_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+
+# ── /portfolio/rebalance (Phase A, V109) ────────────────────────────
+
+
+class RebalanceBody(BaseModel):
+    """Body for ``POST /portfolio/rebalance``. Writes the optimiser's
+    output back to ``account_strategy.portfolio_weight`` so live sizing
+    multiplies it in alongside Kelly. The read-only sister endpoint is
+    ``POST /portfolio/optimize`` — same math, no DB write.
+
+    ``account_id`` is REQUIRED (multi-tenancy boundary, added
+    2026-05-20): each user owns their AccountStrategy rows, so a
+    rebalance is always per-account. A future JWT-aware proxy layer
+    will enforce that the caller may rebalance only their own account;
+    until that lands, the orchestrator trusts the body value (loopback
+    + shared-secret token).
+
+    Defaults are nightly-job-friendly: HRP optimiser, the protected
+    book only, 5-day correlation overlap minimum. Operator dry-run flag
+    surfaces what WOULD be written without touching state.
+    """
+
+    account_id: UUID
+    optimizer: Literal["HRP", "EQUAL_WEIGHT", "MEAN_VARIANCE"] = "HRP"
+    strategy_codes: list[str] | None = Field(None, max_length=20)
+    min_overlap_days: int = Field(5, ge=2, le=60)
+    mu_by_code: dict[str, float] | None = None
+    risk_aversion: float = Field(1.0, gt=0.0, le=100.0)
+    dry_run: bool = False
+
+
+@router.post("/portfolio/rebalance")
+async def post_portfolio_rebalance(
+    body: RebalanceBody,
+    request: Request,
+    conn: asyncpg.Connection = Depends(get_db_conn),
+    agent: str = Depends(get_agent_name),
+) -> dict[str, Any]:
+    """Compute new portfolio_weight per live AccountStrategy row from
+    recent backtest-derived daily returns, clamp to operator guardrails,
+    and UPDATE the protected book (unless dry_run=True). MANUAL rows are
+    skipped — operator hot-fixes are never overwritten by the batch.
+
+    Honours Idempotency-Key so a cron retry after a network blip does
+    not produce two journal entries / two batches of writes for the
+    same scheduled run. The cache namespace includes account_id so the
+    same key reused across accounts cannot return another account's
+    cached payload (multi-tenancy boundary, 2026-05-20)."""
+    cache_prefix = f"portfolio-rebalance:{body.account_id}"
+    cached, idempotency_key = await replay_cached_response(
+        request, agent, cache_prefix
+    )
+    if cached is not None:
+        return cached
+
+    strategy_codes_tuple = (
+        tuple(body.strategy_codes)
+        if body.strategy_codes
+        else None
+    )
+
+    from ..services.portfolio import PROTECTED_STRATEGY_CODES
+    result = await rebalance_book(
+        conn,
+        account_id=str(body.account_id),
+        optimizer=body.optimizer,
+        strategy_codes=strategy_codes_tuple or PROTECTED_STRATEGY_CODES,
+        min_overlap_days=body.min_overlap_days,
+        mu_by_code=body.mu_by_code,
+        risk_aversion=body.risk_aversion,
+        dry_run=body.dry_run,
+        agent_name=agent,
+    )
+
+    try:
+        await log_activity(
+            conn,
+            session_id=request.state.session_id,
+            agent_name=agent,
+            activity_type="PORTFOLIO_REBALANCE",
+            title=(
+                f"Rebalance ({body.optimizer}) — "
+                f"{result['n_updated']} rows"
+                + (" [DRY-RUN]" if body.dry_run else "")
+            ),
+            strategy_code=None,
+            details={
+                "account_id": str(body.account_id),
+                "optimizer": body.optimizer,
+                "dry_run": body.dry_run,
+                "n_updated": result["n_updated"],
+                "codes": result["codes"],
+                "journal_id": result["journal_id"],
+                "guardrails": {
+                    "min_weight": REBALANCE_MIN_WEIGHT,
+                    "max_weight": REBALANCE_MAX_WEIGHT,
+                },
+            },
+            redis_client=request.app.state.redis,
+        )
+    except Exception:  # noqa: BLE001 — activity log is best-effort
+        pass
+
+    await cache_response(
+        request, agent, cache_prefix, idempotency_key, result
+    )
+    return result
 
 
 # ── /agent-decisions/log ────────────────────────────────────────────

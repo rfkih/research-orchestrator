@@ -27,6 +27,8 @@ from .api.null_screen import router as null_screen_router
 from .api.queue import router as queue_router
 from .api.raw import router as raw_router
 from .api.reviews import router as reviews_router
+from .api.capacity import router as capacity_router
+from .api.specialist_reviews import router as specialist_reviews_router
 from .api.specialists import router as specialists_router
 from .api.tick import router as tick_router
 from .api.verdict_drift import router as verdict_drift_router
@@ -78,6 +80,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(raw_router)
     app.include_router(inference_router)
     app.include_router(specialists_router)
+    app.include_router(specialist_reviews_router)
+    app.include_router(capacity_router)
     app.include_router(ml_training_router)
     return app
 
