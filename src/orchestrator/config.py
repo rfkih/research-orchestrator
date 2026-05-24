@@ -51,6 +51,16 @@ class Settings(BaseSettings):
 
     jvm_base_url: str = "http://127.0.0.1:8081"
     jvm_request_timeout_s: float = Field(30.0, ge=1.0, le=300.0)
+
+    # Trading-JVM base URL (Phase A.6, 2026-05-22). The orchestrator
+    # calls /api/v1/internal/orch/** here for live equity + Kelly reads
+    # that power the portfolio-rebalance min-notional guard. Auth is
+    # the existing shared-secret X-Orch-Token, reused from the proxy
+    # path (same value as ORCH_AUTH_TOKEN). Loopback default mirrors
+    # jvm_base_url; an empty string disables the client (rebalance
+    # falls back to caller-provided available_usdt + kelly=1.0).
+    trading_jvm_base_url: str = "http://127.0.0.1:8080"
+    trading_jvm_request_timeout_s: float = Field(20.0, ge=1.0, le=300.0)
     jvm_auth_mode: Literal["dev_bypass", "service_account", "static_jwt"] = "dev_bypass"
     jvm_service_user: str | None = None
     jvm_service_password: SecretStr | None = None
@@ -172,6 +182,40 @@ class Settings(BaseSettings):
             "flow_btc_v1",
             "flow_btc_v2",
             "directional_btc_1h_v1",
+            # 2026-05-21: binary directional twin of v1 — resolves
+            # ANTI_PATTERN 20fa437f (the orchestrator model_registry
+            # validator only accepts objective ∈ {binary, regression}, so
+            # v1's multiclass artifact cannot land in model_registry).
+            # v2 reuses label_regime_risk_on_24h (V77/V110 binary
+            # forward-Sharpe-sign label), single-base LightGBM, no
+            # stacking, no meta-label — minimum-surface fix to unblock
+            # HYBRID ML hypotheses on the researcher loop.
+            "directional_btc_1h_v2",
+            # 2026-05-21: bar-boundary triple-barrier binary spec.
+            # Addresses the smoothed-aggregate label misalignment that
+            # falsified v2's forward-Sharpe-sign gate on three host
+            # strategies (DCB-BTC, MMR-BTC, DCB-ETH). Same feature
+            # stack as v2; new in-train derived label
+            # label_long_win_tb_1h_v1 (TP-first-within-24-bars binary).
+            "directional_btc_1h_v3",
+            # 2026-05-21 (Path B): same triple-barrier label as v3
+            # (label_long_win_tb_1h_v1) but augments the registry-pulled
+            # feature stack with 5 NEW bar-level entry-timing features
+            # registered via Flyway V111: btc_rsi_14_1h, btc_atr_ratio_14_24,
+            # btc_log_return_1h, btc_log_return_4h, btc_volume_zscore_4h.
+            # Tests the operator hypothesis (RUN_SUMMARY a957d7cf) that
+            # the gate harm in v2/v3 was structural to the 24h-aggregation
+            # feature stack regardless of label choice.
+            "directional_btc_1h_v4",
+            # 2026-05-21 (Path C cont'd): short-horizon (6-bar) asymmetric
+            # triple-barrier label, same feature stack as v4. Tests whether
+            # label time-scope alignment to strategy holding period lifts
+            # paired-delta past the -7 pp ceiling v4 hit.
+            "directional_btc_1h_v5",
+            # 2026-05-21 Path C late: loose-threshold (k_tp=1.0, k_sl=0.5)
+            # short-horizon variant. Tests whether less restrictive model
+            # → more gate-on trades through → V11 n-floor cleared.
+            "directional_btc_1h_v6",
             # 2026-05-20: first per-symbol ETH ML spec. Authored after
             # bar-OHLCV parametric search hit lifecycle exhaustion across
             # BTC+ETH × 4 intervals. Backed by V110 migration which

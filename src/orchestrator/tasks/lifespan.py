@@ -15,6 +15,7 @@ from fastapi import FastAPI
 
 from ..clients.inference import InferenceClient
 from ..clients.jvm import JvmClient
+from ..clients.trading_jvm import TradingJvmClient
 from ..config import Settings
 from ..infra.db import Database
 from ..logging import get_logger
@@ -37,10 +38,12 @@ async def lifespan_for(settings: Settings, app: FastAPI) -> AsyncIterator[None]:
 
     db = Database(settings)
     jvm = JvmClient(settings)
+    trading_jvm = TradingJvmClient(settings)
     inference = InferenceClient(settings)
     app.state.settings = settings
     app.state.db = db
     app.state.jvm = jvm
+    app.state.trading_jvm = trading_jvm
     app.state.inference = inference
     await db.open()
     if settings.profile == "prod":
@@ -48,6 +51,7 @@ async def lifespan_for(settings: Settings, app: FastAPI) -> AsyncIterator[None]:
     else:
         app.state.idempotency = InMemoryIdempotencyStore()
     await jvm.open()
+    await trading_jvm.open()
     await inference.open()
 
     # Redis pub/sub — optional. None when ORCH_REDIS_URL is not configured.
@@ -87,6 +91,7 @@ async def lifespan_for(settings: Settings, app: FastAPI) -> AsyncIterator[None]:
         if app.state.redis is not None:
             await app.state.redis.aclose()
         await inference.close()
+        await trading_jvm.close()
         await jvm.close()
         await db.close()
         reporter = get_reporter()

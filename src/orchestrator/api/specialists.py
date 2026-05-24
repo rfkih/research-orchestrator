@@ -22,7 +22,7 @@ DB pool + NumPy.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import UUID
 
@@ -40,7 +40,10 @@ from ..services.portfolio import (
 )
 from ..services.paired_delta import compute_paired_delta
 from ..services.rebalance import (
+    EFFECTIVE_MIN_NOTIONAL_USD as REBALANCE_EFFECTIVE_MIN_NOTIONAL_USD,
     MAX_WEIGHT as REBALANCE_MAX_WEIGHT,
+    MIN_NOTIONAL_SAFETY_FACTOR as REBALANCE_MIN_NOTIONAL_SAFETY_FACTOR,
+    MIN_USDT_NOTIONAL_USD as REBALANCE_MIN_NOTIONAL_USD,
     MIN_WEIGHT as REBALANCE_MIN_WEIGHT,
     rebalance_book,
 )
@@ -58,6 +61,23 @@ from ..repo import trades as trades_repo
 from .deps import get_agent_name, get_db_conn
 
 router = APIRouter(tags=["specialists"])
+
+
+def _iso_utc_or_none(dt: datetime | None) -> str | None:
+    """Emit an ISO-8601 string that always carries a timezone marker.
+
+    ``weight_updated_at`` is a ``TIMESTAMPTZ`` column today, so asyncpg
+    returns tz-aware datetimes whose ``.isoformat()`` already ends in
+    ``+00:00``. This helper is defensive against a future migration to
+    naive ``TIMESTAMP`` (browser ``new Date()`` would otherwise parse a
+    naive string as local time and drift the relative-time display by
+    the operator's UTC offset). Naive datetimes are assumed UTC.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc).isoformat()
+    return dt.isoformat()
 
 
 # ── /skeptic-prescreen ──────────────────────────────────────────────
@@ -456,9 +476,7 @@ async def get_portfolio_weights(
             "simulated": r["simulated"],
             "portfolio_weight": float(r["portfolio_weight"]),
             "weight_source": r["weight_source"],
-            "weight_updated_at": (
-                r["weight_updated_at"].isoformat() if r["weight_updated_at"] else None
-            ),
+            "weight_updated_at": _iso_utc_or_none(r["weight_updated_at"]),
         }
         for r in rows
     ]
@@ -488,12 +506,37 @@ class RebalanceBody(BaseModel):
     until that lands, the orchestrator trusts the body value (loopback
     + shared-secret token).
 
+    ``available_usdt`` is REQUIRED (Phase A.5 min-notional guard,
+    2026-05-22): the guard math compares ``available_usdt × cap_alloc
+    × weight`` against the JVM's ``MIN_USDT_NOTIONAL`` floor and
+    refuses Apply when any eligible strategy would land below it.
+
+    This MUST be the FREE USDT balance (``PortfolioBalance.
+    availableUsdt`` in the frontend), NOT the total marketable equity.
+    The JVM executor sizes LONG entries against ``Portfolio.balance``,
+    which is the per-asset free balance; passing total equity would
+    overstate the executor's sizing surface by the locked-USDT
+    fraction and let through weights that silently get rejected at
+    the wire. Capped at 1e9 USDT as a sanity bound — anything larger
+    is a unit-confused caller (cents vs dollars).
+
     Defaults are nightly-job-friendly: HRP optimiser, the protected
     book only, 5-day correlation overlap minimum. Operator dry-run flag
     surfaces what WOULD be written without touching state.
     """
 
     account_id: UUID
+    available_usdt: float = Field(
+        ...,
+        gt=0,
+        le=1_000_000_000.0,
+        description=(
+            "Current FREE USDT balance for account_id (NOT total "
+            "equity). Required. Used by the min-notional guard to "
+            "refuse weights that would produce sub-floor entries the "
+            "JVM executor will silently reject."
+        ),
+    )
     optimizer: Literal["HRP", "EQUAL_WEIGHT", "MEAN_VARIANCE"] = "HRP"
     strategy_codes: list[str] | None = Field(None, max_length=20)
     min_overlap_days: int = Field(5, ge=2, le=60)
@@ -536,6 +579,7 @@ async def post_portfolio_rebalance(
     result = await rebalance_book(
         conn,
         account_id=str(body.account_id),
+        available_usdt=float(body.available_usdt),
         optimizer=body.optimizer,
         strategy_codes=strategy_codes_tuple or PROTECTED_STRATEGY_CODES,
         min_overlap_days=body.min_overlap_days,
@@ -543,6 +587,11 @@ async def post_portfolio_rebalance(
         risk_aversion=body.risk_aversion,
         dry_run=body.dry_run,
         agent_name=agent,
+        # Phase A.6: hand over the trading-JVM client so the guard
+        # math uses live equity + Kelly, not the caller-provided
+        # numbers + kelly=1.0 upper-bound. Falls back transparently
+        # when the client is disabled / unreachable.
+        trading_jvm=getattr(request.app.state, "trading_jvm", None),
     )
 
     try:
@@ -559,6 +608,7 @@ async def post_portfolio_rebalance(
             strategy_code=None,
             details={
                 "account_id": str(body.account_id),
+                "available_usdt": float(body.available_usdt),
                 "optimizer": body.optimizer,
                 "dry_run": body.dry_run,
                 "n_updated": result["n_updated"],
@@ -567,6 +617,9 @@ async def post_portfolio_rebalance(
                 "guardrails": {
                     "min_weight": REBALANCE_MIN_WEIGHT,
                     "max_weight": REBALANCE_MAX_WEIGHT,
+                    "min_notional_usd": REBALANCE_MIN_NOTIONAL_USD,
+                    "min_notional_safety_factor": REBALANCE_MIN_NOTIONAL_SAFETY_FACTOR,
+                    "effective_floor_usd": REBALANCE_EFFECTIVE_MIN_NOTIONAL_USD,
                 },
             },
             redis_client=request.app.state.redis,

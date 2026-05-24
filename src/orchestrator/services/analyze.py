@@ -224,16 +224,36 @@ def deflated_sharpe_ratio(
     skew: float,
     kurt: float,
     n_trials: int,
+    pnls: list[float] | None = None,
+    bootstrap_B: int = 1000,
+    bootstrap_seed: int = 17,
 ) -> float | None:
     """Deflated Sharpe Ratio (Bailey & Lopez de Prado 2014), using the
     REAL cumulative trial count rather than the V11 hardcoded N=5.
 
-    This is the same formula as ``probabilistic_sharpe_ratio`` but the
-    selection-bias adjustment widens with ``n_trials``: at N=5 the
-    threshold z_alpha = Phi^-1(1 - 0.05/5) ≈ 1.96; at N=250 it climbs to
-    ≈ 3.43. A strategy that just barely cleared PSR=0.95 with 5 trials
-    looks weaker once you account for the 245 prior trials the same
-    autonomous loop ran.
+    Closed-form (default): the Bailey-LdP Gaussian-asymptotic standard
+    error of the sample Sharpe is
+
+        SE^2 = (1 - skew·SR + ((kurt-1)/4)·SR^2) / (n_obs - 1)
+
+    DSR = Phi((SR - SR*) / SE), where SR* = Phi^-1(1 - 0.05/n_trials) /
+    sqrt(n_obs) is the selection-bias-adjusted threshold. The
+    ``denom_sq`` numerator can go non-positive when the return
+    distribution is heavily skewed (skew·SR > 1 + ((kurt-1)/4)·SR^2),
+    in which case the closed-form is undefined.
+
+    Bootstrap fallback (this commit, 2026-05-21): when ``denom_sq <= 0``
+    AND a ``pnls`` series is supplied, fall back to the non-parametric
+    bootstrap DSR procedure recommended in Bailey & López de Prado
+    (2014) §5 *Empirical Estimation of the Sampling Distribution of the
+    Sharpe Ratio*: resample ``pnls`` with replacement ``bootstrap_B``
+    times, compute the per-resample Sharpe (annualised consistently
+    with the input ``sr``), use the empirical std of that distribution
+    as SE, and recompute z = (SR - SR*) / SE → DSR = Phi(z). This is
+    methodology-faithful — the V11 DSR threshold is unchanged; only
+    the *computation* extends to cover the case the closed-form cannot.
+    If ``pnls`` is None on a denom_sq<=0 path the function still
+    returns None so the gate correctly fails-closed.
 
     Reference: Bailey, López de Prado (2014), *The Deflated Sharpe
     Ratio: Correcting for Selection Bias, Backtest Overfitting, and
@@ -249,9 +269,83 @@ def deflated_sharpe_ratio(
     z_alpha = _norm_inv(1 - 0.05 / n_trials)
     sr_star = z_alpha / math.sqrt(n_obs)
     denom_sq = 1 - skew * sr + ((kurt - 1) / 4) * (sr**2)
-    if denom_sq <= 0:
+    if denom_sq > 0:
+        z = (sr - sr_star) * math.sqrt((n_obs - 1) / denom_sq)
+        return _norm_cdf(z)
+    # Closed-form degenerate (non-Gaussian shape). Try the Bailey-LdP
+    # bootstrap fallback if we have the underlying PnL series.
+    if pnls is None or len(pnls) < 30:
         return None
-    z = (sr - sr_star) * math.sqrt((n_obs - 1) / denom_sq)
+    return _bootstrap_dsr(
+        pnls=pnls,
+        sr_observed=sr,
+        sr_star=sr_star,
+        n_obs=n_obs,
+        B=bootstrap_B,
+        seed=bootstrap_seed,
+    )
+
+
+def _bootstrap_dsr(
+    pnls: list[float],
+    sr_observed: float,
+    sr_star: float,
+    n_obs: int,
+    B: int = 1000,
+    seed: int = 17,
+) -> float | None:
+    """Non-parametric DSR via bootstrap (Bailey & LdP 2014 §5).
+
+    Both ``sr_observed`` and ``sr_star`` are passed in on the
+    *annualised* basis (matching closed-form). The bootstrap is run on
+    the per-sample SR (unannualised — ``ann_factor=None``); we recover
+    the annualisation factor from the observed pair (annualised SR vs
+    the per-sample SR of the original ``pnls``) and apply it to the
+    bootstrap SE so the z-statistic lives on the same basis as the
+    closed-form would.
+
+    Returns ``None`` (gate fails closed) on:
+      * ``pnls`` shorter than 30 (insufficient resampling base)
+      * fewer than 30 finite bootstrap resamples
+      * bootstrap variance zero (degenerate)
+      * per-sample observed SR uncomputable (e.g. zero variance pnls)
+    """
+    if not pnls or len(pnls) < 30:
+        return None
+    sr_per_sample_observed = sharpe_ratio(pnls, ann_factor=None)
+    if sr_per_sample_observed is None or not math.isfinite(sr_per_sample_observed):
+        return None
+    # Annualisation factor implied by the (annualised, per-sample) pair.
+    # Used to project the bootstrap per-sample SE up to the annualised
+    # basis where sr_observed and sr_star live.
+    if abs(sr_per_sample_observed) < 1e-12:
+        # SR ~ 0 — annualisation is undefined; can't certify on this
+        # path. Methodology-faithful: fail closed.
+        return None
+    sqrt_ann_factor = sr_observed / sr_per_sample_observed
+    if not math.isfinite(sqrt_ann_factor) or sqrt_ann_factor <= 0:
+        return None
+
+    rng = random.Random(seed)
+    n = len(pnls)
+    sr_samples: list[float] = []
+    for _ in range(B):
+        sample = [rng.choice(pnls) for _ in range(n)]
+        sr_b = sharpe_ratio(sample, ann_factor=None)
+        if sr_b is not None and math.isfinite(sr_b):
+            sr_samples.append(sr_b)
+    if len(sr_samples) < 30:
+        return None
+    mean_b = sum(sr_samples) / len(sr_samples)
+    var_b = sum((s - mean_b) ** 2 for s in sr_samples) / (len(sr_samples) - 1)
+    if var_b <= 0:
+        return None
+    sd_b_per_sample = math.sqrt(var_b)
+    # Project per-sample SE to the annualised basis.
+    se_annualised = sd_b_per_sample * sqrt_ann_factor
+    if se_annualised <= 0:
+        return None
+    z = (sr_observed - sr_star) / se_annualised
     return _norm_cdf(z)
 
 
@@ -457,8 +551,11 @@ def analyze_run(
     # DSR with real cumulative trial count from hypothesis_audit. Falls
     # back to n_strategies_tested so test fixtures and legacy callers
     # that don't pass cumulative_trials get PSR-equivalent output.
+    # ``pnls`` is forwarded so the Bailey-LdP bootstrap fallback can
+    # fire when the closed-form denom_sq <= 0 on non-Gaussian
+    # distributions (e.g. ML-gate-induced high-skew long-tail PnLs).
     dsr_n_trials = cumulative_trials if cumulative_trials is not None else n_strategies_tested
-    dsr = deflated_sharpe_ratio(sr, n, sk, kt, dsr_n_trials)
+    dsr = deflated_sharpe_ratio(sr, n, sk, kt, dsr_n_trials, pnls=pnls)
 
     return_pct = _f(run.get("return_pct"))
     max_dd = _f(run.get("max_drawdown_pct"))

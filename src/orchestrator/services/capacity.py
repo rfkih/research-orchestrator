@@ -41,6 +41,7 @@ from ..config import Settings
 from ..errors import OrchestratorError
 from ..infra.db import Database
 from ..logging import get_logger
+from .sweep import build_ml_override_maps, split_ml_overrides
 from .tick import _fetch_run_metrics, _poll_backtest_status, _resolve_account_strategy
 
 log = get_logger(__name__)
@@ -57,6 +58,15 @@ EdgeDecayVerdict = Literal[
 PF_NOISE_FLOOR: float = 1.2          # PF below this = no useful edge
 DEGRADATION_PCT_GENTLE: float = 20.0  # < 20% decay = LINEAR_SCALABLE
 DEGRADATION_PCT_GRADUAL: float = 40.0  # 20-40% = GRADUAL_DECAY
+
+# Default per-fill slippage rate (entry-side, fractional units). 0.0005 =
+# 5 bps — conservative for crypto spot at the smallest tested notional;
+# the JVM applies this haircut to every entry fill, so $1M-tier capacity
+# can actually decay against $100-tier. Operator override via the API
+# request body (``slippage_rate``). NULL on the JVM side disables impact
+# entirely, which is why the prior default produced bit-identical metrics
+# across all five tiers.
+DEFAULT_SLIPPAGE_RATE: float = 0.0005
 
 
 def _classify_verdict(
@@ -107,11 +117,22 @@ def _build_payload(
     overrides: dict[str, Any] | None,
     allow_long: bool = True,
     allow_short: bool = True,
+    slippage_rate: float = DEFAULT_SLIPPAGE_RATE,
 ) -> dict[str, Any]:
     """Same shape as walk_forward._build_payload, parameterized on
     ``initialCapital`` — the lever the capacity sweep varies. All other
-    fields match the production submit payload."""
-    return {
+    fields match the production submit payload.
+
+    ML sentinel keys (``_ml_gate_enabled``, ``_ml_signal_name``,
+    ``_ml_shadow_mode``) inside ``overrides`` are routed to the V100
+    JVM columns (``strategyMl*Overrides``) via the shared sweep helper,
+    NOT into ``strategyParamOverrides`` — the JVM ignores them there.
+    """
+    regular_overrides, ml_overrides = split_ml_overrides(overrides or {})
+    ml_payload = build_ml_override_maps(
+        strategy_code=strategy_code, ml_overrides=ml_overrides
+    )
+    payload: dict[str, Any] = {
         "accountStrategyId": account_strategy_id,
         "strategyCode": strategy_code,
         "asset": asset,
@@ -121,13 +142,14 @@ def _build_payload(
         "initialCapital": float(initial_capital),
         "riskPerTradePct": 2.0,
         "feeRate": 0.00075,
+        "slippageRate": float(slippage_rate),
         "minNotional": 5,
         "minQty": 0.000001,
         "qtyStep": 0.000001,
         "maxOpenPositions": 1,
         "allowLong": allow_long,
         "allowShort": allow_short,
-        "strategyParamOverrides": {strategy_code: overrides or {}},
+        "strategyParamOverrides": {strategy_code: regular_overrides},
         # JVM regex is ^(USER|RESEARCHER)$ (see
         # BacktestRunRequest.triggeredBy). Using RESEARCHER matches the
         # walk_forward convention — keeps capacity-sweep runs visible to
@@ -135,7 +157,9 @@ def _build_payload(
         # A future ``CAPACITY_SWEEP`` enum value would require a JVM
         # regex update + DB CHECK extension; not worth the migration.
         "triggeredBy": "RESEARCHER",
+        **ml_payload,
     }
+    return payload
 
 
 class CapacitySweepResult:
@@ -181,6 +205,7 @@ async def run_capacity_sweep(
     notional_scales: list[float],
     overrides: dict[str, Any] | None = None,
     motivating_iteration_id: UUID | None = None,
+    slippage_rate: float = DEFAULT_SLIPPAGE_RATE,
 ) -> CapacitySweepResult:
     """Run one backtest per notional scale; aggregate verdict."""
     if not notional_scales:
@@ -234,6 +259,7 @@ async def run_capacity_sweep(
             overrides=overrides,
             allow_long=as_row["allow_long"],
             allow_short=as_row["allow_short"],
+            slippage_rate=slippage_rate,
         )
         try:
             run_id = await jvm.submit_backtest(payload)

@@ -290,7 +290,12 @@ def check_dsr_threshold(iteration_metrics: dict[str, Any]) -> dict[str, Any]:
             "dsr_threshold",
             "blocker",
             False,
-            "DSR is None — likely n_obs<30 or non-finite SR. Cannot graduate.",
+            (
+                "DSR is None — closed-form Bailey-LdP denom_sq<=0 AND "
+                "bootstrap fallback also unavailable (n_obs<30, zero "
+                "bootstrap variance, or pre-bootstrap iteration). "
+                "Cannot graduate."
+            ),
         )
     try:
         dsr_f = float(dsr)

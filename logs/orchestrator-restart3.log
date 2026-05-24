@@ -1,32 +1,316 @@
-INFO:     Started server process [22680]
+INFO:     Started server process [21800]
 INFO:     Waiting for application startup.
-{"profile": "dev", "host": "127.0.0.1", "port": 8082, "jvm_base_url": "http://127.0.0.1:8081", "jvm_auth_mode": "dev_bypass", "event": "orchestrator.startup", "level": "info", "ts": "2026-05-01T04:17:26.956152Z"}
+{"detail": "ORCH_AUTH_TOKEN is the dev sentinel value. Any caller that knows the sentinel can drive the orchestrator. Generate a real token before exposing beyond loopback: python -c \"import secrets; print(secrets.token_urlsafe(48))\"", "event": "orchestrator.dev_warning", "level": "warning", "ts": "2026-05-21T20:23:15.161699Z"}
+{"detail": "ORCH_RESEARCH_ACCOUNT_ID is unset \u2014 account_strategy lookup falls back to 'first matching row' which can select an admin-owned row on a multi-account host.", "event": "orchestrator.dev_warning", "level": "warning", "ts": "2026-05-21T20:23:15.161754Z"}
+{"redis_url": "redis://127.0.0.1:6379/0", "event": "orchestrator.redis_connected", "level": "info", "ts": "2026-05-21T20:23:15.594203Z"}
+{"profile": "dev", "host": "127.0.0.1", "port": 8082, "jvm_base_url": "http://127.0.0.1:8081", "jvm_auth_mode": "static_jwt", "event": "orchestrator.startup", "level": "info", "ts": "2026-05-21T20:23:15.601281Z"}
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://127.0.0.1:8082 (Press CTRL+C to quit)
-{"queue_id": "8482c4c4-b5b4-42dc-925c-99b07f7adc5d", "strategy_code": "MMR", "iter": 1, "budget": 5, "event": "tick.claimed", "level": "info", "ts": "2026-05-01T04:17:39.465239Z"}
-{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/dev/login-as \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-01T04:17:39.723562Z"}
-{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-01T04:17:40.014790Z"}
-{"queue_id": "8482c4c4-b5b4-42dc-925c-99b07f7adc5d", "run_id": "4e6ce749-a97b-4588-ac5c-aecdd1e3ad00", "combo": {"extremeAtrMult": "1.0", "rsiOversoldMax": "15", "maxBarsHeld": "3"}, "event": "tick.submitted", "level": "info", "ts": "2026-05-01T04:17:40.019845Z"}
-{"queue_id": "8482c4c4-b5b4-42dc-925c-99b07f7adc5d", "iteration_id": "63d94159-c5ef-480a-8e4a-7544622c3de3", "statistical_verdict": "NO_EDGE", "verdict": "DISCARD", "event": "tick.iteration_logged", "level": "info", "ts": "2026-05-01T04:19:15.509582Z"}
-{"event": "HTTP Request: GET http://127.0.0.1:8081/actuator/health/liveness \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-01T09:50:46.346711Z"}
-{"queue_id": "cec27eec-d5ec-47be-bfba-e9c471924a8c", "strategy_code": "LSR", "iter": 1, "budget": 1, "event": "tick.claimed", "level": "info", "ts": "2026-05-01T10:02:25.956685Z"}
-{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 401 \"", "level": "info", "ts": "2026-05-01T10:02:26.326368Z"}
-{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/dev/login-as \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-01T10:02:27.129899Z"}
-{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-01T10:02:27.555509Z"}
-{"queue_id": "cec27eec-d5ec-47be-bfba-e9c471924a8c", "run_id": "87cebf8f-3527-451c-8029-08b7b8f8cd3f", "combo": {"adxThreshold": "20"}, "event": "tick.submitted", "level": "info", "ts": "2026-05-01T10:02:27.558830Z"}
-{"queue_id": "cec27eec-d5ec-47be-bfba-e9c471924a8c", "iteration_id": "7bf6fd11-6159-49c8-bee6-4d0d47678691", "statistical_verdict": "INSUFFICIENT_EVIDENCE", "verdict": "ITERATE", "event": "tick.iteration_logged", "level": "info", "ts": "2026-05-01T10:03:02.604287Z"}
-WARNING:  Unsupported upgrade request.
-WARNING:  Unsupported upgrade request.
-WARNING:  Unsupported upgrade request.
-WARNING:  Unsupported upgrade request.
-WARNING:  Unsupported upgrade request.
-WARNING:  Unsupported upgrade request.
-WARNING:  Unsupported upgrade request.
-WARNING:  Unsupported upgrade request.
-WARNING:  Unsupported upgrade request.
-WARNING:  Unsupported upgrade request.
-WARNING:  Unsupported upgrade request.
-WARNING:  Unsupported upgrade request.
-WARNING:  Unsupported upgrade request.
-WARNING:  Unsupported upgrade request.
-WARNING:  Unsupported upgrade request.
+{"event": "HTTP Request: GET http://127.0.0.1:8081/actuator/health/liveness \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-21T20:23:22.305805Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-21T20:25:42.009801Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-21T20:25:49.522349Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-21T20:26:31.357311Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-21T20:26:38.518802Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-21T20:26:47.053594Z"}
+{"queue_id": "f42f2198-f804-448f-b562-92d6adacbccc", "strategy_code": "DCB", "iter": 1, "budget": 1, "event": "tick.claimed", "level": "info", "ts": "2026-05-21T20:26:53.102395Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-21T20:26:53.253749Z"}
+{"queue_id": "f42f2198-f804-448f-b562-92d6adacbccc", "run_id": "e6504c6a-47c1-4d5a-ba2d-4f8352e2341c", "combo": {"tpR": 5.0, "adxEntryMin": 21, "_ml_gate_enabled": true, "_ml_signal_name": "regime_eth_v2", "_ml_shadow_mode": false}, "event": "tick.submitted", "level": "info", "ts": "2026-05-21T20:26:53.254233Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-21T20:26:53.255939Z"}
+{"codes": ["VCB", "VBO"], "event": "portfolio.baselines_loaded", "level": "info", "ts": "2026-05-21T20:29:17.898960Z"}
+{"queue_id": "f42f2198-f804-448f-b562-92d6adacbccc", "max_abs_corr": 0.3627, "pf_lo_effective": 0.9783, "event": "tick.portfolio_gate_demoted", "level": "info", "ts": "2026-05-21T20:29:17.899189Z"}
+{"queue_id": "f42f2198-f804-448f-b562-92d6adacbccc", "iteration_id": "8137b349-5cdc-4586-84ea-380c0f2e5473", "statistical_verdict": "INSUFFICIENT_EVIDENCE", "verdict": "ITERATE", "event": "tick.iteration_logged", "level": "info", "ts": "2026-05-21T20:29:17.913202Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-21T20:29:17.914566Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-21T20:29:56.218081Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-21T20:30:01.746066Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-21T20:30:50.764005Z"}
+{"strategy_code": "DCB", "fold": 1, "n_folds": 5, "test_start": "2025-01-01", "test_end": "2025-04-01", "event": "walk_forward.fold_start", "level": "info", "ts": "2026-05-21T20:30:50.793226Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-21T20:30:50.822299Z"}
+{"strategy_code": "DCB", "fold": 2, "n_folds": 5, "test_start": "2025-04-01", "test_end": "2025-07-01", "event": "walk_forward.fold_start", "level": "info", "ts": "2026-05-21T20:31:05.856120Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-21T20:31:05.881995Z"}
+{"strategy_code": "DCB", "fold": 3, "n_folds": 5, "test_start": "2025-07-01", "test_end": "2025-10-01", "event": "walk_forward.fold_start", "level": "info", "ts": "2026-05-21T20:31:20.910958Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-21T20:31:20.947182Z"}
+{"strategy_code": "DCB", "fold": 4, "n_folds": 5, "test_start": "2025-10-01", "test_end": "2026-01-01", "event": "walk_forward.fold_start", "level": "info", "ts": "2026-05-21T20:31:35.976281Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-21T20:31:36.012116Z"}
+{"strategy_code": "DCB", "fold": 5, "n_folds": 5, "test_start": "2026-01-01", "test_end": "2026-04-01", "event": "walk_forward.fold_start", "level": "info", "ts": "2026-05-21T20:31:51.039985Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-21T20:31:51.067237Z"}
+{"strategy_code": "DCB", "walk_forward_id": "fcda89cb-f96e-4c04-ab3d-386fd9bdb879", "verdict": "ROBUST", "n_folds": 5, "event": "walk_forward.complete", "level": "info", "ts": "2026-05-21T20:32:06.108889Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-21T20:32:06.110495Z"}
+{"account_id": "76fac4b6-ea6b-44cc-a9ec-382ac3c2f4a2", "optimizer": "HRP", "dry_run": true, "n_eligible": 2, "n_updated": 0, "skipped": ["LSR"], "event": "portfolio.rebalance", "level": "info", "ts": "2026-05-21T23:40:57.338803Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-21T23:40:57.340648Z"}
+{"event": "HTTP Request: GET http://127.0.0.1:8081/actuator/health/liveness \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-21T23:41:19.490554Z"}
+{"event": "HTTP Request: GET http://127.0.0.1:8081/actuator/health/liveness \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-21T23:41:40.898925Z"}
+{"event": "HTTP Request: GET http://127.0.0.1:8081/actuator/health/liveness \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-21T23:42:08.906614Z"}
+{"event": "unhandled exception in POST /ml-prescreen", "level": "error", "ts": "2026-05-21T23:42:33.264939Z", "exception": "  + Exception Group Traceback (most recent call last):\n  |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\_utils.py\", line 79, in collapse_excgroups\n  |     yield\n  |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\middleware\\base.py\", line 183, in __call__\n  |     async with anyio.create_task_group() as task_group:\n  |                ~~~~~~~~~~~~~~~~~~~~~~~^^\n  |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\anyio\\_backends\\_asyncio.py\", line 799, in __aexit__\n  |     raise BaseExceptionGroup(\n  |         \"unhandled errors in a TaskGroup\", self._exceptions\n  |     ) from None\n  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)\n  +-+---------------- 1 ----------------\n    | Traceback (most recent call last):\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\middleware\\errors.py\", line 164, in __call__\n    |     await self.app(scope, receive, _send)\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\middleware\\base.py\", line 182, in __call__\n    |     with recv_stream, send_stream, collapse_excgroups():\n    |                                    ~~~~~~~~~~~~~~~~~~^^\n    |   File \"C:\\Python314\\Lib\\contextlib.py\", line 162, in __exit__\n    |     self.gen.throw(value)\n    |     ~~~~~~~~~~~~~~^^^^^^^\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\_utils.py\", line 85, in collapse_excgroups\n    |     raise exc\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\middleware\\base.py\", line 184, in __call__\n    |     response = await self.dispatch_func(request, call_next)\n    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\src\\orchestrator\\auth.py\", line 140, in dispatch\n    |     return await call_next(request)\n    |            ^^^^^^^^^^^^^^^^^^^^^^^^\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\middleware\\base.py\", line 159, in call_next\n    |     raise app_exc\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\middleware\\base.py\", line 144, in coro\n    |     await self.app(scope, receive_or_disconnect, send_no_error)\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\middleware\\exceptions.py\", line 63, in __call__\n    |     await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\_exception_handler.py\", line 53, in wrapped_app\n    |     raise exc\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\_exception_handler.py\", line 42, in wrapped_app\n    |     await app(scope, receive, sender)\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\fastapi\\middleware\\asyncexitstack.py\", line 18, in __call__\n    |     await self.app(scope, receive, send)\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\routing.py\", line 716, in __call__\n    |     await self.middleware_stack(scope, receive, send)\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\routing.py\", line 736, in app\n    |     await route.handle(scope, receive, send)\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\routing.py\", line 290, in handle\n    |     await self.app(scope, receive, send)\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\fastapi\\routing.py\", line 123, in app\n    |     await wrap_app_handling_exceptions(app, request)(scope, receive, send)\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\_exception_handler.py\", line 53, in wrapped_app\n    |     raise exc\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\_exception_handler.py\", line 42, in wrapped_app\n    |     await app(scope, receive, sender)\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\fastapi\\routing.py\", line 109, in app\n    |     response = await f(request)\n    |                ^^^^^^^^^^^^^^^^\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\fastapi\\routing.py\", line 389, in app\n    |     raw_response = await run_endpoint_function(\n    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    |     ...<3 lines>...\n    |     )\n    |     ^\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\fastapi\\routing.py\", line 288, in run_endpoint_function\n    |     return await dependant.call(**values)\n    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\src\\orchestrator\\api\\specialists.py\", line 163, in post_ml_prescreen\n    |     result = await ml_prescreen(\n    |              ^^^^^^^^^^^^^^^^^^^\n    |     ...<3 lines>...\n    |     )\n    |     ^\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\src\\orchestrator\\services\\specialists\\ml_prescreen.py\", line 87, in ml_prescreen\n    |     model_row, exp_row = await _resolve_artifacts(\n    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^\n    |         conn, model_id=model_id, experiment_run_id=experiment_run_id\n    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    |     )\n    |     ^\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\src\\orchestrator\\services\\specialists\\ml_prescreen.py\", line 138, in _resolve_artifacts\n    |     row = await conn.fetchrow(\n    |           ^^^^^^^^^^^^^^^^^^^^\n    |     ...<4 lines>...\n    |     )\n    |     ^\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\asyncpg\\connection.py\", line 752, in fetchrow\n    |     data = await self._execute(\n    |            ^^^^^^^^^^^^^^^^^^^^\n    |     ...<5 lines>...\n    |     )\n    |     ^\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\asyncpg\\connection.py\", line 1873, in _execute\n    |     result, _ = await self.__execute(\n    |                 ^^^^^^^^^^^^^^^^^^^^^\n    |     ...<7 lines>...\n    |     )\n    |     ^\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\asyncpg\\connection.py\", line 1970, in __execute\n    |     result, stmt = await self._do_execute(\n    |                    ^^^^^^^^^^^^^^^^^^^^^^^\n    |     ...<5 lines>...\n    |     )\n    |     ^\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\asyncpg\\connection.py\", line 2013, in _do_execute\n    |     stmt = await self._get_statement(\n    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^\n    |     ...<4 lines>...\n    |     )\n    |     ^\n    |   File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\asyncpg\\connection.py\", line 443, in _get_statement\n    |     statement = await self._protocol.prepare(\n    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    |     ...<5 lines>...\n    |     )\n    |     ^\n    |   File \"asyncpg/protocol/protocol.pyx\", line 165, in prepare\n    | asyncpg.exceptions.UndefinedColumnError: column \"deployment_ready\" does not exist\n    +------------------------------------\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\middleware\\errors.py\", line 164, in __call__\n    await self.app(scope, receive, _send)\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\middleware\\base.py\", line 182, in __call__\n    with recv_stream, send_stream, collapse_excgroups():\n                                   ~~~~~~~~~~~~~~~~~~^^\n  File \"C:\\Python314\\Lib\\contextlib.py\", line 162, in __exit__\n    self.gen.throw(value)\n    ~~~~~~~~~~~~~~^^^^^^^\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\_utils.py\", line 85, in collapse_excgroups\n    raise exc\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\middleware\\base.py\", line 184, in __call__\n    response = await self.dispatch_func(request, call_next)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Project\\blackheart-research-orchestrator\\src\\orchestrator\\auth.py\", line 140, in dispatch\n    return await call_next(request)\n           ^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\middleware\\base.py\", line 159, in call_next\n    raise app_exc\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\middleware\\base.py\", line 144, in coro\n    await self.app(scope, receive_or_disconnect, send_no_error)\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\middleware\\exceptions.py\", line 63, in __call__\n    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\_exception_handler.py\", line 53, in wrapped_app\n    raise exc\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\_exception_handler.py\", line 42, in wrapped_app\n    await app(scope, receive, sender)\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\fastapi\\middleware\\asyncexitstack.py\", line 18, in __call__\n    await self.app(scope, receive, send)\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\routing.py\", line 716, in __call__\n    await self.middleware_stack(scope, receive, send)\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\routing.py\", line 736, in app\n    await route.handle(scope, receive, send)\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\routing.py\", line 290, in handle\n    await self.app(scope, receive, send)\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\fastapi\\routing.py\", line 123, in app\n    await wrap_app_handling_exceptions(app, request)(scope, receive, send)\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\_exception_handler.py\", line 53, in wrapped_app\n    raise exc\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\starlette\\_exception_handler.py\", line 42, in wrapped_app\n    await app(scope, receive, sender)\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\fastapi\\routing.py\", line 109, in app\n    response = await f(request)\n               ^^^^^^^^^^^^^^^^\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\fastapi\\routing.py\", line 389, in app\n    raw_response = await run_endpoint_function(\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    ...<3 lines>...\n    )\n    ^\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\fastapi\\routing.py\", line 288, in run_endpoint_function\n    return await dependant.call(**values)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Project\\blackheart-research-orchestrator\\src\\orchestrator\\api\\specialists.py\", line 163, in post_ml_prescreen\n    result = await ml_prescreen(\n             ^^^^^^^^^^^^^^^^^^^\n    ...<3 lines>...\n    )\n    ^\n  File \"C:\\Project\\blackheart-research-orchestrator\\src\\orchestrator\\services\\specialists\\ml_prescreen.py\", line 87, in ml_prescreen\n    model_row, exp_row = await _resolve_artifacts(\n                         ^^^^^^^^^^^^^^^^^^^^^^^^^\n        conn, model_id=model_id, experiment_run_id=experiment_run_id\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"C:\\Project\\blackheart-research-orchestrator\\src\\orchestrator\\services\\specialists\\ml_prescreen.py\", line 138, in _resolve_artifacts\n    row = await conn.fetchrow(\n          ^^^^^^^^^^^^^^^^^^^^\n    ...<4 lines>...\n    )\n    ^\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\asyncpg\\connection.py\", line 752, in fetchrow\n    data = await self._execute(\n           ^^^^^^^^^^^^^^^^^^^^\n    ...<5 lines>...\n    )\n    ^\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\asyncpg\\connection.py\", line 1873, in _execute\n    result, _ = await self.__execute(\n                ^^^^^^^^^^^^^^^^^^^^^\n    ...<7 lines>...\n    )\n    ^\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\asyncpg\\connection.py\", line 1970, in __execute\n    result, stmt = await self._do_execute(\n                   ^^^^^^^^^^^^^^^^^^^^^^^\n    ...<5 lines>...\n    )\n    ^\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\asyncpg\\connection.py\", line 2013, in _do_execute\n    stmt = await self._get_statement(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^\n    ...<4 lines>...\n    )\n    ^\n  File \"C:\\Project\\blackheart-research-orchestrator\\.venv\\Lib\\site-packages\\asyncpg\\connection.py\", line 443, in _get_statement\n    statement = await self._protocol.prepare(\n                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    ...<5 lines>...\n    )\n    ^\n  File \"asyncpg/protocol/protocol.pyx\", line 165, in prepare\nasyncpg.exceptions.UndefinedColumnError: column \"deployment_ready\" does not exist"}
+ERROR:    Exception in ASGI application
+  + Exception Group Traceback (most recent call last):
+  |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\_utils.py", line 79, in collapse_excgroups
+  |     yield
+  |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\middleware\base.py", line 183, in __call__
+  |     async with anyio.create_task_group() as task_group:
+  |                ~~~~~~~~~~~~~~~~~~~~~~~^^
+  |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\anyio\_backends\_asyncio.py", line 799, in __aexit__
+  |     raise BaseExceptionGroup(
+  |         "unhandled errors in a TaskGroup", self._exceptions
+  |     ) from None
+  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  +-+---------------- 1 ----------------
+    | Traceback (most recent call last):
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 415, in run_asgi
+    |     result = await app(  # type: ignore[func-returns-value]
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |         self.scope, self.receive, self.send
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |     )
+    |     ^
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    |     return await self.app(scope, receive, send)
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\fastapi\applications.py", line 1133, in __call__
+    |     await super().__call__(scope, receive, send)
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\applications.py", line 113, in __call__
+    |     await self.middleware_stack(scope, receive, send)
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\middleware\errors.py", line 186, in __call__
+    |     raise exc
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\middleware\errors.py", line 164, in __call__
+    |     await self.app(scope, receive, _send)
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\middleware\base.py", line 182, in __call__
+    |     with recv_stream, send_stream, collapse_excgroups():
+    |                                    ~~~~~~~~~~~~~~~~~~^^
+    |   File "C:\Python314\Lib\contextlib.py", line 162, in __exit__
+    |     self.gen.throw(value)
+    |     ~~~~~~~~~~~~~~^^^^^^^
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\_utils.py", line 85, in collapse_excgroups
+    |     raise exc
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\middleware\base.py", line 184, in __call__
+    |     response = await self.dispatch_func(request, call_next)
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "C:\Project\blackheart-research-orchestrator\src\orchestrator\auth.py", line 140, in dispatch
+    |     return await call_next(request)
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\middleware\base.py", line 159, in call_next
+    |     raise app_exc
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\middleware\base.py", line 144, in coro
+    |     await self.app(scope, receive_or_disconnect, send_no_error)
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\middleware\exceptions.py", line 63, in __call__
+    |     await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    |     raise exc
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    |     await app(scope, receive, sender)
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\fastapi\middleware\asyncexitstack.py", line 18, in __call__
+    |     await self.app(scope, receive, send)
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\routing.py", line 716, in __call__
+    |     await self.middleware_stack(scope, receive, send)
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\routing.py", line 736, in app
+    |     await route.handle(scope, receive, send)
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\routing.py", line 290, in handle
+    |     await self.app(scope, receive, send)
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\fastapi\routing.py", line 123, in app
+    |     await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    |     raise exc
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    |     await app(scope, receive, sender)
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\fastapi\routing.py", line 109, in app
+    |     response = await f(request)
+    |                ^^^^^^^^^^^^^^^^
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\fastapi\routing.py", line 389, in app
+    |     raw_response = await run_endpoint_function(
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |     ...<3 lines>...
+    |     )
+    |     ^
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\fastapi\routing.py", line 288, in run_endpoint_function
+    |     return await dependant.call(**values)
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |   File "C:\Project\blackheart-research-orchestrator\src\orchestrator\api\specialists.py", line 163, in post_ml_prescreen
+    |     result = await ml_prescreen(
+    |              ^^^^^^^^^^^^^^^^^^^
+    |     ...<3 lines>...
+    |     )
+    |     ^
+    |   File "C:\Project\blackheart-research-orchestrator\src\orchestrator\services\specialists\ml_prescreen.py", line 87, in ml_prescreen
+    |     model_row, exp_row = await _resolve_artifacts(
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |         conn, model_id=model_id, experiment_run_id=experiment_run_id
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |     )
+    |     ^
+    |   File "C:\Project\blackheart-research-orchestrator\src\orchestrator\services\specialists\ml_prescreen.py", line 138, in _resolve_artifacts
+    |     row = await conn.fetchrow(
+    |           ^^^^^^^^^^^^^^^^^^^^
+    |     ...<4 lines>...
+    |     )
+    |     ^
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\asyncpg\connection.py", line 752, in fetchrow
+    |     data = await self._execute(
+    |            ^^^^^^^^^^^^^^^^^^^^
+    |     ...<5 lines>...
+    |     )
+    |     ^
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\asyncpg\connection.py", line 1873, in _execute
+    |     result, _ = await self.__execute(
+    |                 ^^^^^^^^^^^^^^^^^^^^^
+    |     ...<7 lines>...
+    |     )
+    |     ^
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\asyncpg\connection.py", line 1970, in __execute
+    |     result, stmt = await self._do_execute(
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^
+    |     ...<5 lines>...
+    |     )
+    |     ^
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\asyncpg\connection.py", line 2013, in _do_execute
+    |     stmt = await self._get_statement(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |     ...<4 lines>...
+    |     )
+    |     ^
+    |   File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\asyncpg\connection.py", line 443, in _get_statement
+    |     statement = await self._protocol.prepare(
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |     ...<5 lines>...
+    |     )
+    |     ^
+    |   File "asyncpg/protocol/protocol.pyx", line 165, in prepare
+    | asyncpg.exceptions.UndefinedColumnError: column "deployment_ready" does not exist
+    +------------------------------------
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\uvicorn\protocols\http\httptools_impl.py", line 415, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        self.scope, self.receive, self.send
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\fastapi\applications.py", line 1133, in __call__
+    await super().__call__(scope, receive, send)
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\applications.py", line 113, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\middleware\errors.py", line 186, in __call__
+    raise exc
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\middleware\errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\middleware\base.py", line 182, in __call__
+    with recv_stream, send_stream, collapse_excgroups():
+                                   ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Python314\Lib\contextlib.py", line 162, in __exit__
+    self.gen.throw(value)
+    ~~~~~~~~~~~~~~^^^^^^^
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\_utils.py", line 85, in collapse_excgroups
+    raise exc
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\middleware\base.py", line 184, in __call__
+    response = await self.dispatch_func(request, call_next)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Project\blackheart-research-orchestrator\src\orchestrator\auth.py", line 140, in dispatch
+    return await call_next(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\middleware\base.py", line 159, in call_next
+    raise app_exc
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\middleware\base.py", line 144, in coro
+    await self.app(scope, receive_or_disconnect, send_no_error)
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\middleware\exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\fastapi\middleware\asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\routing.py", line 716, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\routing.py", line 736, in app
+    await route.handle(scope, receive, send)
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\routing.py", line 290, in handle
+    await self.app(scope, receive, send)
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\fastapi\routing.py", line 123, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\fastapi\routing.py", line 109, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\fastapi\routing.py", line 389, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\fastapi\routing.py", line 288, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Project\blackheart-research-orchestrator\src\orchestrator\api\specialists.py", line 163, in post_ml_prescreen
+    result = await ml_prescreen(
+             ^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "C:\Project\blackheart-research-orchestrator\src\orchestrator\services\specialists\ml_prescreen.py", line 87, in ml_prescreen
+    model_row, exp_row = await _resolve_artifacts(
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^
+        conn, model_id=model_id, experiment_run_id=experiment_run_id
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Project\blackheart-research-orchestrator\src\orchestrator\services\specialists\ml_prescreen.py", line 138, in _resolve_artifacts
+    row = await conn.fetchrow(
+          ^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\asyncpg\connection.py", line 752, in fetchrow
+    data = await self._execute(
+           ^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\asyncpg\connection.py", line 1873, in _execute
+    result, _ = await self.__execute(
+                ^^^^^^^^^^^^^^^^^^^^^
+    ...<7 lines>...
+    )
+    ^
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\asyncpg\connection.py", line 1970, in __execute
+    result, stmt = await self._do_execute(
+                   ^^^^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\asyncpg\connection.py", line 2013, in _do_execute
+    stmt = await self._get_statement(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "C:\Project\blackheart-research-orchestrator\.venv\Lib\site-packages\asyncpg\connection.py", line 443, in _get_statement
+    statement = await self._protocol.prepare(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "asyncpg/protocol/protocol.pyx", line 165, in prepare
+asyncpg.exceptions.UndefinedColumnError: column "deployment_ready" does not exist
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-21T23:45:10.180179Z"}
+{"event": "HTTP Request: GET http://127.0.0.1:8081/actuator/health/liveness \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-21T23:45:13.467707Z"}
+{"event": "HTTP Request: GET http://127.0.0.1:8081/actuator/health/liveness \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-21T23:45:26.313770Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-21T23:46:13.792651Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-21T23:47:04.087220Z"}
+{"strategy_code": "DCB", "sweep_id": "a9112ac0-0062-4bb1-a08d-04f65a008c1d", "scale": 1, "n_scales": 5, "initial_capital": 100.0, "event": "capacity.scale_start", "level": "info", "ts": "2026-05-22T00:13:03.261379Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-22T00:13:03.828103Z"}
+{"strategy_code": "DCB", "sweep_id": "a9112ac0-0062-4bb1-a08d-04f65a008c1d", "scale": 2, "n_scales": 5, "initial_capital": 1000.0, "event": "capacity.scale_start", "level": "info", "ts": "2026-05-22T00:15:39.148023Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-22T00:15:39.216740Z"}
+{"strategy_code": "DCB", "sweep_id": "a9112ac0-0062-4bb1-a08d-04f65a008c1d", "scale": 3, "n_scales": 5, "initial_capital": 10000.0, "event": "capacity.scale_start", "level": "info", "ts": "2026-05-22T00:21:04.901816Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-22T00:21:05.209281Z"}
+{"strategy_code": "DCB", "sweep_id": "a9112ac0-0062-4bb1-a08d-04f65a008c1d", "scale": 4, "n_scales": 5, "initial_capital": 100000.0, "event": "capacity.scale_start", "level": "info", "ts": "2026-05-22T00:23:15.464412Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-22T00:23:15.534060Z"}
+{"strategy_code": "DCB", "sweep_id": "a9112ac0-0062-4bb1-a08d-04f65a008c1d", "scale": 5, "n_scales": 5, "initial_capital": 1000000.0, "event": "capacity.scale_start", "level": "info", "ts": "2026-05-22T00:25:30.793243Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-22T00:25:30.897403Z"}
+{"event": "Activity log failed (non-fatal): column \"created_at\" does not exist\nHINT:  Perhaps you meant to reference the column \"research_agent_activity.created_by\".", "level": "warning", "ts": "2026-05-22T00:31:08.055497Z"}

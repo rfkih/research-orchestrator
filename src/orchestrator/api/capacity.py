@@ -51,6 +51,15 @@ class CapacitySweepRequest(BaseModel):
     )
     overrides: dict[str, Any] | None = None
     motivating_iteration_id: UUID | None = None
+    slippage_rate: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=0.02,
+        description=(
+            "Per-fill entry slippage (fractional units, e.g. 0.0005 = 5 bps). "
+            "Omit to use the service default. Capped at 2% to catch typos."
+        ),
+    )
 
 
 class CapacitySweepResponse(BaseModel):
@@ -80,6 +89,9 @@ async def post_capacity_sweep(
             retryable=False,
         )
 
+    kwargs: dict[str, Any] = {}
+    if body.slippage_rate is not None:
+        kwargs["slippage_rate"] = body.slippage_rate
     result = await run_capacity_sweep(
         db=request.app.state.db,
         jvm=request.app.state.jvm,
@@ -93,6 +105,7 @@ async def post_capacity_sweep(
         notional_scales=body.notional_scales,
         overrides=body.overrides,
         motivating_iteration_id=body.motivating_iteration_id,
+        **kwargs,
     )
 
     payload = result.to_dict()

@@ -8,10 +8,14 @@ from __future__ import annotations
 
 import pytest
 
+from datetime import datetime, timezone
+
 from orchestrator.services.capacity import (
+    DEFAULT_SLIPPAGE_RATE,
     DEGRADATION_PCT_GENTLE,
     DEGRADATION_PCT_GRADUAL,
     PF_NOISE_FLOOR,
+    _build_payload,
     _classify_verdict,
 )
 
@@ -123,3 +127,66 @@ def test_constants_pinned() -> None:
     assert PF_NOISE_FLOOR == 1.2
     assert DEGRADATION_PCT_GENTLE == 20.0
     assert DEGRADATION_PCT_GRADUAL == 40.0
+    assert DEFAULT_SLIPPAGE_RATE == 0.0005
+
+
+def _payload_kwargs(**extra) -> dict:
+    base = dict(
+        account_strategy_id="as-1",
+        strategy_code="DCB",
+        asset="ETHUSDT",
+        interval_name="1h",
+        start_time=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        end_time=datetime(2026, 5, 20, tzinfo=timezone.utc),
+        initial_capital=10_000.0,
+    )
+    base.update(extra)
+    return base
+
+
+def test_build_payload_routes_ml_sentinels_to_v100_maps() -> None:
+    """ML sentinels in ``overrides`` must land in the V100 JVM JSONB
+    columns (``strategyMl*Overrides``), NOT inside
+    ``strategyParamOverrides``. The JVM ignores them under the latter."""
+    payload = _build_payload(
+        **_payload_kwargs(
+            overrides={
+                "tpR": 5.0,
+                "adxEntryMin": 21,
+                "_ml_gate_enabled": True,
+                "_ml_signal_name": "regime_eth_v2",
+                "_ml_shadow_mode": False,
+            },
+        )
+    )
+    assert payload["strategyParamOverrides"] == {
+        "DCB": {"tpR": 5.0, "adxEntryMin": 21}
+    }
+    assert payload["strategyMlGateOverrides"] == {"DCB": True}
+    assert payload["strategyMlSignalNameOverrides"] == {"DCB": "regime_eth_v2"}
+    assert payload["strategyMlShadowModeOverrides"] == {"DCB": False}
+
+
+def test_build_payload_emits_slippage_rate_default_and_override() -> None:
+    """``slippageRate`` must always appear so the JVM doesn't fall back
+    to the null-guard zero-impact path. Both default and explicit
+    override must reach the payload."""
+    default_payload = _build_payload(**_payload_kwargs(overrides=None))
+    assert default_payload["slippageRate"] == DEFAULT_SLIPPAGE_RATE
+
+    custom_payload = _build_payload(
+        **_payload_kwargs(overrides=None, slippage_rate=0.001)
+    )
+    assert custom_payload["slippageRate"] == 0.001
+
+
+def test_build_payload_omits_ml_keys_when_no_sentinels() -> None:
+    """If no ML sentinels are present, the V100 maps must NOT appear in
+    the payload — empty maps would pollute the JVM payload with three
+    null routes that the strategy resolver has to ignore."""
+    payload = _build_payload(
+        **_payload_kwargs(overrides={"tpR": 5.0, "adxEntryMin": 21})
+    )
+    assert "strategyMlGateOverrides" not in payload
+    assert "strategyMlSignalNameOverrides" not in payload
+    assert "strategyMlShadowModeOverrides" not in payload

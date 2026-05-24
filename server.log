@@ -1,0 +1,14 @@
+INFO:     Started server process [30948]
+INFO:     Waiting for application startup.
+{"detail": "ORCH_AUTH_TOKEN is the dev sentinel value. Any caller that knows the sentinel can drive the orchestrator. Generate a real token before exposing beyond loopback: python -c \"import secrets; print(secrets.token_urlsafe(48))\"", "event": "orchestrator.dev_warning", "level": "warning", "ts": "2026-05-22T17:46:11.854046Z"}
+{"detail": "ORCH_RESEARCH_ACCOUNT_ID is unset \u2014 account_strategy lookup falls back to 'first matching row' which can select an admin-owned row on a multi-account host.", "event": "orchestrator.dev_warning", "level": "warning", "ts": "2026-05-22T17:46:11.854106Z"}
+{"redis_url": "redis://127.0.0.1:6379/0", "event": "orchestrator.redis_connected", "level": "info", "ts": "2026-05-22T17:46:12.282499Z"}
+{"profile": "dev", "host": "127.0.0.1", "port": 8082, "jvm_base_url": "http://127.0.0.1:8081", "jvm_auth_mode": "static_jwt", "event": "orchestrator.startup", "level": "info", "ts": "2026-05-22T17:46:12.290245Z"}
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8082 (Press CTRL+C to quit)
+WARNING:  Unsupported upgrade request.
+{"extra": {"promoted_count": 4}, "event": "verdict_drift.scan_started", "level": "info", "ts": "2026-05-23T02:53:27.720698Z"}
+{"extra": {"drift_count": 0}, "event": "verdict_drift.scan_complete", "level": "info", "ts": "2026-05-23T02:53:27.733051Z"}
+WARNING:  Unsupported upgrade request.
+{"extra": {"promoted_count": 4}, "event": "verdict_drift.scan_started", "level": "info", "ts": "2026-05-24T02:30:20.457137Z"}
+{"extra": {"drift_count": 0}, "event": "verdict_drift.scan_complete", "level": "info", "ts": "2026-05-24T02:30:20.472346Z"}

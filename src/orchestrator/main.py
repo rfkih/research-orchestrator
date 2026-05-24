@@ -21,8 +21,10 @@ from .api.inference import router as inference_router
 from .api.iterations import router as iterations_router
 from .api.journal import router as journal_router
 from .api.json_response import TypedJSONResponse
+from .api.ml_monitor import router as ml_monitor_router
 from .api.ml_training import router as ml_training_router
 from .api.models import router as models_router
+from .api.signals import router as signals_router
 from .api.null_screen import router as null_screen_router
 from .api.queue import router as queue_router
 from .api.raw import router as raw_router
@@ -83,6 +85,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(specialist_reviews_router)
     app.include_router(capacity_router)
     app.include_router(ml_training_router)
+    app.include_router(ml_monitor_router)
+    app.include_router(signals_router)
     return app
 
 

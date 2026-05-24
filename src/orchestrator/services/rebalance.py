@@ -52,11 +52,17 @@ from uuid import UUID
 import asyncpg
 import numpy as np
 
+from typing import TYPE_CHECKING
+
+from ..errors import OrchestratorError
 from ..logging import get_logger
 from .portfolio import (
     PROTECTED_STRATEGY_CODES,
     _fetch_one_baseline,
 )
+
+if TYPE_CHECKING:
+    from ..clients.trading_jvm import TradingJvmClient
 from .specialists.portfolio_math import (
     equal_weight,
     hrp_weights,
@@ -80,6 +86,58 @@ MAX_WEIGHT: float = 0.50
 # job falls back to equal-weight rather than feeding a noisy 2-day
 # correlation into HRP.
 MIN_OBS_FOR_REBALANCE: int = 30
+
+# ── Min-notional guard (Phase A.5, scorecard #10) ─────────────────────
+#
+# The clamp+renorm math above can produce a mathematically valid
+# weight vector (sum=1, each in [MIN_WEIGHT, MAX_WEIGHT]) that, on a
+# small account, translates into per-strategy entry sizes the Binance
+# executor will silently reject. ``LiveTradingDecisionExecutorService.
+# applyPortfolioWeight`` multiplies the entry by ``portfolio_weight``;
+# ``TradeOpenService`` then rejects any order whose USDT notional is
+# below ``TradeConstant.MIN_USDT_NOTIONAL``. A strategy clamped to
+# ``MIN_WEIGHT=0.05`` on a $500 account produces an entry far below
+# that floor — the dashboard shows 5% allocation while the strategy
+# never trades. The guard below catches that *before* the operator
+# clicks Apply.
+
+MIN_USDT_NOTIONAL_USD: float = 7.0
+"""Mirror of ``TradeConstant.MIN_USDT_NOTIONAL`` in the trading JVM
+(``blackheart-trading-engine/src/main/java/id/co/blackheart/util/
+TradeConstant.java:11``). ``TradeOpenService.java:378-382`` silently
+rejects any LONG order below this; SHORT orders bottom out at the
+symbol's LOT_SIZE step. A pin test in ``tests/test_rebalance.py``
+reads the Java literal and asserts equality so the two cannot drift
+apart. Phase A.6 plumbs this from a JVM endpoint; until then update
+both files together."""
+
+MIN_NOTIONAL_SAFETY_FACTOR: float = 1.2
+"""Buffer on top of ``MIN_USDT_NOTIONAL_USD`` for the rebalance guard.
+
+Phase A.6 (2026-05-22) tightened this from 2.0 to 1.2 once the
+orchestrator gained a live Kelly read via :class:`TradingJvmClient`.
+The previous 2.0× was sized to absorb the ``kelly=1.0`` upper-bound
+approximation (we couldn't see what Kelly the executor would actually
+apply, so we left 50% of the floor as slack). With the live read, the
+guard math is bit-identical to ``LiveTradingDecisionExecutorService``
+(``available × cap_alloc × kelly × weight``), so the remaining buffer
+only needs to cover:
+
+* Equity / Kelly drift between Preview and signal fire (minutes-to-
+  hours window).
+* Binance price moves that change SHORT-side notional when priced into
+  USDT (LONG-side is unaffected — see :func:`_check_min_notional`).
+* Floating-point precision around the floor.
+
+1.2× (effective floor $8.40) is the smallest buffer that still leaves
+~20% headroom above the JVM's strict $7 reject point. Pin test guards
+against drift; loosening past 1.0 makes the guard ineffective and
+requires an ORCHESTRATOR_CHANGE journal entry citing rationale."""
+
+EFFECTIVE_MIN_NOTIONAL_USD: float = MIN_USDT_NOTIONAL_USD * MIN_NOTIONAL_SAFETY_FACTOR
+"""Per-strategy entry-notional floor enforced by the rebalance guard.
+``$7 × 2.0 = $14`` at the pinned defaults. Computed at module load
+so the test pinning the literal also pins the derived value."""
 
 OptimizerName = Literal["HRP", "EQUAL_WEIGHT", "MEAN_VARIANCE"]
 
@@ -179,6 +237,7 @@ async def _fetch_target_account_strategies(
                strategy_code,
                symbol,
                interval_name,
+               capital_allocation_pct,
                portfolio_weight,
                weight_source
           FROM account_strategy
@@ -193,6 +252,148 @@ async def _fetch_target_account_strategies(
         account_id,
     )
     return [dict(r) for r in rows]
+
+
+def _check_min_notional(
+    eligible_target_rows: list[dict[str, Any]],
+    new_weights: dict[str, float],
+    available_usdt: float,
+    kelly_by_account_strategy_id: dict[str, float] | None = None,
+) -> list[dict[str, Any]]:
+    """Detect strategies whose post-rebalance projected entry size
+    would fall below ``EFFECTIVE_MIN_NOTIONAL_USD``.
+
+    Math mirrors ``LiveTradingDecisionExecutorService.
+    calculateLongTradeAmount`` (``blackheart-trading-engine/.../
+    LiveTradingDecisionExecutorService.java:677``) AND the in-line
+    Kelly + portfolio-weight multiplies that follow in the executor::
+
+        projected_entry_usd = available_usdt
+                            × (cap_alloc_pct / 100)
+                            × kelly_multiplier
+                            × portfolio_weight
+
+    ``available_usdt`` is the *free* USDT balance — the executor sizes
+    against ``Portfolio.balance`` (line 334-339 of the executor), which
+    is the per-asset free balance, NOT the total marketable equity.
+
+    ``kelly_by_account_strategy_id`` carries the live Kelly multiplier
+    per row, fetched from the trading JVM's
+    ``/api/v1/internal/orch/kelly/{accountStrategyId}`` endpoint
+    (Phase A.6). When None or a code's id is absent from the map, we
+    fall back to ``kelly = 1.0`` — the no-op assumption the executor
+    itself uses when ``kellySizingEnabled = false``. The safety factor
+    on ``MIN_NOTIONAL_SAFETY_FACTOR`` covers drift between the read at
+    Preview/Apply time and the live re-computation at signal fire.
+
+    **Known approximations (still present after Phase A.6):**
+
+    1. *Fallback-path sizing only.* This formula models
+       ``calculateLongTradeAmount``, which is the executor's FALLBACK
+       — invoked only when ``decision.notionalSize`` is empty
+       (``executeOpenLong`` line 337-339 prefers the strategy's own
+       value when set). Self-sizing strategies (e.g. risk-budget ×
+       atr-stop) can produce a different notional that the guard
+       cannot predict without per-strategy logic. The guard is still
+       useful because ``applyPortfolioWeight`` and ``applyKellySizing``
+       multiply regardless of how the base size was computed, so a
+       0.05 weight on a strategy whose base was already $30 still
+       lands at $1.50 — well below the floor.
+
+    2. *SHORT entries are not modelled.* ``calculateShortTradeAmount``
+       multiplies ``baseBalance × alloc`` in the BASE asset (e.g. BTC),
+       which then needs the current symbol price to compare against
+       MIN_USDT_NOTIONAL. The orchestrator has no live price read
+       today. For BTC-only protected-book strategies that are LONG-
+       biased this is fine; multi-symbol or SHORT-heavy books will
+       under-detect violations on the SHORT side.
+
+    Returns one entry per violating strategy with the structured
+    forensics the operator needs to act:
+
+    * ``strategy_code``, ``symbol``, ``weight`` — *which* strategy
+      and *what* weight produced the projected sub-floor entry.
+    * ``capital_allocation_pct`` — the row's allocation as stored in
+      ``account_strategy``, so the operator can see whether to widen
+      that knob instead of changing the optimiser output.
+    * ``kelly_multiplier`` — the live Kelly value used in the math
+      (1.0 when none was provided), so the operator can correlate
+      with the JVM's ``GET /kelly-status`` admin endpoint.
+    * ``projected_entry_usd`` / ``floor_usd`` / ``shortfall_usd`` —
+      magnitude of the violation so the operator can prioritise the
+      worst row.
+
+    Empty list = clean — no violations. Caller (``rebalance_book``)
+    decides whether to refuse the write or just warn.
+    """
+    kelly_map = kelly_by_account_strategy_id or {}
+
+    if available_usdt <= 0 or not math.isfinite(available_usdt):
+        # Defensive — Pydantic validates ``> 0`` on the request body
+        # but direct callers (cron, tests) may pass zero. We flag
+        # every strategy with a structured ``non_positive_equity``
+        # reason rather than dividing by zero or returning clean.
+        return [
+            {
+                "strategy_code": r["strategy_code"],
+                "symbol": r["symbol"],
+                "weight": float(new_weights.get(r["strategy_code"], 0.0)),
+                "capital_allocation_pct": float(r["capital_allocation_pct"]),
+                "kelly_multiplier": float(
+                    kelly_map.get(str(r["account_strategy_id"]), 1.0)
+                ),
+                "projected_entry_usd": 0.0,
+                "floor_usd": EFFECTIVE_MIN_NOTIONAL_USD,
+                "shortfall_usd": EFFECTIVE_MIN_NOTIONAL_USD,
+                "reason": "non_positive_equity",
+            }
+            for r in eligible_target_rows
+            if r["strategy_code"] in new_weights
+        ]
+
+    violations: list[dict[str, Any]] = []
+    for r in eligible_target_rows:
+        code = r["strategy_code"]
+        weight = new_weights.get(code)
+        if weight is None or not math.isfinite(weight) or weight <= 0:
+            # Zero / missing weight means the strategy isn't trading
+            # post-rebalance anyway — no violation to flag.
+            continue
+        cap_alloc = float(r["capital_allocation_pct"])
+        if cap_alloc <= 0:
+            # capital_allocation_pct=0 means the row is disabled at
+            # the allocation layer; the executor returns ZERO from
+            # allocFraction (LiveTradingDecisionExecutorService.java
+            # :714-720), so no entry ever fires. Skip — the row
+            # wasn't going to trade with or without the rebalance.
+            continue
+        cap_alloc_fraction = cap_alloc / 100.0
+        # Kelly defaults to 1.0 when the trading-JVM client was
+        # unavailable or returned no entry for this row. Same
+        # semantics the executor's ``applyKellySizing`` uses when
+        # ``kellySizingEnabled = false`` — a strict no-op.
+        kelly = float(kelly_map.get(str(r["account_strategy_id"]), 1.0))
+        if not math.isfinite(kelly) or kelly <= 0:
+            kelly = 1.0
+        projected_entry = (
+            available_usdt * cap_alloc_fraction * kelly * float(weight)
+        )
+        if projected_entry < EFFECTIVE_MIN_NOTIONAL_USD:
+            violations.append(
+                {
+                    "strategy_code": code,
+                    "symbol": r["symbol"],
+                    "weight": round(float(weight), 5),
+                    "capital_allocation_pct": cap_alloc,
+                    "kelly_multiplier": round(kelly, 5),
+                    "projected_entry_usd": round(projected_entry, 2),
+                    "floor_usd": EFFECTIVE_MIN_NOTIONAL_USD,
+                    "shortfall_usd": round(
+                        EFFECTIVE_MIN_NOTIONAL_USD - projected_entry, 2
+                    ),
+                }
+            )
+    return violations
 
 
 async def _write_weights(
@@ -246,6 +447,8 @@ async def _journal_rebalance(
     n_updated: int,
     dry_run: bool,
     agent_name: str,
+    blocked: bool = False,
+    violations: list[dict[str, Any]] | None = None,
 ) -> UUID:
     """Append an audit row to research_journal.
 
@@ -253,15 +456,26 @@ async def _journal_rebalance(
     definition cross-strategy. A future migration may introduce a
     dedicated PORTFOLIO_REBALANCE entry_type; until then this is the
     closest fit in the existing CHECK enum.
+
+    ``blocked=True`` records that the rebalance was refused by the
+    min-notional guard. The journal entry IS still written (the
+    operator's attempt + the violations need to be auditable) but
+    ``n_updated=0`` reflects that no weights moved.
     """
+    if blocked:
+        title_suffix = " [BLOCKED]"
+    elif dry_run:
+        title_suffix = " [DRY-RUN]"
+    else:
+        title_suffix = ""
     title = (
-        f"Portfolio rebalance ({optimizer})"
-        + (" [DRY-RUN]" if dry_run else "")
-        + f" — {n_updated} rows updated"
+        f"Portfolio rebalance ({optimizer}){title_suffix}"
+        f" — {n_updated} rows updated"
     )
     content_lines = [
         f"Optimizer: {optimizer}",
         f"Dry-run: {dry_run}",
+        f"Blocked: {blocked}",
         f"Rows updated: {n_updated}",
         f"Clamp events: low={diagnostics.get('n_clamped_low')} "
         f"high={diagnostics.get('n_clamped_high')} "
@@ -273,6 +487,25 @@ async def _journal_rebalance(
         "After:",
         *[f"  {c}: {w:.5f}" for c, w in sorted(weights_after.items())],
     ]
+    if violations:
+        content_lines.append("")
+        content_lines.append(
+            f"Min-notional violations (floor=${EFFECTIVE_MIN_NOTIONAL_USD:.2f}):"
+        )
+        for v in violations:
+            shortfall = v.get("shortfall_usd")
+            content_lines.append(
+                f"  {v['strategy_code']}/{v['symbol']}: "
+                f"projected=${v['projected_entry_usd']:.2f} "
+                f"weight={v['weight']:.5f} "
+                f"shortfall=${shortfall:.2f}"
+                if shortfall is not None
+                else (
+                    f"  {v['strategy_code']}/{v['symbol']}: "
+                    f"projected=${v['projected_entry_usd']:.2f} "
+                    f"weight={v['weight']:.5f}"
+                )
+            )
     if skipped:
         content_lines.append("")
         content_lines.append("Skipped:")
@@ -282,12 +515,20 @@ async def _journal_rebalance(
         "account_id": account_id,
         "optimizer": optimizer,
         "dry_run": dry_run,
+        "blocked": blocked,
         "n_updated": n_updated,
         "weights_before": weights_before,
         "weights_after": weights_after,
         "diagnostics": diagnostics,
         "skipped": skipped,
-        "guardrails": {"min_weight": MIN_WEIGHT, "max_weight": MAX_WEIGHT},
+        "violations": violations or [],
+        "guardrails": {
+            "min_weight": MIN_WEIGHT,
+            "max_weight": MAX_WEIGHT,
+            "min_notional_usd": MIN_USDT_NOTIONAL_USD,
+            "min_notional_safety_factor": MIN_NOTIONAL_SAFETY_FACTOR,
+            "effective_floor_usd": EFFECTIVE_MIN_NOTIONAL_USD,
+        },
     }
     row = await conn.fetchrow(
         """
@@ -310,6 +551,7 @@ async def rebalance_book(
     conn: asyncpg.Connection,
     *,
     account_id: str,
+    available_usdt: float,
     optimizer: OptimizerName = "HRP",
     strategy_codes: tuple[str, ...] = PROTECTED_STRATEGY_CODES,
     min_overlap_days: int = 5,
@@ -317,6 +559,7 @@ async def rebalance_book(
     risk_aversion: float = 1.0,
     dry_run: bool = False,
     agent_name: str = "orchestrator",
+    trading_jvm: "TradingJvmClient | None" = None,
 ) -> dict[str, Any]:
     """Compute new portfolio_weight per strategy_code from the most-
     recent COMPLETED backtest_run daily returns, apply guardrails, and
@@ -328,6 +571,35 @@ async def rebalance_book(
     a per-account operation. The legacy "rebalance every matching row
     across all accounts" behaviour was a latent multi-tenant bug fixed
     by this scoping.
+
+    ``available_usdt`` is the caller's view of the FREE USDT balance
+    for ``account_id`` — NOT the total marketable equity. The JVM
+    executor sizes LONG entries against the account's per-asset free
+    balance (``Portfolio.balance``, ``LiveTradingDecisionExecutorService
+    .java:334-339``), so the guard must compare against the same number.
+
+    ``trading_jvm`` is the orchestrator's :class:`TradingJvmClient`.
+    When present and enabled (Phase A.6, 2026-05-22), this function
+    fetches:
+
+    * Live ``available_usdt`` from the trading JVM. Validated against
+      the caller-provided value within ±5%; drift is logged. The
+      JVM-side value is used as truth in the guard math because that's
+      what the executor will see at signal-fire time.
+    * Per-strategy ``kelly_multiplier`` from
+      ``KellySizingService.getStatus`` so the guard math is bit-
+      identical to ``applyKellySizing`` — no upper-bound approximation.
+
+    When ``trading_jvm`` is None or disabled, the function falls back
+    to the Phase A.5 contract (caller-provided ``available_usdt``,
+    ``kelly=1.0`` upper-bound assumption with the wider safety factor).
+
+    The min-notional guard compares ``available_usdt × cap_alloc_pct/
+    100 × kelly_multiplier × proposed_weight`` against
+    ``EFFECTIVE_MIN_NOTIONAL_USD``; weights that would produce sub-
+    floor entries cause Apply to refuse with 422
+    ``below_min_notional_floor`` (dry-run still computes and surfaces
+    the violations in ``diagnostics.below_min_notional``).
 
     Returns the full forensic payload — caller stashes it on the
     response envelope so the operator sees before/after even when
@@ -368,10 +640,24 @@ async def rebalance_book(
             "codes": [],
             "weights_before": weights_before,
             "weights_after": {},
-            "diagnostics": {"reason": "no eligible strategies"},
+            "diagnostics": {
+                "reason": "no eligible strategies",
+                "below_min_notional": [],
+                "available_usdt": round(float(available_usdt), 2),
+                "available_usdt_source": "caller_provided",
+                "effective_floor_usd": EFFECTIVE_MIN_NOTIONAL_USD,
+                "kelly_source": "fallback_kelly=1.0",
+            },
             "skipped": skipped,
             "n_updated": 0,
             "journal_id": None,
+            "guardrails": {
+                "min_weight": MIN_WEIGHT,
+                "max_weight": MAX_WEIGHT,
+                "min_notional_usd": MIN_USDT_NOTIONAL_USD,
+                "min_notional_safety_factor": MIN_NOTIONAL_SAFETY_FACTOR,
+                "effective_floor_usd": EFFECTIVE_MIN_NOTIONAL_USD,
+            },
             "computed_at": datetime.utcnow().isoformat() + "Z",
         }
 
@@ -385,16 +671,143 @@ async def rebalance_book(
     )
     new_weights, diagnostics = _apply_guardrails(raw_weights)
 
+    # Min-notional guard (Phase A.5 + A.6). Run AFTER clamp+renorm so
+    # the check sees the same numbers the executor would. Violations
+    # are always attached to diagnostics; whether they BLOCK depends
+    # on dry_run. See ``_check_min_notional`` for the math + assumptions.
+    eligible_target_rows = [
+        r for r in target_rows if r["strategy_code"] in eligible_codes
+    ]
+
+    # Phase A.6: live equity + Kelly read from the trading JVM. When
+    # the client is unavailable, fall back to the caller-provided
+    # available_usdt + kelly=1.0 (legacy Phase A.5 behaviour). The
+    # client itself is responsible for short-circuiting cleanly on a
+    # configuration miss (``trading_jvm.enabled`` short-circuit) so
+    # cron / direct callers get a deterministic fallback path.
+    effective_available_usdt = float(available_usdt)
+    kelly_by_account_strategy_id: dict[str, float] = {}
+    jvm_used = False
+    jvm_available_usdt_raw: float | None = None
+    jvm_drift_pct: float | None = None
+    if trading_jvm is not None and trading_jvm.enabled:
+        try:
+            jvm_portfolio = await trading_jvm.get_account_portfolio(account_id)
+            jvm_available_usdt_raw = float(jvm_portfolio.available_usdt)
+            if not math.isfinite(jvm_available_usdt_raw):
+                # NaN/inf is a serialization or arithmetic bug on the
+                # JVM side, not a transient network issue. Distinct
+                # log line so the operator can file the right ticket
+                # (JVM bug vs. retry the request). Fall back to
+                # caller-provided for graceful degradation; the
+                # alternative is a hard refuse, which a one-off bad
+                # row would turn into a hard outage.
+                log.warning(
+                    "rebalance.jvm_returned_non_finite",
+                    account_id=account_id,
+                    raw_value=str(jvm_portfolio.available_usdt),
+                )
+            elif jvm_available_usdt_raw < 0:
+                # Negative free balance shouldn't exist. Same
+                # treatment as NaN/inf — log loudly, fall back.
+                log.warning(
+                    "rebalance.jvm_returned_negative",
+                    account_id=account_id,
+                    raw_value=jvm_available_usdt_raw,
+                )
+            else:
+                # JVM truth wins, INCLUDING when it's zero. Zero free
+                # USDT is a legitimate state (all USDT locked in open
+                # positions); falling back to a stale caller-provided
+                # value here would re-introduce the silent-failure
+                # mode the guard exists to prevent. The
+                # ``non_positive_equity`` branch in
+                # ``_check_min_notional`` will then correctly flag
+                # every strategy and Apply gets a 422 the operator
+                # can act on ("free up locked USDT").
+                effective_available_usdt = jvm_available_usdt_raw
+                jvm_used = True
+                # Drift between client-provided and JVM-side. Logged
+                # but not refused — operator clicked Preview a few
+                # minutes before Apply, equity moves are expected.
+                if float(available_usdt) > 0:
+                    jvm_drift_pct = (
+                        (jvm_available_usdt_raw - float(available_usdt))
+                        / float(available_usdt)
+                    )
+                # Per-row Kelly. Skipped when effective equity is zero
+                # — non_positive_equity short-circuits the guard math
+                # regardless of Kelly, so the N HTTP roundtrips would
+                # be wasted. Independent failures per row degrade to
+                # kelly=1.0 for that row rather than nuking the whole
+                # guard — the safety factor covers a single miss.
+                if jvm_available_usdt_raw > 0:
+                    for r in eligible_target_rows:
+                        try:
+                            kelly = await trading_jvm.get_kelly_status(
+                                r["account_strategy_id"]
+                            )
+                            kelly_by_account_strategy_id[
+                                str(r["account_strategy_id"])
+                            ] = float(kelly.current_multiplier)
+                        except OrchestratorError as exc:
+                            log.warning(
+                                "rebalance.kelly_read_failed",
+                                account_strategy_id=str(r["account_strategy_id"]),
+                                strategy_code=r["strategy_code"],
+                                error_code=exc.envelope.error_code,
+                            )
+        except OrchestratorError as exc:
+            # JVM portfolio read failed — log and fall back to caller-
+            # provided number with kelly=1.0. The wider Phase A.5
+            # safety factor would have been 2.0; at 1.2 there is less
+            # cushion, so the guard is somewhat stricter when JVM is
+            # unreachable. Acceptable: the alternative is refusing the
+            # rebalance outright, which a transient network blip
+            # shouldn't cause.
+            log.warning(
+                "rebalance.portfolio_read_failed",
+                account_id=account_id,
+                error_code=exc.envelope.error_code,
+            )
+
+    violations = _check_min_notional(
+        eligible_target_rows,
+        new_weights,
+        effective_available_usdt,
+        kelly_by_account_strategy_id=kelly_by_account_strategy_id or None,
+    )
+    diagnostics["below_min_notional"] = violations
+    diagnostics["available_usdt"] = round(effective_available_usdt, 2)
+    diagnostics["available_usdt_source"] = (
+        "trading_jvm" if jvm_used else "caller_provided"
+    )
+    if jvm_used and jvm_drift_pct is not None:
+        diagnostics["available_usdt_drift_pct"] = round(jvm_drift_pct * 100, 2)
+        diagnostics["available_usdt_caller_provided"] = round(
+            float(available_usdt), 2
+        )
+    diagnostics["effective_floor_usd"] = EFFECTIVE_MIN_NOTIONAL_USD
+    diagnostics["kelly_source"] = (
+        "trading_jvm" if kelly_by_account_strategy_id else "fallback_kelly=1.0"
+    )
+    if kelly_by_account_strategy_id:
+        diagnostics["kelly_by_account_strategy_id"] = {
+            k: round(v, 5) for k, v in kelly_by_account_strategy_id.items()
+        }
+
+    is_blocked = bool(violations) and not dry_run
+
     # Weights + journal commit atomically. If either fails the other
     # rolls back -- prevents the "weights written without an audit row"
     # state and the "journal written claiming weights changed when they
     # didn't" state. Dry-run still wraps in a transaction for symmetry;
-    # nothing is written under dry_run except the journal entry.
-    eligible_target_rows = [
-        r for r in target_rows if r["strategy_code"] in eligible_codes
-    ]
+    # nothing is written under dry_run except the journal entry. When
+    # the guard blocks, we journal the rejection (operator's attempt +
+    # violations are auditable) and then raise 422 AFTER the journal
+    # commits so the audit row survives.
     async with conn.transaction():
-        if dry_run:
+        if dry_run or is_blocked:
             n_updated = 0
         else:
             n_updated = await _write_weights(
@@ -411,6 +824,8 @@ async def rebalance_book(
             n_updated=n_updated,
             dry_run=dry_run,
             agent_name=agent_name,
+            blocked=is_blocked,
+            violations=violations,
         )
 
     log.info(
@@ -418,10 +833,50 @@ async def rebalance_book(
         account_id=account_id,
         optimizer=optimizer,
         dry_run=dry_run,
+        blocked=is_blocked,
         n_eligible=len(eligible_codes),
         n_updated=n_updated,
+        n_violations=len(violations),
+        available_usdt=round(effective_available_usdt, 2),
+        available_usdt_source=diagnostics["available_usdt_source"],
+        available_usdt_drift_pct=diagnostics.get("available_usdt_drift_pct"),
+        kelly_source=diagnostics["kelly_source"],
         skipped=list(skipped.keys()),
     )
+
+    if is_blocked:
+        raise OrchestratorError(
+            status_code=422,
+            error_code="below_min_notional_floor",
+            message=(
+                f"Rebalance would produce {len(violations)} strategy "
+                f"row(s) with projected entry size below "
+                f"${EFFECTIVE_MIN_NOTIONAL_USD:.2f} "
+                f"(MIN_USDT_NOTIONAL ${MIN_USDT_NOTIONAL_USD:.2f} × "
+                f"safety {MIN_NOTIONAL_SAFETY_FACTOR:g}). Apply refused; "
+                f"weights NOT written. Audit row "
+                f"{str(journal_id)[:8]}."
+            ),
+            retryable=False,
+            hint=(
+                "Either (a) free up locked USDT by closing open "
+                "positions, (b) lower the number of live strategies, "
+                "(c) raise the violating row's capital_allocation_pct, "
+                "or (d) set weight_source='MANUAL' on the row with an "
+                "explicit override. Re-run preview after any of these "
+                "to see the updated diff."
+            ),
+            details={
+                "violations": violations,
+                "available_usdt": round(effective_available_usdt, 2),
+                "available_usdt_source": diagnostics["available_usdt_source"],
+                "effective_floor_usd": EFFECTIVE_MIN_NOTIONAL_USD,
+                "min_notional_usd": MIN_USDT_NOTIONAL_USD,
+                "min_notional_safety_factor": MIN_NOTIONAL_SAFETY_FACTOR,
+                "kelly_source": diagnostics["kelly_source"],
+                "journal_id": str(journal_id) if journal_id else None,
+            },
+        )
 
     return {
         "applied": not dry_run,
@@ -436,6 +891,12 @@ async def rebalance_book(
         "skipped": skipped,
         "n_updated": n_updated,
         "journal_id": str(journal_id) if journal_id else None,
-        "guardrails": {"min_weight": MIN_WEIGHT, "max_weight": MAX_WEIGHT},
+        "guardrails": {
+            "min_weight": MIN_WEIGHT,
+            "max_weight": MAX_WEIGHT,
+            "min_notional_usd": MIN_USDT_NOTIONAL_USD,
+            "min_notional_safety_factor": MIN_NOTIONAL_SAFETY_FACTOR,
+            "effective_floor_usd": EFFECTIVE_MIN_NOTIONAL_USD,
+        },
         "computed_at": datetime.utcnow().isoformat() + "Z",
     }
