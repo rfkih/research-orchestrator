@@ -51,6 +51,7 @@ SPECIALIST_NAMES = frozenset({
     "quant-skeptic",
     "quant-portfolio-manager",
     "quant-ml-judge",
+    "quant-curator",
 })
 
 # Verdict literals per specialist. Mismatched verdict → 400 from the
@@ -59,6 +60,15 @@ VERDICT_LITERALS: dict[str, frozenset[str]] = {
     "quant-skeptic": frozenset({"CONCUR", "CONCERN", "OVERRIDE_REJECT"}),
     "quant-portfolio-manager": frozenset({"ADD", "CONCERN", "REJECT"}),
     "quant-ml-judge": frozenset({"CONCUR", "CONCERN", "OVERRIDE_REJECT"}),
+    # PR #2 -- curator is a post-graduation actuator (writes the pending-
+    # approval inbox at trading-JVM POST /api/v1/admin/pending-approvals).
+    # PROMOTE -> green-badge inbox row.
+    # HOLD    -> yellow-badge inbox row with concerns inline.
+    # REJECT  -> no inbox row, journal-only. NOT a researcher-blocking veto;
+    #            the researcher already graduated, so curator's REJECT just
+    #            means "don't surface to admin via inbox" -- admin can still
+    #            approve manually via V102.
+    "quant-curator": frozenset({"PROMOTE", "HOLD", "REJECT"}),
 }
 
 # Vetos — verdicts that block graduation. The researcher's resume
@@ -67,6 +77,9 @@ VETO_VERDICTS: dict[str, frozenset[str]] = {
     "quant-skeptic": frozenset({"OVERRIDE_REJECT"}),
     "quant-portfolio-manager": frozenset({"REJECT"}),
     "quant-ml-judge": frozenset({"OVERRIDE_REJECT"}),
+    # Curator has no researcher-blocking vetos. Listed explicitly so the
+    # contract is unambiguous rather than relying on dict.get's default.
+    "quant-curator": frozenset(),
 }
 
 
