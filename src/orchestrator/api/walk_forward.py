@@ -13,15 +13,17 @@ not by request shape) — keep keys unique per logical attempt.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
+import asyncpg
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from ..errors import NextAction, OrchestratorError
 from ..repo import reviews as reviews_repo
+from ..repo import walk_forward as walk_forward_repo
 from ..services.activity_logger import log_activity
 from ..services.idempotency import cache_response, replay_cached_response
 from ..services.walk_forward import run_walk_forward
@@ -29,6 +31,31 @@ from .constants import REVIEW_VERDICTS_PASSING_GATE
 from .deps import get_agent_name, get_db_conn
 
 router = APIRouter(tags=["walk-forward"])
+
+
+class WalkForwardRunDetailResponse(BaseModel):
+    """Curator-relevant subset of a ``walk_forward_run`` row."""
+
+    walk_forward_id: UUID
+    strategy_code: str
+    instrument: str
+    interval_name: str
+    stability_verdict: str
+    n_folds: int
+    fold_pf_mean: float | None = None
+    fold_pf_std: float | None = None
+    fold_pf_min: float | None = None
+    fold_pf_max: float | None = None
+    fold_pf_positive_pct: float | None = None
+    fold_sharpe_mean: float | None = None
+    fold_sharpe_std: float | None = None
+    fold_return_mean: float | None = None
+    fold_return_std: float | None = None
+    total_trades_across_folds: int | None = None
+    fold_results: list[Any] = Field(default_factory=list)
+    motivating_iteration_id: UUID | None = None
+    created_time: datetime | None = None
+    created_by: str | None = None
 
 
 class WalkForwardRequest(BaseModel):
@@ -222,3 +249,26 @@ async def post_walk_forward(
 
     await cache_response(request, agent, "walk", idempotency_key, payload)
     return payload
+
+
+@router.get("/walk-forward/runs/{walk_forward_id}", response_model=WalkForwardRunDetailResponse)
+async def get_walk_forward_run(
+    walk_forward_id: UUID,
+    request: Request,
+    agent: str = Depends(get_agent_name),
+    conn: asyncpg.Connection = Depends(get_db_conn),
+) -> WalkForwardRunDetailResponse:
+    """Return curator-relevant fields for a single ``walk_forward_run`` row.
+
+    Used by the curator agent (Lens B) to read ``stability_verdict`` after
+    a graduated iteration's walk-forward run has completed.
+    """
+    row = await walk_forward_repo.fetch_walk_forward_run(conn, walk_forward_id)
+    if row is None:
+        raise OrchestratorError(
+            status_code=404,
+            error_code="walk_forward_run_not_found",
+            message=f"walk_forward_run {walk_forward_id} not found",
+            retryable=False,
+        )
+    return WalkForwardRunDetailResponse(**row)

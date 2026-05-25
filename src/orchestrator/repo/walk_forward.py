@@ -1,8 +1,9 @@
-"""``walk_forward_run`` writes — single INSERT after all folds complete.
+"""``walk_forward_run`` reads and writes.
 
-Schema reference: V12__create_walk_forward_run.sql. The CHECK constraint
-requires ``stability_verdict`` ∈ {ROBUST, INCONSISTENT, INSUFFICIENT_EVIDENCE,
-OVERFIT, NO_EDGE}; the caller is responsible for computing it.
+Schema reference: V12__create_walk_forward_run.sql (definition inlined in
+V1__baseline.sql). The CHECK constraint requires ``stability_verdict`` ∈
+{ROBUST, INCONSISTENT, INSUFFICIENT_EVIDENCE, OVERFIT, NO_EDGE}; the caller
+is responsible for computing it.
 """
 
 from __future__ import annotations
@@ -89,3 +90,40 @@ async def insert_walk_forward(
         created_by,
     )
     return walk_forward_id
+
+
+async def fetch_walk_forward_run(
+    conn: asyncpg.Connection, walk_forward_id: UUID
+) -> dict[str, Any] | None:
+    """Return a curator-relevant subset of ``walk_forward_run`` by PK.
+
+    Returns ``None`` when no matching row exists.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT walk_forward_id,
+               strategy_code,
+               instrument,
+               interval_name,
+               stability_verdict,
+               n_folds,
+               fold_pf_mean,
+               fold_pf_std,
+               fold_pf_min,
+               fold_pf_max,
+               fold_pf_positive_pct,
+               fold_sharpe_mean,
+               fold_sharpe_std,
+               fold_return_mean,
+               fold_return_std,
+               total_trades_across_folds,
+               fold_results,
+               motivating_iteration_id,
+               created_time,
+               created_by
+          FROM walk_forward_run
+         WHERE walk_forward_id = $1
+        """,
+        walk_forward_id,
+    )
+    return dict(row) if row else None
