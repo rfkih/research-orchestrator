@@ -34,12 +34,6 @@ WITH bound_signals AS (
         sd.created_time
     FROM signal_definition sd
     WHERE sd.status <> 'retired'
-      AND EXISTS (
-          SELECT 1
-          FROM account_strategy ac
-          WHERE ac.ml_regime_signal_name = sd.name
-            AND ac.ml_regime_gate_enabled = TRUE
-      )
 ),
 bound_strategies AS (
     SELECT
@@ -48,7 +42,6 @@ bound_strategies AS (
     FROM signal_definition sd
     JOIN account_strategy ac
       ON ac.ml_regime_signal_name = sd.name
-     AND ac.ml_regime_gate_enabled = TRUE
     WHERE sd.signal_id IN (SELECT signal_id FROM bound_signals)
     GROUP BY sd.signal_id
 ),
