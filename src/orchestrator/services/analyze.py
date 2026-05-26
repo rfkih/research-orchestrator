@@ -646,3 +646,114 @@ def decision_verdict(
 
 def sample_size_adequate(n: int) -> bool:
     return n >= MIN_TRADES_FOR_SIG
+
+
+def ml_gate_shadow_analysis(
+    shadow_rows: list[dict[str, Any]],
+    trades: list[dict[str, Any]],
+    join_window_seconds: int = 300,
+) -> dict[str, Any] | None:
+    """Phase E — counterfactual analysis of the ML regime gate in shadow mode.
+
+    Joins ml_shadow_log rows against live trades to measure what the gate
+    WOULD have done if shadow_mode had been False. For each gate check that
+    would have blocked a trade, the nearest trade opened within
+    ``join_window_seconds`` on the same (account_strategy_id, side) is
+    matched. Matched pairs reveal whether the gate was blocking profitable
+    trades (gate hurts) or loss trades (gate helps).
+
+    Returns None when there is insufficient data (<5 shadow rows or no trades).
+    ``gate_adds_value`` is True when correct_block_rate > 0.5 AND the sum of
+    blocked-trade PnLs is negative — meaning the gate would have avoided net
+    losses. Use this as the Phase E sign-off criterion before flipping
+    shadow_mode=False.
+    """
+    if not shadow_rows or len(shadow_rows) < 5 or not trades:
+        return None
+
+    trade_by_key: dict[tuple, list] = defaultdict(list)
+    for t in trades:
+        as_id = str(t.get("account_strategy_id") or "")
+        direction = (t.get("direction") or "").upper()
+        entry_time = t.get("entry_time")
+        pnl = _f(t.get("realized_pnl_amount")) or 0.0
+        if as_id and direction and entry_time:
+            trade_by_key[(as_id, direction)].append((entry_time, pnl))
+    for lst in trade_by_key.values():
+        lst.sort(key=lambda x: x[0])
+
+    total_checks = len(shadow_rows)
+    would_block = 0
+    matched_blocked: list[float] = []
+    unmatched_blocked = 0
+    allowed_pnls: list[float] = []
+    claimed_trades: set[tuple] = set()
+
+    def _find_nearest_trade(as_id: str, side: str, evaluated_at: Any) -> float | None:
+        key = (as_id, side)
+        for entry_time, pnl in trade_by_key.get(key, []):
+            try:
+                diff = (entry_time - evaluated_at).total_seconds()
+            except TypeError:
+                continue
+            if 0 <= diff <= join_window_seconds:
+                trade_key = (as_id, side, entry_time)
+                if trade_key not in claimed_trades:
+                    claimed_trades.add(trade_key)
+                    return pnl
+        return None
+
+    for row in shadow_rows:
+        gate_allowed = row.get("gate_allowed")
+        if gate_allowed is None:
+            continue
+        as_id = str(row.get("account_strategy_id") or "")
+        side = (row.get("side") or "").upper()
+        evaluated_at = row.get("evaluated_at")
+
+        if not gate_allowed:
+            would_block += 1
+            matched_pnl = _find_nearest_trade(as_id, side, evaluated_at)
+            if matched_pnl is not None:
+                matched_blocked.append(matched_pnl)
+            else:
+                unmatched_blocked += 1
+        else:
+            matched_pnl = _find_nearest_trade(as_id, side, evaluated_at)
+            if matched_pnl is not None:
+                allowed_pnls.append(matched_pnl)
+
+    n_blocked = len(matched_blocked)
+    n_allowed = len(allowed_pnls)
+
+    correct_blocks = sum(1 for p in matched_blocked if p < 0)
+    correct_block_rate = correct_blocks / n_blocked if n_blocked > 0 else None
+    counterfactual_pnl = sum(matched_blocked) if n_blocked > 0 else None
+    avg_blocked_pnl = counterfactual_pnl / n_blocked if n_blocked > 0 else None
+    avg_allowed_pnl = sum(allowed_pnls) / n_allowed if n_allowed > 0 else None
+
+    gate_adds_value = bool(
+        correct_block_rate is not None
+        and correct_block_rate > 0.5
+        and counterfactual_pnl is not None
+        and counterfactual_pnl < 0
+    )
+
+    return {
+        "total_checks": total_checks,
+        "would_block": would_block,
+        "would_block_rate": round(would_block / total_checks, 4) if total_checks else None,
+        "n_blocked_matched_to_trade": n_blocked,
+        "n_blocked_unmatched": unmatched_blocked,
+        "n_allowed_matched_to_trade": n_allowed,
+        "blocked_trades_pnl_sum": round(counterfactual_pnl, 4) if counterfactual_pnl is not None else None,
+        "blocked_trades_avg_pnl": round(avg_blocked_pnl, 4) if avg_blocked_pnl is not None else None,
+        "allowed_trades_avg_pnl": round(avg_allowed_pnl, 4) if avg_allowed_pnl is not None else None,
+        "correct_block_rate": round(correct_block_rate, 4) if correct_block_rate is not None else None,
+        "gate_adds_value": gate_adds_value,
+        "recommendation": (
+            "Flip shadow_mode=False: gate blocks net-loss trades at rate >50%."
+            if gate_adds_value else
+            "Keep shadow_mode=True: insufficient evidence or gate removes profitable trades."
+        ),
+    }

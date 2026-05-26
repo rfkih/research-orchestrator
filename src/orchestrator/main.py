@@ -25,7 +25,9 @@ from .api.ml_monitor import router as ml_monitor_router
 from .api.ml_training import router as ml_training_router
 from .api.models import router as models_router
 from .api.papers import router as papers_router
+from .api.rankings import router as rankings_router
 from .api.signals import router as signals_router
+from .api.streaming_status import router as streaming_status_router
 from .api.null_screen import router as null_screen_router
 from .api.queue import router as queue_router
 from .api.raw import router as raw_router
@@ -89,6 +91,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(ml_monitor_router)
     app.include_router(signals_router)
     app.include_router(papers_router)
+    app.include_router(rankings_router)
+    app.include_router(streaming_status_router)
     return app
 
 

@@ -34,6 +34,11 @@ WITH bound_signals AS (
         sd.created_time
     FROM signal_definition sd
     WHERE sd.status <> 'retired'
+      AND EXISTS (
+          SELECT 1 FROM account_strategy ac
+          WHERE ac.ml_regime_signal_name = sd.name
+            AND ac.ml_regime_gate_enabled = TRUE
+      )
 ),
 bound_strategies AS (
     SELECT

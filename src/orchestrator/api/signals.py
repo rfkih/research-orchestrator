@@ -60,6 +60,7 @@ class SignalRow(BaseModel):
     intervalName: str | None
     boundStrategyCodes: list[str]
     createdAt: str
+    gauntletVerdict: str | None  # PASS | FAIL | None (pre-gauntlet models)
 
 
 class SignalListResponse(BaseModel):
@@ -140,6 +141,7 @@ def _row_to_signal_row(r: dict[str, Any]) -> SignalRow:
         intervalName=r.get("model_interval"),
         boundStrategyCodes=list(r.get("bound_strategy_codes") or []),
         createdAt=r["created_time"].isoformat() if r.get("created_time") else "",
+        gauntletVerdict=r.get("gauntlet_verdict"),
     )
 
 

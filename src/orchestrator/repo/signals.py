@@ -58,6 +58,7 @@ async def list_signals(
             sd.description, sd.created_time, sd.updated_time,
             mr.family AS model_family, mr.purpose AS model_purpose,
             mr.symbol AS model_symbol, mr.interval AS model_interval,
+            mr.metrics->>'gauntlet_verdict' AS gauntlet_verdict,
             (
                 SELECT array_agg(DISTINCT ac.strategy_code ORDER BY ac.strategy_code)
                 FROM account_strategy ac
