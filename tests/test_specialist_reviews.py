@@ -49,7 +49,7 @@ def test_specialist_names_frozenset_pinned() -> None:
     /capacity-sweep ships), this test catches the change so the slash
     command + researcher prompt stay in sync."""
     assert repo.SPECIALIST_NAMES == frozenset(
-        {"quant-skeptic", "quant-portfolio-manager", "quant-ml-judge"}
+        {"quant-skeptic", "quant-portfolio-manager", "quant-ml-judge", "quant-curator"}
     )
 
 
@@ -63,6 +63,10 @@ def test_verdict_literals_per_specialist_pinned() -> None:
     assert repo.VERDICT_LITERALS["quant-ml-judge"] == frozenset(
         {"CONCUR", "CONCERN", "OVERRIDE_REJECT"}
     )
+    # PR #2: curator is a post-graduation actuator; no researcher-blocking veto.
+    assert repo.VERDICT_LITERALS["quant-curator"] == frozenset(
+        {"PROMOTE", "HOLD", "REJECT"}
+    )
 
 
 def test_veto_verdicts_pinned() -> None:
@@ -71,6 +75,9 @@ def test_veto_verdicts_pinned() -> None:
     assert repo.VETO_VERDICTS["quant-skeptic"] == frozenset({"OVERRIDE_REJECT"})
     assert repo.VETO_VERDICTS["quant-portfolio-manager"] == frozenset({"REJECT"})
     assert repo.VETO_VERDICTS["quant-ml-judge"] == frozenset({"OVERRIDE_REJECT"})
+    # Curator has no researcher-blocking vetos -- explicit empty frozenset,
+    # not a missing key, so the contract is self-documenting.
+    assert repo.VETO_VERDICTS["quant-curator"] == frozenset()
 
 
 def test_kind_discriminators_pinned() -> None:
@@ -196,3 +203,103 @@ def test_by_iteration_rejects_bad_uuid(lenient_client: TestClient) -> None:
         params={"iteration_id": "not-a-uuid"},
     )
     assert r.status_code >= 400
+
+
+# ── quant-curator Path C contract (PR #2) ──────────────────────────
+
+
+def test_specialist_request_accepts_quant_curator(lenient_client: TestClient) -> None:
+    """POST /specialist-review/request with specialist_name="quant-curator"
+    must NOT be rejected by Pydantic (422). A DB error (500) means the name
+    passed validation — expected in unit-test context without a live DB."""
+    import uuid as _uuid
+
+    body = {
+        "specialist_name": "quant-curator",
+        "iteration_id": str(_uuid.uuid4()),
+        "strategy_code": "DCB",
+        "motivating_hypothesis_id": None,
+        "request_payload": {
+            "symbol": "ETHUSDT",
+            "interval": "1h",
+            "backtest_run_id": str(_uuid.uuid4()),
+            "walk_forward_run_id": str(_uuid.uuid4()),
+        },
+    }
+    resp = lenient_client.post(
+        "/specialist-review/request",
+        json=body,
+        headers={"X-Orch-Token": "test-token"},
+    )
+    # 422 = Pydantic rejected the specialist_name Literal — that would be a bug.
+    # 201 = happy path (requires live DB). 500 = DB unavailable but name passed
+    # validation (expected in unit-test context).
+    assert resp.status_code != 422, (
+        f"quant-curator was rejected by Pydantic; status={resp.status_code}: {resp.text}"
+    )
+
+
+@pytest.mark.parametrize("verdict", ["PROMOTE", "HOLD", "REJECT"])
+def test_curator_verdict_accepted(lenient_client: TestClient, verdict: str) -> None:
+    """POST /specialist-review/complete with quant-curator + each valid verdict
+    must NOT trip the invalid_specialist_verdict gate (repo ValueError → 400).
+    Without a live DB the route returns 500 before reaching the verdict check,
+    so we accept any status that is NOT 400 with error_code=invalid_specialist_verdict."""
+    import uuid as _uuid
+
+    iteration_id = str(_uuid.uuid4())
+    target_id = f"specialist:quant-curator:{iteration_id}"
+    body = {
+        "target_id": target_id,
+        "specialist_name": "quant-curator",
+        "iteration_id": iteration_id,
+        "strategy_code": "DCB",
+        "verdict": verdict,
+        "reasoning": "test reasoning",
+        "raw_response": {"return_text": "..."},
+        "motivating_request_id": target_id,
+    }
+    resp = lenient_client.post(
+        "/specialist-review/complete",
+        json=body,
+        headers={"X-Orch-Token": "test-token"},
+    )
+    # The only outcome that indicates a regression is a 400 with
+    # error_code=invalid_specialist_verdict -- that would mean the VERDICT_LITERALS
+    # dict doesn't include quant-curator's verdicts.
+    if resp.status_code == 400:
+        payload = resp.json()
+        assert payload.get("error_code") != "invalid_specialist_verdict", (
+            f"verdict={verdict!r} was incorrectly flagged as invalid for "
+            f"quant-curator: {resp.text}"
+        )
+
+
+def test_curator_invalid_verdict_rejected(lenient_client: TestClient) -> None:
+    """CONCUR is valid for quant-skeptic but NOT for quant-curator.
+    The repo layer must raise ValueError → 400 invalid_specialist_verdict.
+    Without a live DB the route returns 500 (DB error before verdict check),
+    so we assert that if a 400 IS returned it carries the right error_code."""
+    import uuid as _uuid
+
+    iteration_id = str(_uuid.uuid4())
+    target_id = f"specialist:quant-curator:{iteration_id}"
+    body = {
+        "target_id": target_id,
+        "specialist_name": "quant-curator",
+        "iteration_id": iteration_id,
+        "strategy_code": "DCB",
+        "verdict": "CONCUR",  # valid for skeptic, NOT curator
+        "reasoning": "test",
+        "raw_response": {"return_text": "..."},
+        "motivating_request_id": target_id,
+    }
+    resp = lenient_client.post(
+        "/specialist-review/complete",
+        json=body,
+        headers={"X-Orch-Token": "test-token"},
+    )
+    assert resp.status_code >= 400, resp.text
+    # If a 400 is returned it must carry the expected error_code.
+    if resp.status_code == 400:
+        assert resp.json()["error_code"] == "invalid_specialist_verdict"

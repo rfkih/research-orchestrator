@@ -299,7 +299,7 @@ def _build_submit_payload(
         "interval": interval_name,
         "startTime": start_time,
         "endTime": end_time,
-        "initialCapital": 100,
+        "initialCapital": 1000,
         "riskPerTradePct": 2.0,
         "feeRate": 0.00075,
         "minNotional": 5,
@@ -402,7 +402,7 @@ async def run_tick(
         if not getattr(err, "queue_terminalized", False):
             await _rollback(db, queue_id, "Tick failed (domain error); rolled back to PENDING.")
         raise
-    except Exception as e:  # noqa: BLE001 — last-line safety net before the trap
+    except BaseException as e:  # noqa: BLE001 — catches CancelledError (client disconnect) too
         log.error("tick.crashed", queue_id=str(queue_id), error=str(e))
         await _rollback(db, queue_id, f"Tick crashed: {type(e).__name__}; rolled back to PENDING.")
         raise

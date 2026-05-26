@@ -147,7 +147,7 @@ def _build_payload(
         "interval": interval_name,
         "startTime": f"{test_start.isoformat()}T00:00:00",
         "endTime": f"{test_end.isoformat()}T00:00:00",
-        "initialCapital": 100,
+        "initialCapital": 1000,
         "riskPerTradePct": 2.0,
         "feeRate": 0.00075,
         "minNotional": 5,

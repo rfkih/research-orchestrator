@@ -51,7 +51,12 @@ from .deps import get_agent_name, get_db_conn
 router = APIRouter(prefix="/specialist-review", tags=["specialist-review"])
 
 
-SpecialistName = Literal["quant-skeptic", "quant-portfolio-manager", "quant-ml-judge"]
+SpecialistName = Literal[
+    "quant-skeptic",
+    "quant-portfolio-manager",
+    "quant-ml-judge",
+    "quant-curator",
+]
 
 
 # ── POST /specialist-review/request (researcher) ────────────────────

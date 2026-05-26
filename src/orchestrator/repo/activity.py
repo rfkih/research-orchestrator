@@ -23,7 +23,7 @@ async def insert_activity(
             (activity_id, session_id, agent_name, activity_type, strategy_code,
              title, details, related_id, related_type, status)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-        RETURNING activity_id, created_at
+        RETURNING activity_id, created_time
         """,
         uuid4(), session_id, agent_name, activity_type, strategy_code,
         title, details, related_id, related_type, status,
