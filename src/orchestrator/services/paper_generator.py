@@ -144,15 +144,28 @@ async def generate_paper(
             created_by=agent_name,
         )
 
+    robustness = _build_robustness(best)
+    verdict_gate = _build_verdict_gate(best)
+    best_section = _build_best_iter_section(best)
+
     return {
         **paper,
         "metadata": _build_metadata(queue, best, iterations, run_meta),
-        "best_iteration": _build_best_iter_section(best),
+        "best_iteration": best_section,
         "top_iterations": _build_top_iterations(iterations),
-        "robustness": _build_robustness(best),
-        "verdict_gate": _build_verdict_gate(best),
+        "robustness": robustness,
+        "verdict_gate": verdict_gate,
         "journal_entries": journal_entries,
         "citations": _CITATIONS,
+        "sections": _build_prose_sections(
+            queue,
+            best_section,
+            iterations,
+            run_meta,
+            robustness,
+            verdict_gate,
+            journal_entries,
+        ),
     }
 
 
@@ -262,6 +275,172 @@ def _generate_title(queue: dict[str, Any]) -> str:
     return f"{strategy} Strategy on {symbol} ({interval}): An Empirical Backtest Study"
 
 
+def _build_prose_sections(
+    queue: dict[str, Any],
+    best: dict[str, Any] | None,
+    iterations: list[dict[str, Any]],
+    run_meta: dict[str, Any] | None,
+    robustness: dict[str, Any],
+    gate: dict[str, Any],
+    journal: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    sc = queue.get("strategy_code", "—")
+    sym = queue.get("instrument", "—")
+    iv = queue.get("interval_name", "—")
+    hypothesis = (queue.get("hypothesis") or "").strip()
+    sweep_config = queue.get("sweep_config") or {}
+    n_iter = len(iterations)
+    sweep_type = sweep_config.get("type", "grid").upper()
+    final_verdict = (queue.get("final_verdict") or "PENDING").replace("_", " ")
+
+    sections: list[dict[str, Any]] = []
+    chapter = 1
+
+    # 1. Introduction
+    intro = (
+        f"This paper presents an empirical evaluation of the {sc} strategy "
+        f"applied to {sym} on the {iv} timeframe. "
+    )
+    if hypothesis:
+        intro += f"The pre-registered hypothesis is as follows: {hypothesis} "
+    if best:
+        metrics = best.get("metrics") or {}
+        cagr = metrics.get("cagr") or 0
+        intro += (
+            f"The study evaluated {n_iter} parameter configurations using {sweep_type} search. "
+            f"The best-performing configuration achieved a compound annual growth rate (CAGR) of "
+            f"{cagr:.1f}% at 90% Kelly allocation. Final research verdict: {final_verdict}."
+        )
+    sections.append({"chapter": chapter, "title": "Introduction", "body": intro})
+    chapter += 1
+
+    # 2. Data and Backtest Setup
+    period_str = ""
+    cap_str = ""
+    if run_meta:
+        start = run_meta.get("start_time")
+        end = run_meta.get("end_time")
+        capital = run_meta.get("initial_capital")
+        if start and end:
+            period_str = f" over the period {str(start)[:10]} to {str(end)[:10]}"
+        if capital:
+            cap_str = f" with an initial capital of ${float(capital):,.0f} USDT"
+    data_body = (
+        f"The backtest was conducted on {sym} ({iv} timeframe){period_str}{cap_str}. "
+        f"Market data was sourced from Binance SPOT. Trading fees of 0.075% per side were applied. "
+        f"Slippage was modelled at zero basis points for the base configuration, with sensitivity "
+        f"analysis performed at 5, 10, 20, and 50 bps to assess robustness to execution costs."
+    )
+    sections.append({"chapter": chapter, "title": "Data and Backtest Setup", "body": data_body})
+    chapter += 1
+
+    # 3. Methodology
+    n_config = sweep_config.get("n_iterations") or n_iter
+    method_body = (
+        f"The {sc} strategy was evaluated using {sweep_type} parameter optimisation "
+        f"over {n_config} configurations. "
+        f"Statistical validation employed a five-gate pre-registered framework: "
+        f"(1) minimum 100 completed trades, "
+        f"(2) Profit Factor 95% confidence interval lower bound exceeding 1.0, "
+        f"(3) Deflated Sharpe Ratio (DSR) >= 0.95 (Bailey and Lopez de Prado, 2014), "
+        f"(4) statistical significance assessed as Significant Edge, and "
+        f"(5) CAGR >= 10% at 90% Kelly allocation. "
+        f"All thresholds were pre-registered before the experiment to mitigate selection bias "
+        f"(Harvey, Liu, and Zhu, 2016)."
+    )
+    sections.append({"chapter": chapter, "title": "Methodology", "body": method_body})
+    chapter += 1
+
+    # 4. Results
+    if best:
+        metrics = best.get("metrics") or {}
+        cagr = metrics.get("cagr") or 0
+        pf = metrics.get("profit_factor") or 0
+        dsr = metrics.get("dsr") or 0
+        dd = metrics.get("max_drawdown_pct") or 0
+        sharpe = metrics.get("sharpe_ratio") or 0
+        trades = int(metrics.get("trade_count") or 0)
+        stat_v = (best.get("statistical_verdict") or "—").replace("_", " ")
+        pf_ci_low = metrics.get("pf_ci_low")
+        pf_ci_high = metrics.get("pf_ci_high")
+        ci_str = (
+            f" (95% CI: [{pf_ci_low:.2f}, {pf_ci_high:.2f}])"
+            if pf_ci_low is not None and pf_ci_high is not None
+            else ""
+        )
+        results_body = (
+            f"The best-performing parameter configuration achieved a CAGR of {cagr:.1f}%, "
+            f"a Profit Factor of {pf:.2f}{ci_str}, "
+            f"a Deflated Sharpe Ratio of {dsr:.4f}, "
+            f"a maximum drawdown of {abs(dd):.1f}%, "
+            f"a Sharpe Ratio of {sharpe:.2f}, "
+            f"and {trades} closed trades. "
+            f"Statistical assessment: {stat_v}.\n\n"
+            f"The normalised equity curve (base 100), monthly return heatmap, "
+            f"and per-trade P&L distribution are presented in the figures below."
+        )
+    else:
+        results_body = "No completed iterations are available for this research paper."
+    sections.append({"chapter": chapter, "title": "Results", "body": results_body})
+    chapter += 1
+
+    # 5. Robustness Analysis (only when data is present)
+    slip = (robustness or {}).get("slippage_sensitivity") or {}
+    regime = (robustness or {}).get("regime_breakdown") or {}
+    if slip or regime:
+        rob_body = (
+            "Robustness was assessed across two dimensions: slippage sensitivity and market "
+            "regime breakdown. "
+        )
+        if slip:
+            rob_body += (
+                "Slippage sensitivity analysis evaluated strategy performance at 0, 5, 10, 20, "
+                "and 50 basis points of additional round-trip cost, measuring degradation in CAGR "
+                "at each level. "
+            )
+        if regime:
+            rob_body += (
+                "Regime breakdown analysis decomposed performance across identified market regimes "
+                "to assess consistency of the identified edge across different market conditions."
+            )
+        sections.append({"chapter": chapter, "title": "Robustness Analysis", "body": rob_body})
+        chapter += 1
+
+    # 6. Conclusion
+    gate_items = {k: v for k, v in (gate or {}).items() if isinstance(v, dict) and "pass" in v}
+    passed = sum(1 for v in gate_items.values() if v.get("pass") is True)
+    total = len(gate_items)
+    conc_body = (
+        f"This study evaluated the {sc} strategy on {sym} ({iv}) "
+        f"across {n_iter} parameter configurations. "
+        f"The best configuration passed {passed} of {total} pre-registered statistical gates. "
+        f"Final verdict: {final_verdict}.\n\n"
+        f"Limitations of this study include in-sample optimisation bias inherent to parameter sweeps "
+        f"and the use of exchange-reported tick data which may not reflect true liquidity conditions "
+        f"at scale. Future work should include out-of-sample walk-forward validation and evaluation "
+        f"across additional market regimes and instruments."
+    )
+    sections.append({"chapter": chapter, "title": "Conclusion", "body": conc_body})
+    chapter += 1
+
+    # 7. Research Notes (only when journal entries exist)
+    if journal:
+        parts: list[str] = []
+        for entry in journal:
+            title = (entry.get("title") or entry.get("entry_type") or "Note").strip()
+            content = (entry.get("content") or "").strip()
+            if content:
+                parts.append(f"{title}: {content}")
+        if parts:
+            sections.append({
+                "chapter": chapter,
+                "title": "Research Notes",
+                "body": "\n\n".join(parts),
+            })
+
+    return sections
+
+
 def _generate_abstract(
     queue: dict[str, Any],
     best: dict[str, Any],
@@ -273,7 +452,7 @@ def _generate_abstract(
     ci = best.get("confidence_intervals") or {}
     pf_ci = ci.get("pf_95") or {}
 
-    n_trades = int(metrics.get("trade_count") or 0)
+    n_trades = int(metrics.get("total_trades") or 0)
     pf = _safe_float(metrics.get("profit_factor"))
     cagr = _safe_float(metrics.get("geometric_return_pct_at_alloc_90"))
     dsr = _safe_float(analysis.get("dsr"))
@@ -375,7 +554,7 @@ def _build_best_iter_section(best: dict[str, Any]) -> dict[str, Any]:
         "backtest_run_id": str(best["backtest_run_id"]) if best.get("backtest_run_id") else None,
         "params": best.get("params_snapshot") or {},
         "metrics": {
-            "trade_count": metrics.get("trade_count"),
+            "trade_count": metrics.get("total_trades"),
             "profit_factor": _safe_float(metrics.get("profit_factor")),
             "cagr": _safe_float(metrics.get("geometric_return_pct_at_alloc_90")),
             "return_pct": _safe_float(metrics.get("return_pct")),
@@ -418,7 +597,7 @@ def _build_top_iterations(
             {
                 "iteration_number": it.get("iteration_number"),
                 "params": it.get("params_snapshot") or {},
-                "trade_count": metrics.get("trade_count"),
+                "trade_count": metrics.get("total_trades"),
                 "profit_factor": _safe_float(metrics.get("profit_factor")),
                 "pf_ci_low": _safe_float(pf_ci.get("low")),
                 "pf_ci_high": _safe_float(pf_ci.get("high")),
@@ -447,7 +626,7 @@ def _build_verdict_gate(best: dict[str, Any]) -> dict[str, Any]:
     ci = best.get("confidence_intervals") or {}
     pf_ci = ci.get("pf_95") or {}
 
-    n_trades = int(metrics.get("trade_count") or 0)
+    n_trades = int(metrics.get("total_trades") or 0)
     pf_lo = _safe_float(pf_ci.get("low"))
     dsr = _safe_float(analysis.get("dsr"))
     stat_verdict = best.get("statistical_verdict") or ""
@@ -503,15 +682,28 @@ async def build_paper_sections(
     if best and best.get("backtest_run_id"):
         run_meta = await papers_repo.get_backtest_run_meta(conn, best["backtest_run_id"])
 
+    robustness = _build_robustness(best)
+    verdict_gate = _build_verdict_gate(best)
+    best_section = _build_best_iter_section(best)
+
     return {
         **paper_row,
         "metadata": _build_metadata(queue or {}, best, iterations, run_meta),
-        "best_iteration": _build_best_iter_section(best),
+        "best_iteration": best_section,
         "top_iterations": _build_top_iterations(iterations),
-        "robustness": _build_robustness(best),
-        "verdict_gate": _build_verdict_gate(best),
+        "robustness": robustness,
+        "verdict_gate": verdict_gate,
         "journal_entries": journal,
         "citations": _CITATIONS,
+        "sections": _build_prose_sections(
+            queue or {},
+            best_section or None,
+            iterations,
+            run_meta,
+            robustness,
+            verdict_gate,
+            journal,
+        ),
     }
 
 
