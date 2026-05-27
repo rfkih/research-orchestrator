@@ -61,31 +61,25 @@ def render_latex(paper: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 def _preamble(title: str, date_str: str) -> str:
-    return rf"""\documentclass[11pt,a4paper]{{article}}
-
-% — Packages —————————————————————————————————————————————————————————————
-\usepackage[margin=2.5cm]{{geometry}}
-\usepackage{{booktabs}}          % publication-quality tables
+    esc_title = _esc(title)
+    return rf"""\documentclass[journal]{{IEEEtran}}
+\usepackage[utf8]{{inputenc}}
 \usepackage{{amsmath}}
-\usepackage{{amssymb}}
-\usepackage[hidelinks]{{hyperref}}
-\usepackage{{natbib}}
-\usepackage{{microtype}}          % improved typography
-\usepackage{{xcolor}}
+\usepackage{{booktabs}}
 \usepackage{{array}}
 \usepackage{{longtable}}
+\usepackage{{hyperref}}
+\usepackage{{xcolor}}
+\usepackage{{microtype}}
 
-% — Document metadata —————————————————————————————————————————————————
-\title{{{title}}}
-\author{{Autonomous Quant Researcher \\
-        Blackheart Research Unit \\
-        \small\texttt{{[internal — not for external distribution without review]}}}}
+\title{{{esc_title}}}
+\author{{Blackheart Research System}}
 \date{{{date_str}}}
 
 \begin{{document}}
 \maketitle
-\tableofcontents
-\newpage"""
+
+"""
 
 
 # ---------------------------------------------------------------------------
