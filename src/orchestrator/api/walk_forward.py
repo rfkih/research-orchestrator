@@ -148,6 +148,47 @@ async def post_walk_forward(
                 },
             )
 
+    # Trade-frequency guard — prevents promoting low-frequency strategies to
+    # walk-forward where fold-level PF estimates would be statistically
+    # unreliable (< MIN_TRADES_PER_FOLD trades per fold).
+    _MIN_TRADES_PER_FOLD = 30
+    if body.motivating_iteration_id is not None:
+        iter_row = await conn.fetchrow(
+            "SELECT metrics_snapshot FROM research_iteration_log WHERE iteration_id = $1",
+            body.motivating_iteration_id,
+        )
+        if iter_row is not None:
+            ms = iter_row["metrics_snapshot"] or {}
+            n_trades = int(ms.get("total_trades") or 0)
+            required = body.n_folds * _MIN_TRADES_PER_FOLD
+            if n_trades < required:
+                raise OrchestratorError(
+                    status_code=422,
+                    error_code="insufficient_trade_frequency",
+                    message=(
+                        f"Iteration {body.motivating_iteration_id} has {n_trades} "
+                        f"in-sample trades, below the {body.n_folds}-fold minimum of "
+                        f"{required} ({_MIN_TRADES_PER_FOLD}/fold). Walk-forward fold "
+                        f"estimates would be statistically unreliable at "
+                        f"~{n_trades // body.n_folds} trades/fold."
+                    ),
+                    retryable=False,
+                    hint=(
+                        f"Options: (1) find params producing ≥{required} trades on the "
+                        f"current window, (2) extend market_data backfill period so the "
+                        f"backtest window grows, or (3) reduce n_folds to "
+                        f"{max(1, n_trades // _MIN_TRADES_PER_FOLD)} "
+                        f"(minimum {_MIN_TRADES_PER_FOLD} trades/fold)."
+                    ),
+                    details={
+                        "n_trades": n_trades,
+                        "n_folds": body.n_folds,
+                        "required_trades": required,
+                        "min_trades_per_fold": _MIN_TRADES_PER_FOLD,
+                        "estimated_trades_per_fold": n_trades // body.n_folds,
+                    },
+                )
+
     session_id = request.state.session_id
     redis_client = request.app.state.redis
 
