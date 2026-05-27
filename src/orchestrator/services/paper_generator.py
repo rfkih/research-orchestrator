@@ -407,7 +407,7 @@ def _build_prose_sections(
         chapter += 1
 
     # 6. Conclusion
-    gate_bools = {k: v for k, v in (gate or {}).items() if isinstance(v, bool)}
+    gate_bools = {k: v for k, v in (gate or {}).items() if isinstance(v, bool) and k != "all_gates_passed"}
     passed = sum(1 for v in gate_bools.values() if v is True)
     total = len(gate_bools)
     conc_body = (
