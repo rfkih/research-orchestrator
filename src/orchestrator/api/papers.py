@@ -16,7 +16,10 @@ GET  /papers/{paper_id}/export/latex — download compilable .tex source
 
 from __future__ import annotations
 
+import subprocess
+import tempfile
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -259,5 +262,82 @@ async def export_latex(
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"',
             "X-Paper-Version": str(paper_row.get("version", 1)),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /papers/{paper_id}/export/pdf — PDF compilation
+# ---------------------------------------------------------------------------
+
+@router.get("/{paper_id}/export/pdf")
+async def export_pdf(
+    paper_id: str,
+    conn: asyncpg.Connection = Depends(get_db_conn),
+) -> Response:
+    """Return a compiled PDF of the research paper via pdflatex.
+
+    Compiles the LaTeX source to PDF using pdflatex in a temporary directory.
+    If pdflatex is not available or compilation fails, returns an error.
+    """
+    paper_row = await papers_repo.get_paper(conn, paper_id)
+    if paper_row is None:
+        raise OrchestratorError(
+            status_code=404,
+            error_code="paper_not_found",
+            message=f"No research_paper with paper_id={paper_id!r}.",
+            retryable=False,
+        )
+
+    paper_data = await build_paper_sections(conn, paper_row)
+    latex_source = render_latex(paper_data)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tex_name = f"{paper_id}.tex"
+        tex_path = Path(tmpdir) / tex_name
+        tex_path.write_text(latex_source, encoding="utf-8")
+
+        try:
+            proc = subprocess.run(
+                ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", tex_name],
+                cwd=tmpdir,
+                capture_output=True,
+                timeout=60,
+            )
+        except FileNotFoundError:
+            raise OrchestratorError(
+                status_code=503,
+                error_code="pdflatex_not_available",
+                message="pdflatex is not available on this server.",
+                retryable=False,
+            )
+        except subprocess.TimeoutExpired:
+            raise OrchestratorError(
+                status_code=504,
+                error_code="pdf_compilation_timeout",
+                message="PDF compilation timed out after 60 seconds.",
+                retryable=True,
+            )
+
+        pdf_path = Path(tmpdir) / f"{paper_id}.pdf"
+        if not pdf_path.exists():
+            log_snippet = proc.stderr.decode("utf-8", errors="replace")[-800:]
+            raise OrchestratorError(
+                status_code=500,
+                error_code="pdf_compilation_failed",
+                message="PDF compilation failed.",
+                retryable=False,
+                details={"pdflatex_stderr": log_snippet},
+            )
+
+        pdf_bytes = pdf_path.read_bytes()
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{paper_id}.pdf"',
+            "X-Paper-Version": str(paper_row.get("version", 1)),
+            "Cache-Control": "no-store",
         },
     )
