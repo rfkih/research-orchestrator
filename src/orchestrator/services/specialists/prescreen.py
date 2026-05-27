@@ -53,6 +53,12 @@ async def skeptic_prescreen(
     """Run all five mechanical pattern checks. Each returns a structured
     metric block; ``any_flag_fired`` is the dispatch hint."""
     now = now or datetime.now(timezone.utc)
+    # Normalize to naive UTC — research_queue / research_journal /
+    # research_iteration_log use TIMESTAMP WITHOUT TIME ZONE. Passing an
+    # aware datetime causes asyncpg DataError when it tries to encode
+    # against a naive-timestamp column.
+    if now.tzinfo is not None:
+        now = now.replace(tzinfo=None)
 
     archetype_churn = await _archetype_churn_24h(conn, now=now)
     repeat_axis = await _repeat_axis_attempts(conn, strategy_code=strategy_code, now=now)
