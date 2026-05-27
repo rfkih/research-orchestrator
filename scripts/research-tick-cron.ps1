@@ -40,10 +40,9 @@ if (Test-Path $EnvFile) {
     }
 }
 
-# If the orchestrator hasn't set Telegram, fall back to the VPS bot — the
-# operator already validated that bot end-to-end and gets the alerts there.
-if (-not $TelegramBot)  { $TelegramBot  = '***REDACTED_TELEGRAM_TOKEN***' }
-if (-not $TelegramChat) { $TelegramChat = '1089479092' }
+# Telegram is optional — if ORCH_TELEGRAM_BOT_TOKEN / ORCH_TELEGRAM_CHAT_ID
+# are not in .env the Send-Telegram helper is a no-op (both guards check for
+# non-empty values before sending). Never hardcode fallback credentials here.
 
 function Send-Telegram {
     param([string]$Text)
