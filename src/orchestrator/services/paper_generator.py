@@ -407,9 +407,9 @@ def _build_prose_sections(
         chapter += 1
 
     # 6. Conclusion
-    gate_items = {k: v for k, v in (gate or {}).items() if isinstance(v, dict) and "pass" in v}
-    passed = sum(1 for v in gate_items.values() if v.get("pass") is True)
-    total = len(gate_items)
+    gate_bools = {k: v for k, v in (gate or {}).items() if isinstance(v, bool)}
+    passed = sum(1 for v in gate_bools.values() if v is True)
+    total = len(gate_bools)
     conc_body = (
         f"This study evaluated the {sc} strategy on {sym} ({iv}) "
         f"across {n_iter} parameter configurations. "
