@@ -164,7 +164,6 @@ async def generate_paper(
             run_meta,
             robustness,
             verdict_gate,
-            journal_entries,
         ),
     }
 
@@ -282,7 +281,6 @@ def _build_prose_sections(
     run_meta: dict[str, Any] | None,
     robustness: dict[str, Any],
     gate: dict[str, Any],
-    journal: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     sc = queue.get("strategy_code", "—")
     sym = queue.get("instrument", "—")
@@ -421,23 +419,10 @@ def _build_prose_sections(
         f"across additional market regimes and instruments."
     )
     sections.append({"chapter": chapter, "title": "Conclusion", "body": conc_body})
-    chapter += 1
 
-    # 7. Research Notes (only when journal entries exist)
-    if journal:
-        parts: list[str] = []
-        for entry in journal:
-            title = (entry.get("title") or entry.get("entry_type") or "Note").strip()
-            content = (entry.get("content") or "").strip()
-            if content:
-                parts.append(f"{title}: {content}")
-        if parts:
-            sections.append({
-                "chapter": chapter,
-                "title": "Research Notes",
-                "body": "\n\n".join(parts),
-            })
-
+    # Journal entries are not narrated as a chapter — they remain available
+    # to the frontend via paper.journal_entries (Additional Information panel)
+    # so they aren't dropped, just kept out of the IEEE prose body.
     return sections
 
 
@@ -702,7 +687,6 @@ async def build_paper_sections(
             run_meta,
             robustness,
             verdict_gate,
-            journal,
         ),
     }
 
