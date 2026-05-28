@@ -87,8 +87,9 @@ def bootstrap_pf_ci(
                 "note": "n too small for bootstrap"}
     rng = random.Random(seed)
     pf_samples: list[float] = []
+    n = len(pnls)
     for _ in range(n_resamples):
-        sample = [rng.choice(pnls) for _ in pnls]
+        sample = [rng.choice(pnls) for _ in range(n)]
         pf = profit_factor(sample)
         if pf is not None and pf < PF_INFINITY_SENTINEL:
             pf_samples.append(pf)

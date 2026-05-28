@@ -131,6 +131,14 @@ class Settings(BaseSettings):
     # that its own value isn't the dev sentinel under PROFILE=prod.
     inference_auth_token: SecretStr = SecretStr("dev-token")
 
+    # AI paper narrative (paper_narrator.py).
+    # Set ORCH_AI_NARRATIVE_ENABLED=1 to enable Claude CLI-based IEEE prose
+    # generation on POST /papers/{id}/generate. When disabled (default) the
+    # deterministic template is always used — safe for installs without the
+    # Max-plan claude CLI. Timeout is per-generation subprocess call.
+    ai_narrative_enabled: bool = False
+    ai_narrative_timeout_s: int = Field(240, ge=30, le=600)
+
     # Specialist agent model pins (Path A, Max-plan-only — 2026-05-19).
     # No API client; specialists run as Claude Code Agent-tool sub-agents
     # (or, as a fallback, via /claude -p subprocess) so every token bills

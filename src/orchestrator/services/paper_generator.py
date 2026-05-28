@@ -2,7 +2,7 @@
 
 ``generate_paper`` is the single entry point. Given a ``queue_id`` it:
   1. Reads the research_queue row + all completed iterations.
-  2. Selects the best iteration by geometric_return_pct_at_alloc_90.
+  2. Selects the best iteration by annualized_geometric_return_pct_at_alloc_90.
   3. Fetches the backtest trade list and builds a normalised equity curve.
   4. Assembles title, abstract, and structured section data.
   5. Upserts ``research_paper`` + ``research_paper_trade_data`` atomically.
@@ -23,6 +23,7 @@ import asyncpg
 from ..repo import papers as papers_repo
 from ..repo import trades as trades_repo
 from ..errors import OrchestratorError
+from . import paper_narrator
 
 # Gate constants (mirror V11 / V60 — must not drift from analyze.py)
 _MIN_TRADES = 100
@@ -123,6 +124,17 @@ async def generate_paper(
     existing = await papers_repo.get_paper(conn, paper_id)
     version = (existing["version"] + 1) if existing else 1
 
+    robustness = _build_robustness(best)
+    verdict_gate = _build_verdict_gate(best)
+    best_section = _build_best_iter_section(best)
+
+    ai_sections = await paper_narrator.generate_narrative(
+        queue, best, iterations, run_meta, verdict_gate
+    )
+    sections = ai_sections or _build_prose_sections(
+        queue, best_section, iterations, run_meta, robustness, verdict_gate,
+    )
+
     async with conn.transaction():
         paper = await papers_repo.upsert_paper(
             conn,
@@ -133,6 +145,7 @@ async def generate_paper(
             paper_status=paper_status,
             version=version,
             created_by=agent_name,
+            sections_cache=sections,
         )
         await papers_repo.upsert_trade_data(
             conn,
@@ -144,10 +157,6 @@ async def generate_paper(
             created_by=agent_name,
         )
 
-    robustness = _build_robustness(best)
-    verdict_gate = _build_verdict_gate(best)
-    best_section = _build_best_iter_section(best)
-
     return {
         **paper,
         "metadata": _build_metadata(queue, best, iterations, run_meta),
@@ -157,14 +166,8 @@ async def generate_paper(
         "verdict_gate": verdict_gate,
         "journal_entries": journal_entries,
         "citations": _CITATIONS,
-        "sections": _build_prose_sections(
-            queue,
-            best_section,
-            iterations,
-            run_meta,
-            robustness,
-            verdict_gate,
-        ),
+        "sections": sections,
+        "narrative_source": "ai" if ai_sections else "template",
     }
 
 
@@ -173,12 +176,20 @@ async def generate_paper(
 # ---------------------------------------------------------------------------
 
 def _find_best_iteration(iterations: list[dict[str, Any]]) -> dict[str, Any]:
-    """Pick highest geometric_return_pct_at_alloc_90; fall back to last row."""
+    """Pick highest annualized_geometric_return_pct_at_alloc_90; fall back to last row.
+
+    The annualized figure lives at metrics_snapshot.analysis.annualized_geometric_return_pct_at_alloc_90
+    (computed by analyze.py).  The top-level metrics_snapshot.geometric_return_pct_at_alloc_90 is the
+    *total* geometric return over the full backtest window — using it for ranking favours long-window
+    runs over genuinely better per-year performers and will fail the V60 gate comparison (which is
+    10%/yr annualized).
+    """
     best: dict[str, Any] | None = None
     best_score = float("-inf")
     for it in iterations:
         metrics = it.get("metrics_snapshot") or {}
-        geom = metrics.get("geometric_return_pct_at_alloc_90")
+        analysis = metrics.get("analysis") or {}
+        geom = analysis.get("annualized_geometric_return_pct_at_alloc_90")
         if geom is None:
             continue
         try:
@@ -439,7 +450,7 @@ def _generate_abstract(
 
     n_trades = int(metrics.get("total_trades") or 0)
     pf = _safe_float(metrics.get("profit_factor"))
-    cagr = _safe_float(metrics.get("geometric_return_pct_at_alloc_90"))
+    cagr = _safe_float(analysis.get("annualized_geometric_return_pct_at_alloc_90"))
     dsr = _safe_float(analysis.get("dsr"))
     pf_lo = _safe_float(pf_ci.get("low"))
     pf_hi = _safe_float(pf_ci.get("high"))
@@ -541,7 +552,7 @@ def _build_best_iter_section(best: dict[str, Any]) -> dict[str, Any]:
         "metrics": {
             "trade_count": metrics.get("total_trades"),
             "profit_factor": _safe_float(metrics.get("profit_factor")),
-            "cagr": _safe_float(metrics.get("geometric_return_pct_at_alloc_90")),
+            "cagr": _safe_float(analysis.get("annualized_geometric_return_pct_at_alloc_90")),
             "return_pct": _safe_float(metrics.get("return_pct")),
             "max_drawdown_pct": _safe_float(metrics.get("max_drawdown_pct")),
             "sharpe_ratio": _safe_float(metrics.get("sharpe_ratio")),
@@ -562,10 +573,11 @@ def _build_top_iterations(
     iterations: list[dict[str, Any]],
     n: int = 5,
 ) -> list[dict[str, Any]]:
-    """Top N iterations ranked by CAGR descending."""
+    """Top N iterations ranked by annualized CAGR descending."""
     def _score(it: dict[str, Any]) -> float:
         m = it.get("metrics_snapshot") or {}
-        v = m.get("geometric_return_pct_at_alloc_90")
+        a = m.get("analysis") or {}
+        v = a.get("annualized_geometric_return_pct_at_alloc_90")
         try:
             return float(v) if v is not None else float("-inf")
         except (TypeError, ValueError):
@@ -586,7 +598,7 @@ def _build_top_iterations(
                 "profit_factor": _safe_float(metrics.get("profit_factor")),
                 "pf_ci_low": _safe_float(pf_ci.get("low")),
                 "pf_ci_high": _safe_float(pf_ci.get("high")),
-                "cagr": _safe_float(metrics.get("geometric_return_pct_at_alloc_90")),
+                "cagr": _safe_float(analysis.get("annualized_geometric_return_pct_at_alloc_90")),
                 "max_drawdown_pct": _safe_float(metrics.get("max_drawdown_pct")),
                 "dsr": _safe_float(analysis.get("dsr")),
                 "statistical_verdict": it.get("statistical_verdict"),
@@ -615,7 +627,7 @@ def _build_verdict_gate(best: dict[str, Any]) -> dict[str, Any]:
     pf_lo = _safe_float(pf_ci.get("low"))
     dsr = _safe_float(analysis.get("dsr"))
     stat_verdict = best.get("statistical_verdict") or ""
-    cagr = _safe_float(metrics.get("geometric_return_pct_at_alloc_90"))
+    cagr = _safe_float(analysis.get("annualized_geometric_return_pct_at_alloc_90"))
 
     n_trades_ok = n_trades >= _MIN_TRADES
     pf_ci_ok = pf_lo is not None and pf_lo > 1.0
@@ -671,6 +683,16 @@ async def build_paper_sections(
     verdict_gate = _build_verdict_gate(best)
     best_section = _build_best_iter_section(best)
 
+    cached = paper_row.get("sections_cache")
+    if cached:
+        sections = cached
+        narrative_source = "ai"
+    else:
+        sections = _build_prose_sections(
+            queue or {}, best_section or None, iterations, run_meta, robustness, verdict_gate,
+        )
+        narrative_source = "template"
+
     return {
         **paper_row,
         "metadata": _build_metadata(queue or {}, best, iterations, run_meta),
@@ -680,14 +702,8 @@ async def build_paper_sections(
         "verdict_gate": verdict_gate,
         "journal_entries": journal,
         "citations": _CITATIONS,
-        "sections": _build_prose_sections(
-            queue or {},
-            best_section or None,
-            iterations,
-            run_meta,
-            robustness,
-            verdict_gate,
-        ),
+        "sections": sections,
+        "narrative_source": narrative_source,
     }
 
 

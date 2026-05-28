@@ -48,7 +48,7 @@ from ..repo import (
     queue_write,
     trades as trades_repo,
 )
-from . import analyze, portfolio, sweep
+from . import analyze, paper_generator, portfolio, sweep
 from .activity_logger import log_activity
 from .tick_summary import compute_tick_summary
 
@@ -795,6 +795,7 @@ async def _execute_after_claim(
         iter_budget=iter_budget,
         early_stop=early_stop,
         statistical_verdict=stat_v,
+        agent_name=agent_name,
     )
 
     _pf_pt = analysis.get("pf_point_estimate") if isinstance(analysis, dict) else None
@@ -830,8 +831,15 @@ async def _decide_next_state(
     iter_budget: int,
     early_stop: bool,
     statistical_verdict: str,
+    agent_name: str,
 ) -> list[dict[str, Any]]:
-    """Mirrors research-tick.sh lines 514-572. Returns agent next-action hints."""
+    """Mirrors research-tick.sh lines 514-572. Returns agent next-action hints.
+
+    When the queue reaches a terminal state (COMPLETED or PARKED), a research
+    paper is auto-generated so the frontend shows an up-to-date paper without
+    requiring a manual POST /papers/{queue_id}/generate.  Failures are logged
+    but non-fatal — the tick result is not rolled back on paper-gen errors.
+    """
     ts = datetime.now(timezone.utc).isoformat()
     if statistical_verdict == "NO_EDGE" and early_stop:
         note = f"[{ts}] Discarded at iter {new_iter}: stat verdict NO_EDGE + early_stop=true."
@@ -843,6 +851,7 @@ async def _decide_next_state(
                 walk_forward_id=None,
                 note=note,
             )
+        await _try_generate_paper(db, queue_id, agent_name, state="COMPLETED/DISCARD")
         return [{"kind": "call", "method": "GET", "path": "/journal?entry_type=ANTI_PATTERN"}]
 
     if statistical_verdict == "SIGNIFICANT_EDGE":
@@ -858,6 +867,7 @@ async def _decide_next_state(
         )
         async with db.acquire() as conn:
             await queue_write.park_exhausted(conn, queue_id, note)
+        await _try_generate_paper(db, queue_id, agent_name, state="PARKED/SIGNIFICANT_EDGE")
         return [
             {"kind": "call", "method": "POST", "path": "/walk-forward",
              "hint": "Body {strategy_code, queue_id} — gates PASS on stability_verdict=ROBUST."},
@@ -877,6 +887,7 @@ async def _decide_next_state(
                     walk_forward_id=None,
                     note=note,
                 )
+            await _try_generate_paper(db, queue_id, agent_name, state="COMPLETED/INSUFFICIENT_EVIDENCE")
             return [{"kind": "contact_human"}]
         note = f"[{ts}] iter {new_iter} INSUFFICIENT_EVIDENCE; continuing."
         async with db.acquire() as conn:
@@ -888,3 +899,28 @@ async def _decide_next_state(
     async with db.acquire() as conn:
         await queue_write.reset_to_pending(conn, queue_id, note)
     return [{"kind": "call", "method": "POST", "path": "/tick"}]
+
+
+async def _try_generate_paper(
+    db: Database,
+    queue_id: Any,
+    agent_name: str,
+    state: str,
+) -> None:
+    """Fire-and-forget paper generation at queue terminal state.
+
+    Non-fatal: a failure here is logged but does not roll back the tick.
+    The paper can always be regenerated manually via
+    POST /papers/{queue_id}/generate.
+    """
+    try:
+        async with db.acquire() as conn:
+            await paper_generator.generate_paper(conn, queue_id, agent_name)
+        log.info("tick.paper_generated", queue_id=str(queue_id), state=state)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "tick.paper_generation_failed",
+            queue_id=str(queue_id),
+            state=state,
+            error=str(exc),
+        )

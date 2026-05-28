@@ -25,6 +25,7 @@ _QUEUE_READ_COLUMNS = (
     "sweep_config, hypothesis, status, iteration_number, iter_budget, "
     "early_stop_on_no_edge, require_walk_forward, last_iteration_id, "
     "last_run_id, final_verdict, walk_forward_id, "
+    "regime_label, regime_analysis, "
     "created_time, created_by, started_at, completed_at, notes"
 )
 

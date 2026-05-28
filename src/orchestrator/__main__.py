@@ -8,11 +8,13 @@ operators only edit ``.env``.
 from __future__ import annotations
 
 import uvicorn
+from dotenv import load_dotenv
 
 from .config import Settings
 
 
 def main() -> None:
+    load_dotenv()  # populate os.environ from .env so non-Settings modules can read it
     settings = Settings()  # type: ignore[call-arg]
     uvicorn.run(
         "orchestrator.main:app",

@@ -205,6 +205,25 @@ async def complete_queue(
     )
 
 
+async def update_regime_label(
+    conn: asyncpg.Connection,
+    queue_id: UUID,
+    regime_label: str | None,
+    regime_analysis: dict | None,
+) -> None:
+    await conn.execute(
+        """
+        UPDATE research_queue
+        SET regime_label    = $2,
+            regime_analysis = $3
+        WHERE queue_id = $1
+        """,
+        queue_id,
+        regime_label,
+        regime_analysis,
+    )
+
+
 async def reset_to_pending(conn: asyncpg.Connection, queue_id: UUID, note: str) -> None:
     await conn.execute(
         """

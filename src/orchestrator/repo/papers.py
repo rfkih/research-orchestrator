@@ -25,7 +25,7 @@ async def get_paper(
     row = await conn.fetchrow(
         """
         SELECT paper_id, queue_id, title, abstract, paper_status, version,
-               created_time, created_by, updated_time, updated_by
+               sections_cache, created_time, created_by, updated_time, updated_by
         FROM research_paper
         WHERE paper_id = $1
         """,
@@ -102,22 +102,25 @@ async def upsert_paper(
     paper_status: str,
     version: int,
     created_by: str,
+    sections_cache: list | None = None,
 ) -> dict[str, Any]:
     row = await conn.fetchrow(
         """
         INSERT INTO research_paper
             (paper_id, queue_id, title, abstract, paper_status, version,
-             created_time, created_by, updated_time, updated_by)
-        VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, NOW(), $7)
+             sections_cache, created_time, created_by, updated_time, updated_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8, NOW(), $8)
         ON CONFLICT (paper_id) DO UPDATE
-            SET title        = EXCLUDED.title,
-                abstract     = EXCLUDED.abstract,
-                paper_status = EXCLUDED.paper_status,
-                version      = EXCLUDED.version,
-                updated_time = NOW(),
-                updated_by   = EXCLUDED.updated_by
+            SET queue_id       = EXCLUDED.queue_id,
+                title          = EXCLUDED.title,
+                abstract       = EXCLUDED.abstract,
+                paper_status   = EXCLUDED.paper_status,
+                version        = EXCLUDED.version,
+                sections_cache = COALESCE(EXCLUDED.sections_cache, research_paper.sections_cache),
+                updated_time   = NOW(),
+                updated_by     = EXCLUDED.updated_by
         RETURNING paper_id, queue_id, title, abstract, paper_status, version,
-                  created_time, created_by, updated_time, updated_by
+                  sections_cache, created_time, created_by, updated_time, updated_by
         """,
         paper_id,
         queue_id,
@@ -125,6 +128,7 @@ async def upsert_paper(
         abstract,
         paper_status,
         version,
+        sections_cache,
         created_by,
     )
     return dict(row)
