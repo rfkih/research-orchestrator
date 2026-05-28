@@ -296,14 +296,23 @@ async def export_pdf(
         tex_name = f"{paper_id}.tex"
         tex_path = Path(tmpdir) / tex_name
         tex_path.write_text(latex_source, encoding="utf-8")
+        pdf_path = Path(tmpdir) / f"{paper_id}.pdf"
 
+        # Two passes — first builds .aux, second resolves \ref{tab:...}
+        # cross-references.  Each pass capped at 60s; total wall-time
+        # bounded at 120s.  -halt-on-error left OFF so non-fatal warnings
+        # (overfull boxes, unresolved refs on pass 1) don't abort.
+        proc = None
         try:
-            proc = subprocess.run(
-                ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", tex_name],
-                cwd=tmpdir,
-                capture_output=True,
-                timeout=60,
-            )
+            for _ in range(2):
+                proc = subprocess.run(
+                    ["pdflatex", "-interaction=nonstopmode", tex_name],
+                    cwd=tmpdir,
+                    capture_output=True,
+                    timeout=60,
+                )
+                if proc.returncode != 0:
+                    break
         except FileNotFoundError:
             raise OrchestratorError(
                 status_code=503,
@@ -319,15 +328,23 @@ async def export_pdf(
                 retryable=True,
             )
 
-        pdf_path = Path(tmpdir) / f"{paper_id}.pdf"
         if not pdf_path.exists():
-            log_snippet = proc.stderr.decode("utf-8", errors="replace")[-800:]
+            # pdflatex writes its real diagnostics to STDOUT (the .log file
+            # mirror); stderr is usually empty. Surface stdout + .log tail
+            # so the operator can see the actual LaTeX error.
+            stdout_tail = proc.stdout.decode("utf-8", errors="replace")[-1500:] if proc else ""
+            log_path = Path(tmpdir) / f"{paper_id}.log"
+            log_tail = (
+                log_path.read_text(encoding="utf-8", errors="replace")[-1500:]
+                if log_path.exists()
+                else ""
+            )
             raise OrchestratorError(
                 status_code=500,
                 error_code="pdf_compilation_failed",
                 message="PDF compilation failed.",
                 retryable=False,
-                details={"pdflatex_stderr": log_snippet},
+                details={"pdflatex_stdout": stdout_tail, "pdflatex_log": log_tail},
             )
 
         pdf_bytes = pdf_path.read_bytes()

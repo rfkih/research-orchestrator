@@ -65,6 +65,7 @@ def _preamble(title: str, date_str: str) -> str:
     return rf"""\documentclass[journal]{{IEEEtran}}
 \usepackage[utf8]{{inputenc}}
 \usepackage{{amsmath}}
+\usepackage{{amssymb}}
 \usepackage{{booktabs}}
 \usepackage{{array}}
 \usepackage{{longtable}}
@@ -122,8 +123,8 @@ applied to the \textbf{{{symbol}}} perpetual futures market on the
 \textbf{{{interval}}} timeframe. The study was conducted using the Blackheart
 algorithmic trading research engine and follows a rigorous statistical framework
 combining bootstrap confidence intervals, the Deflated Sharpe Ratio (DSR)
-\citep{{bailey2014deflated}}, and the Harvey–Liu–Zhu (HLZ) multiple-testing
-correction \citep{{harvey2016cross}}.{hypothesis_paragraph}
+\cite{{bailey2014deflated}}, and the Harvey–Liu–Zhu (HLZ) multiple-testing
+correction \cite{{harvey2016cross}}.{hypothesis_paragraph}
 
 The primary contribution of this study is a systematic sweep of the {code}
 strategy parameter space, culminating in a {verdict} verdict with the
@@ -224,7 +225,7 @@ def _section_methodology(meta: dict[str, Any]) -> str:
 
 \subsection{{Strategy Description}}
 The {_esc(meta.get("strategy_code") or "N/A")} strategy is implemented in Java
-using the TA4j technical analysis library \citep{{ta4j}}. Entry and exit
+using the TA4j technical analysis library \cite{{ta4j}}. Entry and exit
 conditions are evaluated bar-by-bar on the {_esc(meta.get("interval_name") or "N/A")}
 timeframe.
 
@@ -239,10 +240,10 @@ Each parameter configuration is evaluated against the following gates:
 \begin{{enumerate}}
   \item \textbf{{Minimum trade count:}} $n \geq 100$ closed trades.
   \item \textbf{{Profit Factor 95\% CI:}} Bootstrap lower bound $> 1.0$
-        ($B = 2{{,}}000$ resamples) \citep{{bailey2014deflated}}.
+        ($B = 2{{,}}000$ resamples) \cite{{bailey2014deflated}}.
   \item \textbf{{Deflated Sharpe Ratio:}} $\mathrm{{DSR}} \geq 0.95$, deflated
         by the cumulative number of trials via the HLZ correction
-        \citep{{harvey2016cross}}.
+        \cite{{harvey2016cross}}.
   \item \textbf{{Economic gate:}} Annualised geometric return $\geq 10\%$ at
         90\% Kelly allocation (365-day year, compounded).
 \end{{enumerate}}
