@@ -212,7 +212,7 @@ def _build_equity_curve(
 ) -> list[dict[str, Any]]:
     """Normalised equity curve (base = 100) sampled at each trade close.
 
-    Shape: [{t: epoch_ms, value: float}]
+    Shape: [{t: epoch_ms, value: float, regime: str | None}]
     """
     closed = sorted(
         (
@@ -228,12 +228,16 @@ def _build_equity_curve(
     running = initial_capital
     first_entry: datetime = closed[0]["entry_time"]
     curve: list[dict[str, Any]] = [
-        {"t": _to_epoch_ms(first_entry), "value": 100.0}
+        {"t": _to_epoch_ms(first_entry), "value": 100.0, "regime": closed[0].get("entry_trend_regime")}
     ]
     for trade in closed:
         running += float(trade["realized_pnl_amount"])
         value = round((running / initial_capital) * 100.0, 4)
-        curve.append({"t": _to_epoch_ms(trade["exit_time"]), "value": value})
+        curve.append({
+            "t": _to_epoch_ms(trade["exit_time"]),
+            "value": value,
+            "regime": trade.get("entry_trend_regime"),
+        })
     return curve
 
 
@@ -261,6 +265,7 @@ def _format_trades_for_chart(
                 "side": t.get("side"),
                 "pnl": pnl,
                 "pnl_pct": pnl_pct,
+                "regime": t.get("entry_trend_regime"),
             }
         )
     return result
