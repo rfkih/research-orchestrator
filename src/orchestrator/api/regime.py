@@ -184,10 +184,11 @@ def _next_actions(queue: dict, result: dict, regime_signal: str | None) -> list[
                     f"re-queue with ML regime gate enabled using signal '{regime_signal}'."
                 ),
                 "recommended_sweep_override": {
-                    "strategy_ml_gate_overrides": {
-                        "signal_name": regime_signal,
-                        "shadow_mode": False,
-                    },
+                    "params": [
+                        {"name": "_ml_gate_enabled", "values": [True], "type": None, "low": None, "high": None},
+                        {"name": "_ml_signal_name", "values": [regime_signal], "type": None, "low": None, "high": None},
+                        {"name": "_ml_shadow_mode", "values": [False], "type": None, "low": None, "high": None},
+                    ]
                 },
                 "regime_signal": regime_signal,
             })
