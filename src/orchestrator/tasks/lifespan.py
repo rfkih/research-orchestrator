@@ -7,6 +7,7 @@ them via ``request.app.state``.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -22,6 +23,7 @@ from ..logging import get_logger
 from ..observability.error_reporter import get_reporter
 from ..services.idempotency import InMemoryIdempotencyStore, PostgresIdempotencyStore
 from ..services.ml_training import reap_orphaned_on_startup
+from .feature_refresh import start_feature_refresh_task
 
 log = get_logger(__name__)
 
@@ -76,6 +78,16 @@ async def lifespan_for(settings: Settings, app: FastAPI) -> AsyncIterator[None]:
     except Exception:  # noqa: BLE001
         log.exception("orchestrator.ml_training_reaper_failed")
 
+    # Start hourly feature refresh task. Best-effort — failures do not crash
+    # the app. The task runs in the background and refreshes features from
+    # the last-persisted timestamp to the present every 3600 seconds.
+    feature_refresh_task = None
+    try:
+        feature_refresh_task = await start_feature_refresh_task(settings)
+        app.state.feature_refresh_task = feature_refresh_task
+    except Exception:  # noqa: BLE001
+        log.exception("orchestrator.feature_refresh_startup_failed")
+
     log.info(
         "orchestrator.startup",
         profile=settings.profile,
@@ -88,6 +100,13 @@ async def lifespan_for(settings: Settings, app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         log.info("orchestrator.shutdown")
+        # Cancel feature refresh task if it was started
+        if feature_refresh_task is not None:
+            feature_refresh_task.cancel()
+            try:
+                await feature_refresh_task
+            except asyncio.CancelledError:
+                pass
         if app.state.redis is not None:
             await app.state.redis.aclose()
         await inference.close()
