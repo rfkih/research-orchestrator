@@ -52,6 +52,18 @@ class Settings(BaseSettings):
     jvm_base_url: str = "http://127.0.0.1:8081"
     jvm_request_timeout_s: float = Field(30.0, ge=1.0, le=300.0)
 
+    # Backtest poll cap (tick.py ``_poll_backtest_status``). The orchestrator
+    # submits a backtest to the research JVM then polls ``backtest_run.status``
+    # until terminal; this is the max wall-clock it waits before treating the
+    # run as failed. The legacy 1800s (30-min) default assumed a co-located DB.
+    # When the orchestrator runs on the home box against the remote VPS prod DB,
+    # a full-window backtest reads market_data per-5m-bar over Tailscale and
+    # takes ~33 min, overrunning 30 min and falsely marking the queue FAILED
+    # while the JVM run actually COMPLETES. 3600s (60 min) clears that headroom;
+    # raise ORCH_POLL_TIMEOUT_S further for a slower link. The stuck-row reaper
+    # threshold scales off this (poll cap + 5-min buffer).
+    poll_timeout_s: int = Field(3600, ge=300, le=7200)
+
     # Trading-JVM base URL (Phase A.6, 2026-05-22). The orchestrator
     # calls /api/v1/internal/orch/** here for live equity + Kelly reads
     # that power the portfolio-rebalance min-notional guard. Auth is

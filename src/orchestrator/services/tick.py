@@ -54,13 +54,19 @@ from .tick_summary import compute_tick_summary
 
 log = get_logger(__name__)
 
-# Backtest poll cap. The bash version uses 1800s; we honour the same so
-# operators retain muscle memory. Configurable later if a sweep takes longer.
-_POLL_TIMEOUT_S = 1800
+# Backtest poll-cap fallback. ``_poll_backtest_status`` uses this when a caller
+# passes no explicit timeout (capacity / cpcv / cross_window / null_screen /
+# walk_forward all do). The main /tick loop passes ``settings.poll_timeout_s``
+# (env ``ORCH_POLL_TIMEOUT_S``, see config.py) so the operator can tune the cap
+# for a slow link without a code change. Both default to 3600s: a full-window
+# backtest over the remote VPS prod DB takes ~33 min, so the legacy 1800s cap
+# falsely failed queues whose runs had actually completed.
+_POLL_TIMEOUT_S = 3600
 _POLL_INTERVAL_S = 5
-# Stuck-RUNNING reaper threshold. Generous buffer over the poll cap so we
-# never reset a healthy in-flight tick.
-_STUCK_RUNNING_S = _POLL_TIMEOUT_S + 5 * 60
+# Stuck-RUNNING reaper buffer. The reaper resets RUNNING queue rows older than
+# (poll cap + this buffer) back to PENDING — a generous margin over the poll
+# cap so a healthy in-flight tick is never reset mid-run.
+_STUCK_RUNNING_BUFFER_S = 5 * 60
 
 
 def _terminal(err: OrchestratorError) -> OrchestratorError:
@@ -212,8 +218,8 @@ async def _poll_backtest_status(
     """Poll until terminal status. Returns the final status string.
 
     Holds a single connection for the full poll loop instead of acquiring
-    one per tick — a 30-min poll at 5s interval would otherwise burn 360
-    pool acquisitions for nothing.
+    one per probe — an hour-long poll at a 5s interval would otherwise burn
+    ~720 pool acquisitions for nothing.
     """
     deadline = time.monotonic() + timeout_s
     last_status: str | None = None
@@ -341,7 +347,9 @@ async def run_tick(
     # Covers SIGKILL-style crashes whose rollback handler never ran.
     async with db.acquire() as conn:
         async with conn.transaction():
-            recovered = await queue_write.recover_stuck(conn, _STUCK_RUNNING_S)
+            recovered = await queue_write.recover_stuck(
+                conn, settings.poll_timeout_s + _STUCK_RUNNING_BUFFER_S
+            )
     if recovered:
         log.warn("tick.recovered_stuck_rows", count=recovered)
 
@@ -589,7 +597,9 @@ async def _execute_after_claim(
     except Exception as _act_exc:  # noqa: BLE001
         log.warning("tick.activity_log_failed", step="TICK_DISPATCHED", error=str(_act_exc))
 
-    final_status = await _poll_backtest_status(db, backtest_run_id)
+    final_status = await _poll_backtest_status(
+        db, backtest_run_id, timeout_s=settings.poll_timeout_s
+    )
     if final_status != "COMPLETED":
         note = (
             f"[{datetime.now(timezone.utc).isoformat()}] Backtest terminal status="

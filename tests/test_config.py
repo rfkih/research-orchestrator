@@ -12,7 +12,7 @@ from __future__ import annotations
 from uuid import UUID
 
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from orchestrator.config import DEV_TOKEN_SENTINEL, Settings
 
@@ -168,3 +168,27 @@ def test_specialist_model_defaults_are_sonnet():
     assert settings.specialist_model_portfolio == "claude-sonnet-4-6"
     assert settings.specialist_model_capacity == "claude-sonnet-4-6"
     assert settings.specialist_model_data_scout == "claude-sonnet-4-6"
+
+
+# ── Backtest poll-cap pins (2026-05-30) ───────────────────────────────────
+
+
+def test_poll_timeout_default_is_3600():
+    """Pin: the backtest poll cap defaults to 3600s (60 min), not the legacy
+    1800s. A full-window backtest over the remote VPS prod DB takes ~33 min;
+    the old 30-min cap falsely marked completed runs FAILED while the JVM was
+    still simulating. A silent revert to 1800 would reintroduce that bug."""
+    assert _settings().poll_timeout_s == 3600
+
+
+def test_poll_timeout_is_env_tunable():
+    """Pin: poll cap is a real tunable Field (ORCH_POLL_TIMEOUT_S), so the
+    operator can raise it for a slower link without a code change."""
+    assert _settings(poll_timeout_s=5400).poll_timeout_s == 5400
+
+
+def test_poll_timeout_rejects_below_floor():
+    """Pin: the 300s floor rejects a fat-fingered tiny cap that would fail
+    every real backtest before it could finish."""
+    with pytest.raises(ValidationError):
+        _settings(poll_timeout_s=120)
