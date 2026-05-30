@@ -13,6 +13,7 @@ from orchestrator.api.ml_monitor import (
     LAST_FIRE_RED_MULT,
     MODULATOR_AUC_AMBER,
     _coverage_ratio,
+    _freshness_score,
     derive_health,
 )
 
@@ -117,6 +118,52 @@ def test_coverage_ratio_known_interval() -> None:
 def test_coverage_ratio_unknown_interval_returns_none() -> None:
     assert _coverage_ratio(fires_7d=10, interval_seconds=None) is None
     assert _coverage_ratio(fires_7d=10, interval_seconds=0) is None
+
+
+def test_freshness_score_full_when_feature_fresh() -> None:
+    """Feature age < 1 interval = fully fresh (1.0)."""
+    # 1h interval, 30m old = fresh
+    assert _freshness_score(feature_age_hours=0.5, interval_seconds=3_600) == 1.0
+
+
+def test_freshness_score_partial_when_1_to_2_intervals_old() -> None:
+    """Feature age between 1-2 intervals = partially stale (0.5)."""
+    # 1h interval, 1.5h old = partial
+    assert _freshness_score(feature_age_hours=1.5, interval_seconds=3_600) == 0.5
+
+
+def test_freshness_score_zero_when_more_than_2_intervals_old() -> None:
+    """Feature age > 2 intervals = stale (0.0)."""
+    # 1h interval, 2.5h old = stale
+    assert _freshness_score(feature_age_hours=2.5, interval_seconds=3_600) == 0.0
+
+
+def test_freshness_score_full_when_no_age_or_interval() -> None:
+    """Unknown age or interval = assume fresh (1.0)."""
+    assert _freshness_score(feature_age_hours=None, interval_seconds=3_600) == 1.0
+    assert _freshness_score(feature_age_hours=1.0, interval_seconds=None) == 1.0
+    assert _freshness_score(feature_age_hours=None, interval_seconds=None) == 1.0
+
+
+def test_freshness_score_edge_case_exactly_1_interval() -> None:
+    """Feature age = exactly 1 interval should be at boundary (0.5)."""
+    assert _freshness_score(feature_age_hours=1.0, interval_seconds=3_600) == 0.5
+
+
+def test_freshness_score_edge_case_exactly_2_intervals() -> None:
+    """Feature age = exactly 2 intervals should be at boundary (0.0)."""
+    assert _freshness_score(feature_age_hours=2.0, interval_seconds=3_600) == 0.0
+
+
+def test_freshness_score_with_5m_interval() -> None:
+    """Verify freshness calculation works with different intervals."""
+    # 5m = 300s, so 1 interval = 5 min
+    # 3 min old (0.05h) = fresh
+    assert _freshness_score(feature_age_hours=0.05, interval_seconds=300) == 1.0
+    # 7.5 min old (0.125h) = partial
+    assert _freshness_score(feature_age_hours=0.125, interval_seconds=300) == 0.5
+    # 12 min old (0.2h) = stale
+    assert _freshness_score(feature_age_hours=0.2, interval_seconds=300) == 0.0
 
 
 def test_constants_pinned() -> None:

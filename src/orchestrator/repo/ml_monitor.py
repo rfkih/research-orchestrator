@@ -11,7 +11,8 @@ Schema (V66, V79):
 * ``signal_definition.status`` — active | shadow | retired
 * ``model_registry.symbol`` / ``interval`` — the model's training symbol
 * ``model_registry.metrics`` (JSONB) — may carry ``walkforward_auc_mean``
-* ``signal_history.ts``        — bar-close timestamp; drives coverage + last fire
+* ``signal_history.ts``        — bar (open-label) timestamp; drives coverage + last fire
+* ``signal_history.produced_at`` — wall-clock write time; drives "last written" (pipeline liveness)
 * ``account_strategy.ml_regime_signal_name`` / ``ml_regime_gate_enabled``
   — the binding edge between strategy and signal
 
@@ -54,11 +55,20 @@ fires_30d AS (
     SELECT
         signal_id,
         MAX(ts)                                                              AS last_fire_ts,
+        MAX(produced_at)                                                     AS last_produced_at,
         COUNT(*) FILTER (WHERE ts > NOW() - INTERVAL '24 hours')              AS fires_24h,
         COUNT(*) FILTER (WHERE ts > NOW() - INTERVAL '7 days')                AS fires_7d
     FROM signal_history
     WHERE signal_id IN (SELECT signal_id FROM bound_signals)
       AND ts        >  NOW() - INTERVAL '30 days'
+    GROUP BY signal_id
+),
+feature_max_ts AS (
+    SELECT
+        signal_id,
+        MAX(ts) AS latest_feature_ts
+    FROM feature_values
+    WHERE signal_id IN (SELECT signal_id FROM bound_signals)
     GROUP BY signal_id
 )
 SELECT
@@ -73,12 +83,15 @@ SELECT
     mr.metrics                                 AS model_metrics,
     COALESCE(bst.strategy_codes, ARRAY[]::text[]) AS bound_strategy_codes,
     fr.last_fire_ts,
+    fr.last_produced_at,
     COALESCE(fr.fires_24h, 0)                  AS fires_24h,
-    COALESCE(fr.fires_7d,  0)                  AS fires_7d
+    COALESCE(fr.fires_7d,  0)                  AS fires_7d,
+    fmt.latest_feature_ts
 FROM bound_signals bs
 LEFT JOIN model_registry  mr  ON mr.id        = bs.model_id
 LEFT JOIN bound_strategies bst ON bst.signal_id = bs.signal_id
 LEFT JOIN fires_30d        fr  ON fr.signal_id  = bs.signal_id
+LEFT JOIN feature_max_ts   fmt ON fmt.signal_id = bs.signal_id
 ORDER BY bs.signal_name;
 """
 

@@ -69,7 +69,12 @@ class MlMonitorRow(BaseModel):
     walkforwardAuc: float | None
     coverage7dRatio: float | None
     fires24h: int
-    lastFireTs: str | None
+    lastFireTs: str | None          # bar (open-label) timestamp — how recent the signal's market data is
+    lastProducedAt: str | None      # wall-clock write time — pipeline liveness ("last written")
+    freshnessScore: float           # 1.0=fresh (<1 interval), 0.5=(2 intervals), 0.0=(>3 intervals)
+    inferenceLatencyMs: int | None  # wall-clock latency: produced_at - last_fire_ts
+    featureAgeHours: float | None   # hours since feature_values max(ts)
+    signalWriteLatencyMs: int | None  # signal write latency: produced_at - MAX(feature_values.ts)
 
 
 class MlMonitorResponse(BaseModel):
@@ -141,6 +146,35 @@ def derive_health(
     return "green", None
 
 
+def _freshness_score(
+    feature_age_hours: float | None,
+    interval_seconds: int | None,
+) -> float:
+    """Calculate freshness score based on feature age relative to interval.
+
+    Returns:
+        1.0 if feature age < 1 interval old
+        0.5 if feature age between 1-2 intervals old
+        0.0 if feature age > 2 intervals old
+
+    Returns 1.0 (fully fresh) if interval or age is unknown."""
+    if interval_seconds is None or interval_seconds <= 0:
+        return 1.0
+    if feature_age_hours is None:
+        return 1.0
+
+    # Convert interval to hours
+    interval_hours = interval_seconds / 3600.0
+
+    # Score decay: 1.0 → 0.5 → 0.0 as age increases
+    if feature_age_hours < interval_hours:
+        return 1.0
+    elif feature_age_hours < 2 * interval_hours:
+        return 0.5
+    else:
+        return 0.0
+
+
 def _extract_auc(metrics: dict[str, Any] | None) -> float | None:
     """Pull a walkforward AUC from the model_registry.metrics JSONB.
 
@@ -184,6 +218,32 @@ async def get_ml_monitor(
             walkforward_auc=wf_auc,
             purpose=purpose,
         )
+
+        # Calculate freshness and latency metrics
+        feature_age_hours: float | None = None
+        inference_latency_ms: int | None = None
+        signal_write_latency_ms: int | None = None
+
+        # Feature age: hours since feature_values max(ts)
+        latest_feature_ts = r.get("latest_feature_ts")
+        if latest_feature_ts is not None:
+            now = datetime.now(timezone.utc)
+            age_seconds = (now - latest_feature_ts).total_seconds()
+            feature_age_hours = age_seconds / 3600.0
+
+        # Inference latency: produced_at - last_fire_ts (wall-clock latency)
+        if r.get("last_produced_at") is not None and r.get("last_fire_ts") is not None:
+            latency_seconds = (r["last_produced_at"] - r["last_fire_ts"]).total_seconds()
+            inference_latency_ms = max(0, int(latency_seconds * 1000))
+
+        # Signal write latency: produced_at - latest_feature_ts
+        if r.get("last_produced_at") is not None and latest_feature_ts is not None:
+            write_latency_seconds = (r["last_produced_at"] - latest_feature_ts).total_seconds()
+            signal_write_latency_ms = max(0, int(write_latency_seconds * 1000))
+
+        # Calculate freshness score
+        freshness = _freshness_score(feature_age_hours, expected_fire_seconds)
+
         rows.append(MlMonitorRow(
             signalId=str(r["signal_id"]),
             signalName=r["signal_name"],
@@ -200,6 +260,11 @@ async def get_ml_monitor(
             coverage7dRatio=coverage,
             fires24h=int(r["fires_24h"]),
             lastFireTs=r["last_fire_ts"].isoformat() if r["last_fire_ts"] else None,
+            lastProducedAt=r["last_produced_at"].isoformat() if r.get("last_produced_at") else None,
+            freshnessScore=freshness,
+            inferenceLatencyMs=inference_latency_ms,
+            featureAgeHours=feature_age_hours,
+            signalWriteLatencyMs=signal_write_latency_ms,
         ))
     # Sort red → amber → green, then by fires_24h desc — same rule the
     # dashboard strip uses client-side, applied server-side so all callers
