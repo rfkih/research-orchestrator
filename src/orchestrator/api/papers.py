@@ -19,6 +19,7 @@ from __future__ import annotations
 import subprocess
 import tempfile
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -45,6 +46,13 @@ _VALID_STATUS = {"WORKING_PAPER", "FINALIZED"}
 # GET /papers — library index
 # ---------------------------------------------------------------------------
 
+_VALID_SORT_BY = {
+    "annualized_return_pct", "profit_factor", "win_rate",
+    "n_trades", "sharpe_ratio", "created_time", "updated_time",
+}
+_TIMESTAMP_SORTS = {"created_time", "updated_time"}
+
+
 @router.get("", response_model=Page)
 async def list_papers(
     paper_status: str | None = Query(
@@ -54,6 +62,14 @@ async def list_papers(
     strategy_code: str | None = Query(None),
     instrument: str | None = Query(None, description="e.g. BTCUSDT"),
     interval_name: str | None = Query(None, description="e.g. 4H, 1H, 15m"),
+    sort_by: str = Query(
+        "created_time",
+        description=(
+            "Sort field: annualized_return_pct | profit_factor | win_rate "
+            "| n_trades | sharpe_ratio | created_time"
+        ),
+    ),
+    sort_dir: str = Query("desc", description="asc | desc"),
     cursor: str | None = Query(None),
     limit: int = Query(20, ge=1, le=100),
     conn: asyncpg.Connection = Depends(get_db_conn),
@@ -65,14 +81,42 @@ async def list_papers(
             message=f"paper_status must be one of {sorted(_VALID_STATUS)}.",
             retryable=False,
         )
+    if sort_by not in _VALID_SORT_BY:
+        raise OrchestratorError(
+            status_code=400,
+            error_code="bad_sort_by",
+            message=f"sort_by must be one of {sorted(_VALID_SORT_BY)}.",
+            retryable=False,
+        )
+    sort_dir = sort_dir.lower()
+    if sort_dir not in ("asc", "desc"):
+        raise OrchestratorError(
+            status_code=400,
+            error_code="bad_sort_dir",
+            message="sort_dir must be 'asc' or 'desc'.",
+            retryable=False,
+        )
 
     after_created_time: datetime | None = None
     after_id: str | None = None
+    after_metric_val: Decimal | None = None
+    has_metric_cursor: bool = False
     if cursor is not None:
         decoded = decode_cursor_ext(cursor)
         raw_t = decoded.get("t")
         after_created_time = datetime.fromisoformat(raw_t) if raw_t else None
         after_id = decoded.get("id")
+        # Metric sort cursors encode the sort column value under "sv".
+        # Use Decimal (not float) so asyncpg maps it to NUMERIC and avoids
+        # float64 precision errors when comparing against NUMERIC columns.
+        if "sv" in decoded:
+            raw_sv = decoded["sv"]
+            if raw_sv is not None:
+                try:
+                    after_metric_val = Decimal(str(raw_sv))
+                except InvalidOperation:
+                    after_metric_val = None
+            has_metric_cursor = True
 
     rows = await papers_repo.list_papers(
         conn,
@@ -82,7 +126,11 @@ async def list_papers(
         interval_name=interval_name,
         after_created_time=after_created_time,
         after_id=after_id,
+        after_metric_val=after_metric_val,
+        has_metric_cursor=has_metric_cursor,
         limit=limit + 1,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
     )
 
     has_more = len(rows) > limit
@@ -90,12 +138,24 @@ async def list_papers(
     next_cursor: str | None = None
     if has_more:
         last = items[-1]
-        next_cursor = encode_cursor_ext(
-            {
-                "t": last["created_time"].isoformat(),
+        if sort_by in _TIMESTAMP_SORTS:
+            # Timestamp sorts: store the sort column value in "t" so the repo
+            # can use (sort_col, paper_id) as the keyset.
+            ts_val = last.get(sort_by)
+            cursor_data: dict[str, Any] = {
+                "t": ts_val.isoformat() if ts_val else last["created_time"].isoformat(),
                 "id": str(last["paper_id"]),
             }
-        )
+        else:
+            # Metric sorts: store created_time as tie-breaker "t" and the
+            # sort column value as "sv" (Decimal-safe via str() encoding).
+            raw_sv = last.get(sort_by)
+            cursor_data = {
+                "t": last["created_time"].isoformat(),
+                "id": str(last["paper_id"]),
+                "sv": float(raw_sv) if raw_sv is not None else None,
+            }
+        next_cursor = encode_cursor_ext(cursor_data)
 
     next_actions: list[dict[str, Any]] = []
     if has_more:

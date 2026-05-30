@@ -135,6 +135,8 @@ async def generate_paper(
         queue, best_section, iterations, run_meta, robustness, verdict_gate,
     )
 
+    metrics_summary = _extract_metrics_summary(best, raw_trades)
+
     async with conn.transaction():
         paper = await papers_repo.upsert_paper(
             conn,
@@ -146,6 +148,7 @@ async def generate_paper(
             version=version,
             created_by=agent_name,
             sections_cache=sections,
+            **metrics_summary,
         )
         await papers_repo.upsert_trade_data(
             conn,
@@ -276,11 +279,13 @@ def _format_trades_for_chart(
 # ---------------------------------------------------------------------------
 
 def _build_paper_id(queue: dict[str, Any]) -> str:
-    year = queue["created_time"].year if queue.get("created_time") else datetime.now().year
     code = queue["strategy_code"].upper()
     symbol = queue["instrument"].upper()
     interval = queue["interval_name"].upper()
-    return f"BH-{year}-{code}-{symbol}-{interval}"
+    # Include the queue_id short hash so each attempt on the same surface
+    # gets its own DB row rather than overwriting a shared slot.
+    queue_short = str(queue["queue_id"])[:8] if queue.get("queue_id") else "unknown"
+    return f"BH-{code}-{symbol}-{interval}-{queue_short}"
 
 
 def _generate_title(queue: dict[str, Any]) -> str:
@@ -709,6 +714,46 @@ async def build_paper_sections(
         "citations": _CITATIONS,
         "sections": sections,
         "narrative_source": narrative_source,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Metrics extraction
+# ---------------------------------------------------------------------------
+
+def _extract_metrics_summary(
+    best: dict[str, Any],
+    trades: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Extract flat performance metrics from the best iteration + trade list.
+
+    Returns kwargs ready for ``upsert_paper``:
+      win_rate, annualized_return_pct, profit_factor,
+      n_trades, max_drawdown_pct, sharpe_ratio
+    """
+    metrics = best.get("metrics_snapshot") or {}
+    analysis = metrics.get("analysis") or {}
+
+    closed = [t for t in trades if t.get("exit_time") is not None]
+    n_trades = len(closed)
+    wins = sum(1 for t in closed if (t.get("realized_pnl_amount") or 0) > 0)
+    win_rate: float | None = round((wins / n_trades) * 100.0, 2) if n_trades > 0 else None
+
+    pf = _safe_float(metrics.get("profit_factor"))
+    # Cap at 9999 to fit NUMERIC(8,4). Strategies with zero losing trades legitimately
+    # produce PF > 9999; we store 9999 rather than overflowing the column.
+    if pf is not None and pf > 9999.0:
+        pf = 9999.0
+
+    return {
+        "win_rate": win_rate,
+        "annualized_return_pct": _safe_float(
+            analysis.get("annualized_geometric_return_pct_at_alloc_90")
+        ),
+        "profit_factor": pf,
+        "n_trades": n_trades if n_trades > 0 else None,
+        "max_drawdown_pct": _safe_float(metrics.get("max_drawdown_pct")),
+        "sharpe_ratio": _safe_float(metrics.get("sharpe_ratio")),
     }
 
 

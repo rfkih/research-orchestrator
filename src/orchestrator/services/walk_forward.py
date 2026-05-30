@@ -30,6 +30,7 @@ from ..errors import OrchestratorError
 from ..infra.db import Database
 from ..logging import get_logger
 from ..repo import walk_forward as wf_repo
+from . import sweep
 from .tick import _fetch_run_metrics, _poll_backtest_status, _resolve_account_strategy
 
 log = get_logger(__name__)
@@ -139,8 +140,21 @@ def _build_payload(
     allow_long: bool = True,
     allow_short: bool = True,
 ) -> dict[str, Any]:
-    """Same shape as tick._build_submit_payload, with the per-fold window."""
-    return {
+    """Same shape as tick._build_submit_payload, with the per-fold window.
+
+    Walks the ``overrides`` dict and splits out ML sentinels (``_ml_*``)
+    using the same ``sweep.split_ml_overrides`` + ``build_ml_override_maps``
+    pipeline as tick.py. Without this split, HYBRID walk-forwards would
+    pass the sentinels as strategy params and the ML gate would not fire
+    — making each fold ALGO-mode (silently divergent from the in-sample
+    iteration that motivated the walk-forward).
+    """
+    regular, ml = sweep.split_ml_overrides(overrides or {})
+    ml_override_payload = sweep.build_ml_override_maps(
+        strategy_code=strategy_code,
+        ml_overrides=ml,
+    )
+    payload: dict[str, Any] = {
         "accountStrategyId": account_strategy_id,
         "strategyCode": strategy_code,
         "asset": asset,
@@ -157,9 +171,12 @@ def _build_payload(
         # Mirror the production strategy's direction policy — see tick.py.
         "allowLong": allow_long,
         "allowShort": allow_short,
-        "strategyParamOverrides": {strategy_code: overrides or {}},
+        "strategyParamOverrides": {strategy_code: regular},
         "triggeredBy": "RESEARCHER",
     }
+    if ml_override_payload:
+        payload.update(ml_override_payload)
+    return payload
 
 
 class WalkForwardResult:
