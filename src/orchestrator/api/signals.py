@@ -77,16 +77,51 @@ class SignalHealth(BaseModel):
     lastProducedAt: str | None  # wall-clock write time — pipeline liveness
     lastFireAgeSeconds: int | None
     expectedFireSeconds: int | None
+    featureAgeHours: float | None   # age of latest feature_values row
     coverage7dRatio: float | None
     fires24h: int
     fires7d: int
     walkforwardAuc: float | None
 
 
+class WalkForwardSummary(BaseModel):
+    nFolds: int
+    primaryMetric: str
+    primaryMean: float
+    primaryMedian: float
+    primaryStd: float
+
+
+class ModelInfo(BaseModel):
+    """Full model metadata exposed on the signal detail page."""
+    algorithm: str                          # e.g. "LightGBM"
+    objective: str                          # "binary" | "multiclass" | "regression"
+    predicts: str                           # human-readable prediction description
+    labelFeature: str                       # e.g. "label_regime_risk_on_24h"
+    trainStart: str | None
+    trainEnd: str | None
+    nTrainRows: int | None
+    nValRows: int | None
+    trainedAt: str | None
+    features: list[str]
+    featureImportance: dict[str, float]     # name → gain score (sorted desc)
+    auc: float | None                       # final hold-out AUC
+    accuracy: float | None                  # final hold-out accuracy
+    logLoss: float | None
+    adversarialAuc: float | None            # train/val covariate shift score (1.0 = bad)
+    walkForward: WalkForwardSummary | None
+    gauntletVerdict: str | None             # PASS | FAIL
+    gauntletGates: list[str]               # gate names that were checked
+    leakageVerdict: str | None             # PASS | FAIL
+    leakageMaxPearson: float | None
+    hyperparams: dict[str, Any]
+
+
 class SignalDetail(SignalRow):
     description: str | None
     updatedAt: str
     health: SignalHealth
+    model: ModelInfo | None
 
 
 class FiringRow(BaseModel):
@@ -152,6 +187,73 @@ def _last_fire_age_seconds(last_fire_ts: datetime | None) -> int | None:
     return int((datetime.now(timezone.utc) - last_fire_ts).total_seconds())
 
 
+_LABEL_DESCRIPTION: dict[str, str] = {
+    "label_regime_risk_on_24h":   "Probability that the next 24 hours will have a positive Sharpe ratio (risk-on regime). Value close to 1.0 = model expects bullish conditions; close to 0.0 = bearish.",
+    "label_regime_risk_on_48h":   "Probability that the next 48 hours will have a positive Sharpe ratio.",
+    "label_return_7d":            "Probability of positive return over the next 7 days.",
+    "label_meanrev_24h":          "Probability of mean-reversion within 24 hours.",
+    "label_triple_barrier":       "Triple-barrier labelling: 1 = price hits take-profit before stop-loss within the horizon.",
+}
+
+_ALGO_NAME: dict[str, str] = {
+    "lightgbm_modulator": "LightGBM (gradient boosted trees)",
+    "xgboost":            "XGBoost",
+    "random_forest":      "Random Forest",
+    "logistic":           "Logistic Regression",
+}
+
+
+def _build_model_info(row: dict[str, Any], metrics: dict[str, Any]) -> ModelInfo | None:
+    """Build a ModelInfo from model_registry row + parsed metrics JSON."""
+    feature_set = row.get("model_feature_set") or {}
+    hyperparams = row.get("model_hyperparams") or {}
+    if not feature_set and not metrics:
+        return None
+
+    label_feature: str = feature_set.get("label_feature", "")
+    features: list[str] = feature_set.get("names", [])
+    family: str = row.get("model_family") or ""
+
+    wf_raw = metrics.get("walk_forward") or {}
+    wf = WalkForwardSummary(
+        nFolds=wf_raw.get("n_folds", 0),
+        primaryMetric=wf_raw.get("primary_metric", "auc"),
+        primaryMean=wf_raw.get("primary_mean", 0.0),
+        primaryMedian=wf_raw.get("primary_median", 0.0),
+        primaryStd=wf_raw.get("primary_std", 0.0),
+    ) if wf_raw else None
+
+    fi_raw: dict[str, float] = metrics.get("feature_importance_gain") or {}
+    fi_sorted = dict(sorted(fi_raw.items(), key=lambda kv: -kv[1]))
+
+    leakage = metrics.get("leakage") or {}
+    gauntlet = metrics.get("gauntlet") or {}
+
+    return ModelInfo(
+        algorithm=_ALGO_NAME.get(family, family or "Unknown"),
+        objective=metrics.get("eval_kind", "binary").replace("walk_forward_last_fold", "binary"),
+        predicts=_LABEL_DESCRIPTION.get(label_feature, label_feature),
+        labelFeature=label_feature,
+        trainStart=str(feature_set.get("train_start", "")) or None,
+        trainEnd=str(feature_set.get("train_end", "")) or None,
+        nTrainRows=metrics.get("n_train_rows"),
+        nValRows=metrics.get("n_val_rows"),
+        trainedAt=metrics.get("trained_at"),
+        features=features,
+        featureImportance=fi_sorted,
+        auc=metrics.get("auc"),
+        accuracy=metrics.get("accuracy"),
+        logLoss=metrics.get("log_loss"),
+        adversarialAuc=metrics.get("adversarial_auc"),
+        walkForward=wf,
+        gauntletVerdict=gauntlet.get("verdict") or row.get("gauntlet_verdict"),
+        gauntletGates=gauntlet.get("gates", []),
+        leakageVerdict=leakage.get("verdict"),
+        leakageMaxPearson=leakage.get("max_pearson_abs"),
+        hyperparams=hyperparams,
+    )
+
+
 # ── endpoints ─────────────────────────────────────────────────────────────
 @router.get("", response_model=SignalListResponse)
 async def list_signals(
@@ -202,14 +304,16 @@ async def get_signal(
             message=f"No signal_definition with signal_id={signal_id}.",
             retryable=False,
         )
-    counters = await signals_repo.get_signal_health_counters(conn, signal_id)
+    symbol: str | None = row.get("model_symbol")
+    counters = await signals_repo.get_signal_health_counters(conn, signal_id, symbol=symbol)
     interval_name: str | None = row.get("model_interval")
     expected = _INTERVAL_SECONDS.get(interval_name) if interval_name else None
     coverage = _coverage_ratio(
         fires_7d=counters["fires_7d"], interval_seconds=expected,
     )
     last_age = _last_fire_age_seconds(counters["last_fire_ts"])
-    wf_auc = _extract_auc(row.get("model_metrics"))
+    metrics: dict[str, Any] = row.get("model_metrics") or {}
+    wf_auc = _extract_auc(metrics)
     health, reason = derive_health(
         coverage_ratio=coverage,
         last_fire_age_seconds=last_age,
@@ -229,11 +333,13 @@ async def get_signal(
             lastProducedAt=counters["last_produced_at"].isoformat() if counters["last_produced_at"] else None,
             lastFireAgeSeconds=last_age,
             expectedFireSeconds=expected,
+            featureAgeHours=counters.get("feature_age_hours"),
             coverage7dRatio=coverage,
             fires24h=counters["fires_24h"],
             fires7d=counters["fires_7d"],
             walkforwardAuc=wf_auc,
         ),
+        model=_build_model_info(row, metrics),
     )
 
 

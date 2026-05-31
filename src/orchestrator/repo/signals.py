@@ -115,6 +115,10 @@ async def get_signal(conn, signal_id: UUID) -> dict[str, Any] | None:
             mr.family AS model_family, mr.purpose AS model_purpose,
             mr.symbol AS model_symbol, mr.interval AS model_interval,
             mr.metrics AS model_metrics,
+            mr.hyperparams AS model_hyperparams,
+            mr.feature_set AS model_feature_set,
+            mr.training_window, mr.validation_window, mr.holdout_window,
+            mr.metrics->>'gauntlet_verdict' AS gauntlet_verdict,
             (
                 SELECT array_agg(DISTINCT ac.strategy_code ORDER BY ac.strategy_code)
                 FROM account_strategy ac
@@ -130,9 +134,9 @@ async def get_signal(conn, signal_id: UUID) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-async def get_signal_health_counters(conn, signal_id: UUID) -> dict[str, Any]:
+async def get_signal_health_counters(conn, signal_id: UUID, symbol: str | None = None) -> dict[str, Any]:
     """Light-weight stats used by both the monitor rollup and the
-    signal-detail Live tab. Single query, single round-trip."""
+    signal-detail Live tab. Also returns feature_age_hours for staleness detection."""
     row = await conn.fetchrow(
         """
         SELECT
@@ -146,11 +150,31 @@ async def get_signal_health_counters(conn, signal_id: UUID) -> dict[str, Any]:
         """,
         signal_id,
     )
+    # Feature age: latest feature_values row for this signal's symbol/interval
+    # Used by the staleness warning banner (fails open at 2h for 1h strategies).
+    feature_age_hours = None
+    if symbol:
+        feat_row = await conn.fetchrow(
+            """
+            SELECT EXTRACT(EPOCH FROM (NOW() - MAX(fv.ts))) / 3600.0 AS age_hours
+            FROM signal_definition sd
+            JOIN model_registry mr ON mr.id = sd.model_id
+            JOIN feature_values fv
+                ON fv.symbol   = mr.symbol
+               AND fv.interval = COALESCE(mr.serving_interval, mr.interval)
+            WHERE sd.signal_id = $1
+            """,
+            signal_id,
+        )
+        if feat_row and feat_row["age_hours"] is not None:
+            feature_age_hours = round(float(feat_row["age_hours"]), 2)
+
     return {
-        "last_fire_ts":     row["last_fire_ts"]     if row else None,
-        "last_produced_at": row["last_produced_at"] if row else None,
-        "fires_24h":        int(row["fires_24h"])   if row else 0,
-        "fires_7d":         int(row["fires_7d"])    if row else 0,
+        "last_fire_ts":      row["last_fire_ts"]     if row else None,
+        "last_produced_at":  row["last_produced_at"] if row else None,
+        "fires_24h":         int(row["fires_24h"])   if row else 0,
+        "fires_7d":          int(row["fires_7d"])    if row else 0,
+        "feature_age_hours": feature_age_hours,
     }
 
 
