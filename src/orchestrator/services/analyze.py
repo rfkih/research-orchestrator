@@ -58,6 +58,28 @@ def _f(v: Any) -> float | None:
         return None
 
 
+def _total_deployed_days(trades: list[dict[str, Any]]) -> float | None:
+    """Sum of holding periods across all closed trades, in calendar days.
+
+    Annualizing by deployed time (rather than window calendar time) avoids
+    inflating returns by treating idle periods between trades as compounding
+    time. A strategy that is deployed 15% of the year earns its per-trade
+    edge only during those deployments — calendar annualization conflates
+    deployment rate with edge quality.
+
+    Returns None when no trade carries both entry_time and exit_time as
+    datetime objects (e.g. open positions, legacy rows) so callers can fall
+    back to window_days.
+    """
+    total_seconds = 0.0
+    for t in trades:
+        entry = t.get("entry_time")
+        exit_ = t.get("exit_time")
+        if isinstance(entry, datetime) and isinstance(exit_, datetime) and exit_ > entry:
+            total_seconds += (exit_ - entry).total_seconds()
+    return total_seconds / 86400.0 if total_seconds > 0 else None
+
+
 def profit_factor(pnls: list[float]) -> float | None:
     """PF = gross profit / |gross loss|. None for n<2; sentinel for no losses."""
     if len(pnls) < 2:
@@ -562,11 +584,25 @@ def analyze_run(
     max_dd = _f(run.get("max_drawdown_pct"))
     calmar = (return_pct / max_dd) if (return_pct and max_dd and max_dd > 0) else None
 
-    # V60 — sizing-independent compounding metric. Annualise so the gate
-    # operates on a window-invariant number (a 6-month backtest at +6%
-    # geom maps to ~12.4%/yr; a 2-year backtest at +25% maps to ~11.8%/yr).
+    # V60 — sizing-independent compounding metric. Annualise by deployed
+    # time (sum of trade holding periods) rather than calendar window time.
+    # Calendar annualization conflates idle periods with compounding — a
+    # strategy with 50 4h trades over 500 days has capital working for only
+    # ~8 of those days; annualizing by 500 vastly understates the achieved
+    # per-deployed-capital rate. Deployed-time annualization asks: "at this
+    # compounding rate, what would a full year of deployment produce?"
+    # Falls back to window_days when exit_time data is unavailable (open
+    # positions, legacy rows) to preserve behaviour for those edge cases.
     geom_return_pct = _f(run.get("geometric_return_pct_at_alloc_90"))
-    annualized_geom_pct = annualize_geometric_return(geom_return_pct, window_days)
+    deployed_days = _total_deployed_days(trades)
+    annualized_geom_pct = annualize_geometric_return(
+        geom_return_pct, deployed_days if deployed_days else window_days
+    )
+    capital_utilization_pct = (
+        round(deployed_days / window_days * 100, 1)
+        if deployed_days and window_days and window_days > 0
+        else None
+    )
 
     slippage = slippage_sensitivity(trades, slippage_scenarios)
     regimes = regime_stratify(trades)
@@ -596,6 +632,8 @@ def analyze_run(
         "annualized_geometric_return_pct_at_alloc_90": (
             round(annualized_geom_pct, 4) if annualized_geom_pct is not None else None
         ),
+        "deployed_days": round(deployed_days, 1) if deployed_days is not None else None,
+        "capital_utilization_pct": capital_utilization_pct,
     }
 
 

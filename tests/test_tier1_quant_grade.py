@@ -30,6 +30,7 @@ from orchestrator.services.analyze import (
     ANNUALIZED_RETURN_PASS_THRESHOLD_PCT,
     DAYS_PER_YEAR,
     DSR_SIGNIFICANCE_THRESHOLD,
+    _total_deployed_days,
     analyze_run,
     annualize_geometric_return,
     deflated_sharpe_ratio,
@@ -454,3 +455,105 @@ def test_count_data_universe_trials_signature() -> None:
     sig = inspect.signature(count_data_universe_trials)
     params = sig.parameters
     assert list(params.keys()) == ["conn", "symbol", "interval_name"]
+
+
+# ── _total_deployed_days ───────────────────────────────────────────────
+
+
+def test_total_deployed_days_sums_holding_periods() -> None:
+    trades = [
+        {"entry_time": datetime(2024, 1, 1, 0, 0), "exit_time": datetime(2024, 1, 1, 4, 0)},   # 4h
+        {"entry_time": datetime(2024, 1, 2, 0, 0), "exit_time": datetime(2024, 1, 2, 4, 0)},   # 4h
+    ]
+    result = _total_deployed_days(trades)
+    assert result is not None
+    assert result == pytest.approx(8 / 24, abs=1e-9)
+
+
+def test_total_deployed_days_skips_open_positions() -> None:
+    trades = [
+        {"entry_time": datetime(2024, 1, 1, 0, 0), "exit_time": datetime(2024, 1, 1, 1, 0)},
+        {"entry_time": datetime(2024, 1, 2, 0, 0), "exit_time": None},
+    ]
+    result = _total_deployed_days(trades)
+    assert result is not None
+    assert result == pytest.approx(1 / 24, abs=1e-9)
+
+
+def test_total_deployed_days_returns_none_when_no_closed_trades() -> None:
+    assert _total_deployed_days([]) is None
+    assert _total_deployed_days([{"entry_time": datetime(2024, 1, 1), "exit_time": None}]) is None
+
+
+def test_total_deployed_days_ignores_string_timestamps() -> None:
+    # Coerced run dicts may have ISO strings — they must not count.
+    trades = [{"entry_time": "2024-01-01T00:00:00", "exit_time": "2024-01-01T04:00:00"}]
+    assert _total_deployed_days(trades) is None
+
+
+# ── analyze_run deployed-time annualization ────────────────────────────
+
+
+def _trades_with_timestamps(n: int, hold_hours: float = 4.0) -> list[dict]:
+    """Trades with entry/exit datetimes at a fixed holding period."""
+    import random
+    from datetime import timedelta
+    rng = random.Random(7)
+    base = datetime(2024, 1, 1)
+    out = []
+    for i in range(n):
+        entry = base + timedelta(days=i % 300)
+        exit_ = entry + timedelta(hours=hold_hours)
+        pnl = rng.gauss(0.02, 2.0)
+        out.append({
+            "realized_pnl_amount": pnl,
+            "entry_trend_regime": "UP",
+            "entry_time": entry,
+            "exit_time": exit_,
+        })
+    return out
+
+
+def test_analyze_run_uses_deployed_days_when_exit_times_present() -> None:
+    # 150 trades × 4h hold over a 365-day window = 25 deployed days.
+    # Deployed annualization should produce a much larger number than
+    # calendar annualization (365 days vs 25 days denominator).
+    run = {
+        "start_time": datetime(2024, 1, 1),
+        "end_time": datetime(2025, 1, 1),
+        "return_pct": 30.0,
+        "max_drawdown_pct": 5.0,
+        "geometric_return_pct_at_alloc_90": 25.0,
+    }
+    trades = _trades_with_timestamps(150, hold_hours=4)
+    out = analyze_run(run, trades)
+
+    assert out["deployed_days"] is not None
+    assert out["deployed_days"] < out["window_days"]
+    assert out["capital_utilization_pct"] is not None
+    assert out["capital_utilization_pct"] < 100.0
+
+    # Annualized on deployed days > annualized on calendar days
+    # because deployed_days < window_days so the exponent is larger.
+    calendar_annualized = annualize_geometric_return(25.0, out["window_days"])
+    deployed_annualized = out["annualized_geometric_return_pct_at_alloc_90"]
+    assert deployed_annualized is not None
+    assert calendar_annualized is not None
+    assert deployed_annualized > calendar_annualized
+
+
+def test_analyze_run_falls_back_to_window_days_without_exit_times() -> None:
+    # Trades without exit_time (open positions / legacy) → window_days path.
+    run = {
+        "start_time": datetime(2024, 1, 1),
+        "end_time": datetime(2025, 1, 1),
+        "return_pct": 30.0,
+        "max_drawdown_pct": 5.0,
+        "geometric_return_pct_at_alloc_90": 25.0,
+    }
+    out = analyze_run(run, _trades_with_clear_edge(150))
+    assert out["deployed_days"] is None
+    assert out["capital_utilization_pct"] is None
+    # annualized should equal the calendar-window result (rounded to 4dp)
+    expected = annualize_geometric_return(25.0, out["window_days"])
+    assert out["annualized_geometric_return_pct_at_alloc_90"] == pytest.approx(expected, abs=1e-3)
