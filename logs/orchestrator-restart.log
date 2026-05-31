@@ -1,9 +1,0 @@
-INFO:     Started server process [28324]
-INFO:     Waiting for application startup.
-{"profile": "dev", "host": "127.0.0.1", "port": 8082, "jvm_base_url": "http://127.0.0.1:8081", "jvm_auth_mode": "dev_bypass", "event": "orchestrator.startup", "level": "info", "ts": "2026-05-01T04:07:00.860445Z"}
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://127.0.0.1:8082 (Press CTRL+C to quit)
-{"event": "HTTP Request: GET http://127.0.0.1:8081/actuator/health/liveness \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-01T04:07:20.677737Z"}
-{"queue_id": "8482c4c4-b5b4-42dc-925c-99b07f7adc5d", "strategy_code": "MMR", "iter": 1, "budget": 5, "event": "tick.claimed", "level": "info", "ts": "2026-05-01T04:07:32.742205Z"}
-{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/dev/login-as \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-01T04:07:32.795717Z"}
-{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 404 \"", "level": "info", "ts": "2026-05-01T04:07:34.016607Z"}
