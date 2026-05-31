@@ -137,6 +137,7 @@ async def get_signal_health_counters(conn, signal_id: UUID) -> dict[str, Any]:
         """
         SELECT
             MAX(ts)                                                        AS last_fire_ts,
+            MAX(produced_at)                                               AS last_produced_at,
             COUNT(*) FILTER (WHERE ts > NOW() - INTERVAL '24 hours')        AS fires_24h,
             COUNT(*) FILTER (WHERE ts > NOW() - INTERVAL '7 days')          AS fires_7d
         FROM signal_history
@@ -146,9 +147,10 @@ async def get_signal_health_counters(conn, signal_id: UUID) -> dict[str, Any]:
         signal_id,
     )
     return {
-        "last_fire_ts": row["last_fire_ts"] if row else None,
-        "fires_24h":    int(row["fires_24h"]) if row else 0,
-        "fires_7d":     int(row["fires_7d"])  if row else 0,
+        "last_fire_ts":     row["last_fire_ts"]     if row else None,
+        "last_produced_at": row["last_produced_at"] if row else None,
+        "fires_24h":        int(row["fires_24h"])   if row else 0,
+        "fires_7d":         int(row["fires_7d"])    if row else 0,
     }
 
 

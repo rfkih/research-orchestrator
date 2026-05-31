@@ -74,6 +74,7 @@ class SignalHealth(BaseModel):
     health: str                 # green | amber | red
     healthReason: str | None
     lastFireTs: str | None
+    lastProducedAt: str | None  # wall-clock write time — pipeline liveness
     lastFireAgeSeconds: int | None
     expectedFireSeconds: int | None
     coverage7dRatio: float | None
@@ -225,6 +226,7 @@ async def get_signal(
             health=health,
             healthReason=reason,
             lastFireTs=counters["last_fire_ts"].isoformat() if counters["last_fire_ts"] else None,
+            lastProducedAt=counters["last_produced_at"].isoformat() if counters["last_produced_at"] else None,
             lastFireAgeSeconds=last_age,
             expectedFireSeconds=expected,
             coverage7dRatio=coverage,
