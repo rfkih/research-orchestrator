@@ -65,11 +65,14 @@ fires_30d AS (
 ),
 feature_max_ts AS (
     SELECT
-        signal_id,
-        MAX(ts) AS latest_feature_ts
-    FROM feature_values
-    WHERE signal_id IN (SELECT signal_id FROM bound_signals)
-    GROUP BY signal_id
+        bs.signal_id,
+        MAX(fv.ts) AS latest_feature_ts
+    FROM bound_signals bs
+    JOIN model_registry mr ON mr.id = bs.model_id
+    JOIN feature_values fv
+        ON fv.symbol   = mr.symbol
+       AND fv.interval = COALESCE(mr.serving_interval, mr.interval)
+    GROUP BY bs.signal_id
 )
 SELECT
     bs.signal_id,

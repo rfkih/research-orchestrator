@@ -137,7 +137,7 @@ async def _resolve_artifacts(
     if model_id is not None:
         row = await conn.fetchrow(
             "SELECT id, artifact_sha256, feature_set, metrics, status, "
-            "       deployment_ready, family, purpose, symbol "
+            "       family, purpose, symbol "
             "FROM model_registry WHERE id = $1",
             model_id,
         )

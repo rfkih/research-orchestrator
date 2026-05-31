@@ -28,7 +28,7 @@ async def insert_activity(
         uuid4(), session_id, agent_name, activity_type, strategy_code,
         title, details, related_id, related_type, status,
     )
-    return {"activity_id": row["activity_id"], "created_at": row["created_at"]}
+    return {"activity_id": row["activity_id"], "created_at": row["created_time"]}
 
 
 async def list_activities(
