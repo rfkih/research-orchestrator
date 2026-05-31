@@ -554,6 +554,18 @@ async def _execute_after_claim(
         strategy_code=strategy_code,
         ml_overrides=ml_combo,
     )
+    # 2026-05-31 fix: the VBO engine family implements its OWN in-engine
+    # ML gate, reading the sentinels from the StrategySpec params via
+    # VboTuning.from(spec) (s.paramBoolean("_ml_gate_enabled"), etc.) —
+    # NOT via RiskGuardService's V100 strategyMl*Overrides path that
+    # DCB-style engines use. For those engines the sentinels MUST also
+    # remain in strategyParamOverrides or VboTuning.mlGateEnabled() is
+    # always false and the gate silently fail-opens (bit-identical to
+    # ALGO). The JVM's KNOWN_PARAM_KEYS for these codes already whitelists
+    # the three sentinels. RiskGuardService-path engines ignore unknown
+    # spec params, so re-adding them is harmless redundancy there.
+    if strategy_code.upper() in sweep.IN_SPEC_ML_GATE_CODES and ml_combo:
+        regular_combo = {**regular_combo, **ml_combo}
     payload = _build_submit_payload(
         account_strategy_id=as_row["account_strategy_id"],
         strategy_code=strategy_code,

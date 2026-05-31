@@ -1,0 +1,1 @@
+Systematic mean-reversion strategies on high-volatility cryptocurrency assets have attracted sustained research interest, yet empirical evidence for persistent, statistically significant edge remains scarce. Solana native token (SOLUSDT) exhibits pronounced oscillatory dynamics on the four-hour bar, making it a natural candidate for oscillator-driven reversal systems.

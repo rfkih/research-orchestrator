@@ -1,0 +1,19 @@
+{
+  "entry_type": "RUN_SUMMARY",
+  "strategy_code": "VBO_RESEARCH",
+  "title": "RESUME_LOCKOUT_CLEARED_2026-05-29 -- operator explicit override after infra fix (blackheart-inference DB auth corrected; VboParams canonical axis names provided)",
+  "content": "Operator explicitly re-invoked the researcher after fixing BOTH infrastructure blockers documented in prior ARCHETYPE_EXHAUSTION row 62104dc7 (created 2026-05-29T16:07:41Z, ~6min before this row): (1) blackheart-inference DB credentials corrected in .env and service restarted, so POST /inference/backfill for regime_btc_v3 should now succeed; (2) canonical VboParams axis names provided directly in the resume prompt (compressionBbWidthPctMax, compressionAdxMax, adxEntryMin/Max, atrExpansionMin, rvolMin, bodyRatioMin, clvMin/Max, longRsiMax, shortRsiMin, stopAtrBuffer, tp1R, breakEvenR, runnerPhase2R, minSignalScore) so the new sweep will exercise real cells instead of collapsing to default-config bit-identicals. This row clears the standing 24h lockout per operator authority. Standing hypothesis 500f6491 remains ACTIVE and is the basis for the upcoming HYBRID retry; this row does not introduce a new hypothesis. Resume protocol next steps: backfill regime_btc_v3 signal_history, verify rows, queue VBO_RESEARCH HYBRID with correct axes, drain, paired-delta, escalate to walk-forward only on POSITIVE_DELTA with p<0.05.",
+  "structured_data": {
+    "terminal": "RESUME_LOCKOUT_CLEARED",
+    "overridden_terminal_row": "62104dc7-9a72-4346-8eb8-97abca615a77",
+    "overridden_terminal_title": "ARCHETYPE_EXHAUSTION_2026-05-29",
+    "override_authority": "operator_explicit_in_resume_prompt",
+    "active_hypothesis_id": "500f6491-66e6-4a14-bb40-3531f72e20cf",
+    "infra_fixes_claimed_by_operator": [
+      "blackheart-inference .env DB password corrected; service restarted",
+      "VboParams canonical sweep axis names provided"
+    ],
+    "next_action": "POST /inference/backfill for regime_btc_v3 x BTCUSDT x 1h, verify signal_history rows, then queue VBO_RESEARCH HYBRID"
+  },
+  "status": "ACTIVE"
+}

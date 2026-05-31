@@ -30,6 +30,16 @@ ML_SENTINEL_GATE_ENABLED: str = "_ml_gate_enabled"
 ML_SENTINEL_SIGNAL_NAME: str = "_ml_signal_name"
 ML_SENTINEL_SHADOW_MODE: str = "_ml_shadow_mode"
 
+# Engines that implement their own in-engine ML regime gate, reading the
+# sentinels straight off the StrategySpec params (VboTuning.from(spec)
+# does s.paramBoolean("_ml_gate_enabled") / s.paramString("_ml_signal_name"))
+# instead of going through RiskGuardService's V100 strategyMl*Overrides
+# maps. For these codes tick.py must KEEP the sentinels in
+# strategyParamOverrides (in addition to building the V100 maps) or
+# VboTuning.mlGateEnabled() stays false and the gate fail-opens silently.
+# Keep uppercase. See VolatilityBreakoutEngine.passesMLGate + VboTuning.from.
+IN_SPEC_ML_GATE_CODES: frozenset[str] = frozenset({"VBO", "VBO_RESEARCH"})
+
 ML_SENTINELS: frozenset[str] = frozenset(
     {ML_SENTINEL_GATE_ENABLED, ML_SENTINEL_SIGNAL_NAME, ML_SENTINEL_SHADOW_MODE}
 )
