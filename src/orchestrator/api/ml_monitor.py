@@ -208,7 +208,11 @@ async def get_ml_monitor(
             fires_7d=int(r["fires_7d"]),
             interval_seconds=expected_fire_seconds,
         )
-        last_age = _last_fire_age_seconds(r["last_fire_ts"])
+        # Pipeline liveness = time since the signal was WRITTEN (produced_at), NOT the bar
+        # timestamp (last_fire_ts). signal_history.ts is the open-keyed bar the prediction is
+        # FOR, so a freshly-written 1h signal is already ~1 interval "old" by ts — which trips
+        # derive_health's 1.5×/3× cadence gates every bar on a perfectly healthy pipeline.
+        last_age = _last_fire_age_seconds(r.get("last_produced_at"))
         wf_auc = _extract_auc(r["model_metrics"])
         purpose: str | None = r["model_purpose"]
         health, reason = derive_health(

@@ -311,7 +311,10 @@ async def get_signal(
     coverage = _coverage_ratio(
         fires_7d=counters["fires_7d"], interval_seconds=expected,
     )
-    last_age = _last_fire_age_seconds(counters["last_fire_ts"])
+    # Liveness age = time since the signal was WRITTEN (produced_at), not the bar ts
+    # (open-keyed → reads ~1 interval stale every bar on a healthy pipeline). Mirrors
+    # the same fix in ml_monitor.get_ml_monitor; both feed the interval-aware derive_health.
+    last_age = _last_fire_age_seconds(counters["last_produced_at"])
     metrics: dict[str, Any] = row.get("model_metrics") or {}
     wf_auc = _extract_auc(metrics)
     health, reason = derive_health(
