@@ -25,6 +25,10 @@ dependencies = [
     # Redis async client — activity pub/sub for real-time frontend streaming.
     # Optional at runtime: when ORCH_REDIS_URL is unset, publish is skipped.
     "redis[asyncio]>=5.0",
+    # load_dotenv() in __main__.py reads .env for non-Settings modules.
+    # In Docker the env vars are injected; load_dotenv() is a no-op. The
+    # import must not fail, so python-dotenv is a hard dep, not optional.
+    "python-dotenv>=1.0,<2",
 ]
 
 [project.optional-dependencies]

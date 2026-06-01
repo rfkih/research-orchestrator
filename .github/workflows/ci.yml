@@ -1,0 +1,152 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false  # never cancel master builds — a half-pushed image is worse than a slow queue
+
+permissions:
+  contents: write
+  packages: write
+  deployments: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_ORCHESTRATOR: ${{ github.repository_owner }}/blackheart-orchestrator
+
+jobs:
+  test:
+    name: Test (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install (with dev extras)
+        run: pip install ".[dev]"
+
+      - name: Run tests
+        # Skip integration tests — they require a running JVM + DB.
+        # Unit tests only in CI; integration coverage stays in the local dev loop.
+        run: PYTHONPATH=src pytest -m "not integration" -q
+
+  build-image:
+    name: Build + push GHCR image
+    needs: test
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      sha_tag: ${{ steps.tag.outputs.sha_tag }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Compute tag (short SHA)
+        id: tag
+        run: echo "sha_tag=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3.6.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push orchestrator image
+        uses: docker/build-push-action@5cd11c3a4ced054e52742c5fd54dca954e0edd85 # v6.7.0
+        with:
+          context: .
+          file: ./Dockerfile
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_ORCHESTRATOR }}:${{ steps.tag.outputs.sha_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_ORCHESTRATOR }}:latest
+          push: true
+          cache-from: type=gha,scope=orchestrator
+          cache-to: type=gha,scope=orchestrator,mode=max
+
+  deploy-orchestrator:
+    name: Deploy orchestrator to VPS (docker)
+    needs: build-image
+    if: vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    environment: production-vps
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          SSH_HOST: ${{ vars.VPS_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+          echo "SSH_HOST=${SSH_HOST}" >> "$GITHUB_ENV"
+          SSH_USER=$(printf '%s' "${{ vars.VPS_USER }}" | tr -d '[:space:]')
+          echo "SSH_USER=${SSH_USER}" >> "$GITHUB_ENV"
+
+      - name: Capture rollback tag
+        run: |
+          PREV=$(ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" "docker inspect blackheart-orchestrator --format '{{.Config.Image}}' 2>/dev/null | awk -F: '{print \$NF}' || echo NONE")
+          echo "PREV_TAG=${PREV:-NONE}" >> "$GITHUB_ENV"
+          echo "Previous orchestrator tag: ${PREV}"
+
+      - name: Pin new tag in /home/starsky/blackheart/.env
+        env:
+          NEW_TAG: ${{ needs.build-image.outputs.sha_tag }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
+            "set -e && touch /home/starsky/blackheart/.env && grep -vE '^(ORCH_TAG|ORCH_IMAGE)=' /home/starsky/blackheart/.env > /tmp/.env.orch || true && echo 'ORCH_TAG=${NEW_TAG}' >> /tmp/.env.orch && mv /tmp/.env.orch /home/starsky/blackheart/.env"
+          echo "NEW_TAG=${NEW_TAG}" >> "$GITHUB_ENV"
+
+      - name: Pull + recreate orchestrator container
+        run: |
+          ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
+            "cd /home/starsky/blackheart && docker compose pull orchestrator && docker compose up -d orchestrator"
+
+      - name: Orchestrator healthcheck (with rollback on failure)
+        run: |
+          set +e
+          ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
+            'for i in $(seq 1 12); do curl -fsS http://127.0.0.1:8082/healthz >/dev/null && exit 0; sleep 10; done; exit 1'
+          HEALTH=$?
+          set -e
+          if [ "$HEALTH" -ne 0 ]; then
+            echo "::error::Orchestrator healthcheck failed. Rolling back to ${PREV_TAG}."
+            if [ "${PREV_TAG}" != "NONE" ]; then
+              ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
+                "set -e && grep -v '^ORCH_TAG=' /home/starsky/blackheart/.env > /tmp/.env.rollback && echo 'ORCH_TAG=${PREV_TAG}' >> /tmp/.env.rollback && mv /tmp/.env.rollback /home/starsky/blackheart/.env && cd /home/starsky/blackheart && docker compose up -d orchestrator"
+            fi
+            exit 1
+          fi
+          echo "Orchestrator deploy ${NEW_TAG} healthy."
+
+      - name: Prune stale Docker images
+        if: success()
+        run: |
+          ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
+            "docker image prune -af 2>&1 | tail -1"
+
+      - name: Tag successful production deploy
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="deploy/prod/${GITHUB_SHA::8}"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f "ref=refs/tags/${TAG}" \
+            -f "sha=${GITHUB_SHA}" \
+            > /dev/null && echo "Tagged ${TAG}" || echo "::warning::Tag ${TAG} may already exist (non-fatal)"
