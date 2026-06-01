@@ -534,8 +534,14 @@ async def _execute_after_claim(
             # +1 for the current in-flight trial — its audit row has
             # iteration_id=NULL until step 5 backfills, so the COUNT
             # query (filtered to completed rows only) excludes it.
-            cumulative_trials = await audit_repo.count_cumulative_trials(
-                conn, strategy_code
+            #
+            # DSR multiplicity is the DATA-UNIVERSE trial count (every
+            # COMPLETED trial on this symbol × interval, regardless of
+            # strategy_code) — not the strategy_code-scoped count, which
+            # under-counts multiplicity because it resets on every
+            # archetype pivot (V93). ``instrument`` is the symbol here.
+            cumulative_trials = await audit_repo.count_data_universe_trials(
+                conn, instrument, interval_name
             ) + 1
 
     # ── Step 4: submit backtest, poll for completion ──────────────────
