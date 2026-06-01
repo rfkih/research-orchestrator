@@ -21,8 +21,16 @@ per-trade PnL series is fetched so the Bailey-LdP bootstrap fallback fires on
 degenerate closed-form cases exactly as live. (symbol, interval) come from the
 ``backtest_run`` row.
 
-Idempotent: re-running recomputes and overwrites with the same values. Safe to
-run repeatedly (e.g. after more research extends the universe count).
+Idempotent, but NOT a routine job: it recomputes with the CURRENT universe
+count, which grows as research continues. Re-running later lowers DSR for old
+rows (more trials → more deflation) — the honest direction, but it means
+backfilled historical rows are scored against today's multiplicity while
+live-written rows pin theirs at tick time. Run once after this fix ships; only
+re-run deliberately. Note: ``backtest_run.deflated_sharpe`` (data-universe
+n_trials, post-B1) will differ from the same run's
+``research_iteration_log.metrics_snapshot.analysis.dsr`` (vintage n_trials at
+tick time) — the column is the leaderboard's live source; the snapshot is the
+historical record. No consumer joins the two.
 
 Usage:
     PYTHONPATH=src python scripts/backfill_backtest_dsr.py [--dry-run]
@@ -111,10 +119,15 @@ async def main() -> None:
                 skipped += 1
                 continue
 
-            # Per-trade PnL series for the bootstrap fallback (mirrors live).
+            # Per-trade PnL series for the bootstrap fallback. MUST match the
+            # live analyzer exactly: trades.fetch_trades selects ALL rows for the
+            # run (no exit_time filter) and analyze builds pnls from every
+            # realized_pnl_amount. Filtering exit_time here would shrink n (risking
+            # a spurious n<30 skip) and change which DSR branch fires on
+            # non-Gaussian PnLs — diverging from what the live wire writes
+            # (quant-reviewer point 1).
             trades = await conn.fetch(
-                "SELECT realized_pnl_amount FROM backtest_trade "
-                "WHERE backtest_run_id = $1 AND exit_time IS NOT NULL",
+                "SELECT realized_pnl_amount FROM backtest_trade WHERE backtest_run_id = $1",
                 run_id,
             )
             pnls = [_f(t["realized_pnl_amount"]) or 0.0 for t in trades]
