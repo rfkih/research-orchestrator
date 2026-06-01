@@ -45,7 +45,10 @@ jobs:
         env:
           ORCH_AUTH_TOKEN: ci-test-token
           ORCH_DB_DSN: postgresql://x:y@127.0.0.1:5432/ci
-        run: PYTHONPATH=src pytest -m "not integration" -q
+        # test_contract_drift.py reads files outside the repo (.claude/agents/
+        # and sibling blackheart-trading-engine/). Those paths only exist in the
+        # local multi-repo workspace; skip in CI.
+        run: PYTHONPATH=src pytest -m "not integration" --ignore=tests/test_contract_drift.py -q
 
   build-image:
     name: Build + push GHCR image
