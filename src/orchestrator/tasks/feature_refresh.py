@@ -43,7 +43,12 @@ async def hourly_feature_refresh(settings: Settings) -> None:
             ) as client:
                 response = await client.post(
                     f"{settings.ingest_base_url}/compute/refresh",
-                    json={},
+                    # Incremental: compute only from max(feature_values.ts) to now,
+                    # not a full 180-day recompute. Full recompute every hour was
+                    # writing 900+ rows/feature and racing the bar_event_consumer —
+                    # if the refresh won the race, rows_written=0 suppressed the
+                    # inference webhook, flipping source from stream→catchup_scan.
+                    json={"incremental": True},
                 )
                 response.raise_for_status()
                 result: dict[str, Any] = response.json()
