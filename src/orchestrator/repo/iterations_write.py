@@ -38,6 +38,42 @@ async def next_iteration_number(conn: asyncpg.Connection, strategy_code: str) ->
     return int(val)
 
 
+async def update_backtest_run_dsr(
+    conn: asyncpg.Connection,
+    *,
+    backtest_run_id: UUID,
+    deflated_sharpe: float | None,
+    dsr_n_trials: int | None,
+) -> None:
+    """Persist the analyzer's DSR onto the JVM-owned ``backtest_run`` row.
+
+    V134 added ``backtest_run.deflated_sharpe`` / ``dsr_n_trials`` for the
+    backtest leaderboard to rank on, but the writer was never wired — the DSR
+    lived only in ``research_iteration_log.metrics_snapshot``, leaving the
+    column NULL for every row and the leaderboard's
+    ``deflated_sharpe IS NOT NULL`` feed empty. This closes that gap on the
+    live path; existing rows are handled by the one-time backfill script.
+
+    ``backtest_run`` is owned by the trading JVM (schema-wise); the
+    orchestrator is a DML-only client, so a scoped single-row UPDATE is
+    in-contract. No-op when ``deflated_sharpe`` is None (e.g. n<30 or a
+    degenerate distribution) so we never overwrite with nulls spuriously.
+    """
+    if deflated_sharpe is None:
+        return
+    await conn.execute(
+        """
+        UPDATE backtest_run
+           SET deflated_sharpe = $2,
+               dsr_n_trials    = $3
+         WHERE backtest_run_id = $1
+        """,
+        backtest_run_id,
+        deflated_sharpe,
+        dsr_n_trials,
+    )
+
+
 async def insert_iteration(
     conn: asyncpg.Connection,
     *,

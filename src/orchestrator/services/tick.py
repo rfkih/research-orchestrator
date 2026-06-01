@@ -738,6 +738,16 @@ async def _execute_after_claim(
                 ),
                 created_by=agent_name,
             )
+            # Persist DSR onto the JVM-owned backtest_run row so the backtest
+            # leaderboard (which ranks on backtest_run.deflated_sharpe) sees it.
+            # V134 added the column but never wired the writer — without this
+            # the leaderboard's "deflated_sharpe IS NOT NULL" feed stays empty.
+            await iterations_write.update_backtest_run_dsr(
+                conn,
+                backtest_run_id=backtest_run_id,
+                deflated_sharpe=analysis.get("dsr"),
+                dsr_n_trials=analysis.get("dsr_n_trials"),
+            )
             attached = await queue_write.attach_iteration(
                 conn,
                 queue_id,
