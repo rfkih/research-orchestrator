@@ -39,6 +39,12 @@ jobs:
       - name: Run tests
         # Skip integration tests — they require a running JVM + DB.
         # Unit tests only in CI; integration coverage stays in the local dev loop.
+        # ORCH_* env vars satisfy the module-level Settings() in main.py (executed
+        # at import time via `app = create_app()`). Tests override with explicit
+        # Settings fixtures; the module-level app is never exercised by them.
+        env:
+          ORCH_AUTH_TOKEN: ci-test-token
+          ORCH_DB_DSN: postgresql://x:y@127.0.0.1:5432/ci
         run: PYTHONPATH=src pytest -m "not integration" -q
 
   build-image:
