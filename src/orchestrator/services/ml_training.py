@@ -35,6 +35,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 from uuid import UUID
 
 import asyncpg
@@ -44,6 +45,78 @@ from ..errors import OrchestratorError
 from ..repo import ml_training_runs as repo
 
 logger = logging.getLogger(__name__)
+
+
+# ── Subprocess environment propagation (2026-06-02) ─────────────────
+#
+# Root cause of INFRA_FAIL_2026-06-02: the train subprocess inherited
+# the orchestrator's environment but blackheart_train reads its DB
+# config from ``TRAIN_*`` env vars (env_prefix="TRAIN_", see
+# blackheart-train/src/blackheart_train/settings.py), which the
+# orchestrator does NOT set. With no TRAIN_DB_* present the train
+# Settings fell back to host="localhost" — inside the orchestrator
+# container Postgres is a separate compose service, so every connect
+# died with "connection refused" (loader.py:495). Separately, the
+# train ``--register`` / experiment-tracking client read
+# TRAIN_ORCHESTRATOR_TOKEN (default = dev sentinel) which does not
+# match the prod orchestrator's X-Orch-Token → HTTP 401 auth_bad_token
+# on tracking.
+#
+# Fix: derive the TRAIN_* vars from the orchestrator's already-resolved
+# Settings (db_dsn + auth_token + port) and inject them into the child
+# env. This is pure subprocess wiring — it does NOT change Settings
+# defaults, the auth shape, or the statistical contract. The child gets
+# the SAME DB the orchestrator itself connects to, and a tracking token
+# the orchestrator will accept.
+
+
+def _dsn_to_train_db_env(dsn: str) -> dict[str, str]:
+    """Parse a libpq/asyncpg postgres DSN into the TRAIN_DB_* env vars
+    blackheart_train.settings.Settings reads. Returns only the keys we
+    can resolve from the DSN; absent components are left to the child's
+    own defaults rather than emitting empty overrides."""
+    parts = urlsplit(dsn)
+    env: dict[str, str] = {}
+    if parts.hostname:
+        env["TRAIN_DB_HOST"] = parts.hostname
+    if parts.port:
+        env["TRAIN_DB_PORT"] = str(parts.port)
+    # urlsplit keeps the leading "/" on the path; the db name is the rest.
+    dbname = parts.path.lstrip("/")
+    if dbname:
+        env["TRAIN_DB_NAME"] = dbname
+    if parts.username:
+        env["TRAIN_DB_USER"] = unquote(parts.username)
+    if parts.password is not None:
+        env["TRAIN_DB_PASSWORD"] = unquote(parts.password)
+    return env
+
+
+def build_subprocess_env(settings: Settings) -> dict[str, str]:
+    """Construct the environment for the blackheart_train subprocess.
+
+    Inherits the orchestrator's own ``os.environ`` (so PATH, venv,
+    locale, etc. survive) and overlays the ``TRAIN_*`` vars derived from
+    the orchestrator's resolved config:
+
+    - ``TRAIN_DB_*``         from ``settings.db_dsn`` — same DB the
+                             orchestrator connects to.
+    - ``TRAIN_ORCHESTRATOR_URL``   the loopback orchestrator
+                             (``--register`` + tracking POST target).
+    - ``TRAIN_ORCHESTRATOR_TOKEN`` the orchestrator's X-Orch-Token so
+                             registration + experiment tracking auth.
+
+    Pure function (modulo reading ``os.environ`` once) so the contract
+    is unit-testable without spawning anything.
+    """
+    env = dict(os.environ)
+    env.update(_dsn_to_train_db_env(settings.db_dsn.get_secret_value()))
+    # The train worker posts to the orchestrator itself for --register
+    # and experiment tracking. Point it at this orchestrator's loopback
+    # bind + the secret it will accept.
+    env["TRAIN_ORCHESTRATOR_URL"] = f"http://127.0.0.1:{settings.port}"
+    env["TRAIN_ORCHESTRATOR_TOKEN"] = settings.auth_token.get_secret_value()
+    return env
 
 
 # ── Public entry points ─────────────────────────────────────────────
@@ -232,6 +305,10 @@ async def _run_subprocess(
                 cwd=settings.ml_training_repo_path,
                 stdout=stdout_f,
                 stderr=stderr_f,
+                # 2026-06-02 — inject TRAIN_* env so the child reaches the
+                # orchestrator's DB (not localhost) and authenticates its
+                # registration/tracking POSTs. See build_subprocess_env.
+                env=build_subprocess_env(settings),
             )
         finally:
             # The subprocess inherits the fds via dup(); we can close

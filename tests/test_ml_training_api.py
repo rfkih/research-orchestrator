@@ -21,12 +21,14 @@ from fastapi.testclient import TestClient
 from orchestrator.config import Settings
 from orchestrator.main import create_app
 from orchestrator.services.ml_training import (
+    _dsn_to_train_db_env,
     _extract_ids,
     _parse_summary,
     _read_file_full,
     _read_file_tail,
     _tail_text,
     build_cli_args,
+    build_subprocess_env,
 )
 
 
@@ -285,3 +287,69 @@ def test_read_file_full_returns_complete_content(tmp_path) -> None:
 
 def test_read_file_full_missing_returns_empty(tmp_path) -> None:
     assert _read_file_full(tmp_path / "missing.log") == ""
+
+
+# ── Subprocess env propagation (2026-06-02 INFRA_FAIL fix) ─────────
+
+
+def test_dsn_to_train_db_env_full_dsn() -> None:
+    """A complete DSN maps every component to its TRAIN_DB_* var. This
+    is the regression for INFRA_FAIL_2026-06-02 where the child fell
+    back to host=localhost inside the container."""
+    env = _dsn_to_train_db_env(
+        "postgresql://blackheart_research:s3cret@db:5432/trading_db"
+    )
+    assert env == {
+        "TRAIN_DB_HOST": "db",
+        "TRAIN_DB_PORT": "5432",
+        "TRAIN_DB_NAME": "trading_db",
+        "TRAIN_DB_USER": "blackheart_research",
+        "TRAIN_DB_PASSWORD": "s3cret",
+    }
+
+
+def test_dsn_to_train_db_env_percent_encoded_password() -> None:
+    """libpq DSNs URL-encode special chars in the password; the child
+    needs the decoded value."""
+    env = _dsn_to_train_db_env(
+        "postgresql://u:p%40ss%2Fword@host.internal:6543/bh"
+    )
+    assert env["TRAIN_DB_PASSWORD"] == "p@ss/word"
+    assert env["TRAIN_DB_USER"] == "u"
+    assert env["TRAIN_DB_HOST"] == "host.internal"
+    assert env["TRAIN_DB_PORT"] == "6543"
+    assert env["TRAIN_DB_NAME"] == "bh"
+
+
+def test_dsn_to_train_db_env_omits_absent_components() -> None:
+    """No port / no password in the DSN → those keys are absent (the
+    child keeps its own defaults) rather than empty-string overrides."""
+    env = _dsn_to_train_db_env("postgresql://justuser@onlyhost/onlydb")
+    assert env == {
+        "TRAIN_DB_HOST": "onlyhost",
+        "TRAIN_DB_NAME": "onlydb",
+        "TRAIN_DB_USER": "justuser",
+    }
+    assert "TRAIN_DB_PORT" not in env
+    assert "TRAIN_DB_PASSWORD" not in env
+
+
+def test_build_subprocess_env_overlays_train_vars() -> None:
+    """The full child env carries TRAIN_DB_* from the DSN plus the
+    orchestrator URL + token so registration/tracking authenticate.
+    Inherited os.environ keys survive (PATH present)."""
+    settings = Settings(
+        profile="dev",
+        auth_token="real-orch-token",
+        db_dsn="postgresql://bhr:pw@dbhost:5432/trading_db",
+        port=8082,
+    )
+    env = build_subprocess_env(settings)
+    assert env["TRAIN_DB_HOST"] == "dbhost"
+    assert env["TRAIN_DB_NAME"] == "trading_db"
+    assert env["TRAIN_DB_USER"] == "bhr"
+    assert env["TRAIN_DB_PASSWORD"] == "pw"
+    assert env["TRAIN_ORCHESTRATOR_URL"] == "http://127.0.0.1:8082"
+    assert env["TRAIN_ORCHESTRATOR_TOKEN"] == "real-orch-token"
+    # Inherited environment survives the overlay.
+    assert "PATH" in env or "Path" in env
