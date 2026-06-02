@@ -375,6 +375,38 @@ async def enqueue(
                 },
             )
 
+    # Pre-queue account_strategy existence check. The tick lifecycle resolves
+    # an account_strategy row at step 3 and 412s if absent — but only AFTER a
+    # queue row is claimed and an iteration slot spent. Check it here so a
+    # missing row (e.g. an archetype whose row didn't survive the VPS
+    # migration) is rejected up-front with a clear operator action, not
+    # discovered mid-drain as an INFRA_FAIL.
+    account_id = request.app.state.settings.research_account_id
+    as_id = await queue_write.find_account_strategy_id(
+        conn, strategy_code=body.strategy_code, account_id=account_id
+    )
+    if as_id is None:
+        raise OrchestratorError(
+            status_code=412,
+            error_code="account_strategy_missing",
+            message=(
+                f"No account_strategy row for strategy_code="
+                f"{body.strategy_code!r}"
+                + (f" on research account {account_id}" if account_id else "")
+                + ". The tick loop cannot run this sweep."
+            ),
+            retryable=False,
+            hint=(
+                "Operator must seed an account_strategy row (disabled + "
+                "simulated) for this strategy_code before enqueuing — e.g. via "
+                "POST /api/v1/account-strategies on the trading JVM."
+            ),
+            details={
+                "strategy_code": body.strategy_code,
+                "research_account_id": str(account_id) if account_id else None,
+            },
+        )
+
     row = await queue_write.insert_queue(
         conn,
         strategy_code=body.strategy_code,

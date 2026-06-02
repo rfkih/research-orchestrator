@@ -58,6 +58,16 @@ DEFAULT_MAX_WALL_CLOCK_S = 10800
 DEFAULT_MAX_CONSECUTIVE_WAITS = 3
 
 
+# Error codes that represent a non-self-healing config gap (operator must
+# act) rather than a transient infra outage (wait + retry). Drained ticks
+# hitting one of these terminate as CONFIG_FAIL, not INFRA_FAIL.
+_CONFIG_FAIL_ERROR_CODES: frozenset[str] = frozenset({
+    "account_strategy_missing",
+    "python_interpreter_missing",
+    "unknown_spec_name",
+})
+
+
 _HANDOFF_BY_TERMINAL: dict[str, str] = {
     "GRADUATE": (
         "Request graduation review on iteration_id=<id> before /walk-forward."
@@ -67,6 +77,11 @@ _HANDOFF_BY_TERMINAL: dict[str, str] = {
     ),
     "EMPTY_QUEUE": "Enqueue next sweep via POST /queue.",
     "INFRA_FAIL": "Journal INFRA_FAILURE; resume after orchestrator/JVM/DB healthy.",
+    "CONFIG_FAIL": (
+        "Non-retryable config gap (see last_error.error_code) — operator "
+        "action required; the failure will NOT self-heal on retry. Journal "
+        "an INFRA_FAILURE with a fix_pointer and escalate."
+    ),
     "MAX_ITERS_REACHED": (
         "Loop hit max_iters without a terminal verdict. Re-call /tick/drain to "
         "continue, or inspect the queue for stalled rows."
@@ -136,7 +151,17 @@ async def drain_ticks(
             tally["last_verdict_line"] = (
                 f"Tick failed: {envelope.error_code} — {envelope.message[:200]}"
             )
-            terminal_action = "INFRA_FAIL"
+            # Specific config-gap error codes won't self-heal on retry —
+            # route them to CONFIG_FAIL whose handoff tells the researcher to
+            # escalate immediately instead of waiting for DB/JVM to recover.
+            # (Kept as an explicit allowlist, not a blanket retryable=False
+            # check, so genuine infra errors like backtest_did_not_complete
+            # still read as INFRA_FAIL.)
+            terminal_action = (
+                "CONFIG_FAIL"
+                if envelope.error_code in _CONFIG_FAIL_ERROR_CODES
+                else "INFRA_FAIL"
+            )
             break
         except Exception as exc:  # noqa: BLE001
             # Unwrapped exception from run_tick — typically asyncpg.PostgresError

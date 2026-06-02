@@ -1,0 +1,20 @@
+{"detail": "ORCH_JVM_AUTH_MODE=dev_bypass \u2014 authenticating to the research JVM as the first user via /api/v1/dev/login-as. DO NOT promote this configuration to a shared host. Set ORCH_PROFILE=prod + ORCH_JVM_AUTH_MODE=service_account before exposing this orchestrator beyond loopback.", "jvm_auth_mode": "dev_bypass", "jvm_dev_login_email": "rfkih23@gmail.com", "event": "orchestrator.dev_warning", "level": "warning", "ts": "2026-05-30T04:56:48.881865Z"}
+{"detail": "ORCH_RESEARCH_ACCOUNT_ID is unset \u2014 account_strategy lookup falls back to 'first matching row' which can select an admin-owned row on a multi-account host.", "event": "orchestrator.dev_warning", "level": "warning", "ts": "2026-05-30T04:56:48.884541Z"}
+{"redis_url": "redis://127.0.0.1:6379/0", "event": "orchestrator.redis_connected", "level": "info", "ts": "2026-05-30T04:56:50.303868Z"}
+{"profile": "dev", "host": "0.0.0.0", "port": 8082, "jvm_base_url": "http://127.0.0.1:8081", "jvm_auth_mode": "dev_bypass", "event": "orchestrator.startup", "level": "info", "ts": "2026-05-30T04:56:50.427844Z"}
+{"event": "Activity log failed (non-fatal): 'created_at'", "level": "warning", "ts": "2026-05-30T05:47:44.329450Z"}
+{"count": 1, "event": "tick.recovered_stuck_rows", "level": "warning", "ts": "2026-05-30T05:47:52.678232Z"}
+{"queue_id": "0fd2f897-8ac3-49e4-8c88-ee8ef85f6ffe", "strategy_code": "DCB", "iter": 1, "budget": 40, "event": "tick.claimed", "level": "info", "ts": "2026-05-30T05:47:52.804493Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/dev/login-as \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-30T05:47:53.080316Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-30T05:47:53.852858Z"}
+{"queue_id": "0fd2f897-8ac3-49e4-8c88-ee8ef85f6ffe", "run_id": "10db8b8c-7524-42a4-b0e9-9341a2bb51ea", "combo": {"stopAtrMult": "2.0", "rvolMin": "1.3", "tpR": "1.9", "breakEvenR": "0.0", "adxEntryMin": "20"}, "event": "tick.submitted", "level": "info", "ts": "2026-05-30T05:47:53.854183Z"}
+{"event": "Activity log failed (non-fatal): 'created_at'", "level": "warning", "ts": "2026-05-30T05:47:53.890167Z"}
+{"queue_id": "35328b5f-21f6-4c0b-bbea-2eb9f84318a0", "strategy_code": "MMR", "iter": 1, "budget": 12, "event": "tick.claimed", "level": "info", "ts": "2026-05-30T05:53:00.431957Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-30T05:53:01.438676Z"}
+{"queue_id": "35328b5f-21f6-4c0b-bbea-2eb9f84318a0", "run_id": "2e8cb7b3-e8b6-42e8-a065-f21ad7f2d09d", "combo": {"extremeAtrMult": "2.4", "rsiOversoldMax": "22", "stopAtrBuffer": "0.8"}, "event": "tick.submitted", "level": "info", "ts": "2026-05-30T05:53:01.440471Z"}
+{"event": "Activity log failed (non-fatal): 'created_at'", "level": "warning", "ts": "2026-05-30T05:53:01.481981Z"}
+{"event": "Activity log failed (non-fatal): 'created_at'", "level": "warning", "ts": "2026-05-30T06:43:23.123636Z"}
+{"queue_id": "aa657443-9611-4bc7-9955-791f21c37598", "strategy_code": "DCB", "iter": 1, "budget": 1, "event": "tick.claimed", "level": "info", "ts": "2026-05-30T06:43:44.613804Z"}
+{"event": "HTTP Request: POST http://127.0.0.1:8081/api/v1/backtest \"HTTP/1.1 200 \"", "level": "info", "ts": "2026-05-30T06:43:45.534866Z"}
+{"queue_id": "aa657443-9611-4bc7-9955-791f21c37598", "run_id": "81e7dc60-c7d7-4972-9baa-8910ab1e33b4", "combo": {"tpR": 5.0, "adxEntryMin": 21, "_ml_gate_enabled": true, "_ml_signal_name": "regime_eth_v2", "_ml_shadow_mode": false}, "event": "tick.submitted", "level": "info", "ts": "2026-05-30T06:43:45.536222Z"}
+{"event": "Activity log failed (non-fatal): 'created_at'", "level": "warning", "ts": "2026-05-30T06:43:45.575125Z"}

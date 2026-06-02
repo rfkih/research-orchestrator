@@ -1,0 +1,8 @@
+{
+  "signal_id": "1526eb0a-2cc0-45e0-8f48-32a6dccfbd72",
+  "symbol": "BTCUSDT",
+  "interval_name": "1h",
+  "start": "2024-01-01T00:00:00Z",
+  "end": "2026-05-29T00:00:00Z",
+  "source": "historical_replay"
+}

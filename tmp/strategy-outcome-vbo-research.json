@@ -1,0 +1,51 @@
+{
+  "entry_type": "STRATEGY_OUTCOME",
+  "strategy_code": "VBO_RESEARCH",
+  "title": "STRATEGY_OUTCOME_2026-05-29 -- VBO_RESEARCH HYBRID BTC 1h x regime_btc_v3 FALSIFIED at infra layer: macro feature_values empty (dxy/vix/real_yield/term_spread all ~0 rows) defeats operator Fix 1; hyp 500f6491 untestable without macro backfill",
+  "content": "Session resumed VBO_RESEARCH HYBRID experiment per operator-explicit re-invocation after operator claimed infrastructure was fixed. Two operator-claimed fixes were tested:\n\nFIX 1 (blackheart-inference DB auth corrected): VERIFIED WORKING. POST /inference/backfill for regime_btc_v3 x BTCUSDT x 1h x [2024-01-01, 2026-05-29) returned 200 OK with rows_in_window=12818 and a real model_id+artifact_sha256 envelope. The InvalidPasswordError that blocked prior session is gone. The sidecar /readyz endpoint returns db=true. Fix 1 is real.\n\nFIX 2 (canonical VboParams axis names provided in resume prompt): NEVER REACHED. The axis names (compressionBbWidthPctMax, adxEntryMin, atrExpansionMin, rvolMin, tp1R, etc.) per VboParams.java are confirmed correct vs the prior wrong MMR-style names (entryAtrMult / stopAtrMult). Could not exercise this fix because the experiment was blocked one layer deeper.\n\nNEW BLOCKER (NOT in operator's prompt fix list): macro feature_values are essentially empty. The /inference/backfill call reported rows_written=0, rows_skipped_missing_features=12818. Root-cause check on the 20 features regime_btc_v3 requires (model 69619e36, feature_set.names from GET /models/{id}):\n\n  feature_name                  rows    earliest_ts                  latest_ts\n  real_yield_10y_level            2     2026-05-26 00:00:00+00       2026-05-27 00:00:00+00\n  term_spread_2s10s               3     2026-05-26 00:00:00+00       2026-05-28 00:00:00+00\n  vix_close                       3     2026-05-25 00:00:00+00       2026-05-27 00:00:00+00\n  stablecoin_supply_change_30d  487     2025-01-13                    2026-05-14\n  stablecoin_supply_change_7d   510     2024-12-21                    2026-05-14\n  fear_greed_value              565     2024-11-01                    2026-05-29\n  eth_btc_ratio_momentum_20d    951     2025-06-04                    2026-05-29\n  btc_funding_zscore_30d       2220     2024-05-17                    2026-05-26\n  btc_funding_8h               2227     2024-05-17                    2026-05-29\n  btc_realized_vol_30d         4079     2025-11-30                    2026-05-19\n  eth_btc_corr_24h             4295     2025-11-21                    2026-05-19\n  btc_realized_vol_7d         12673     2024-12-08                    2026-05-20\n  btc_log_return_24h          12817     2024-12-02                    2026-05-20\n  btc_volume_zscore_24h       12818     2024-12-01                    2026-05-20\n  dxy_close, dxy_momentum_20d, dxy_zscore_252d, dxy_zscore_30d           0 (registered in feature_registry, never computed)\n  vix_percentile_252d, real_yield_10y_change_20d                         0 (registered in feature_registry, never computed)\n\nLightGBM scores NULL when ANY input is NULL. So even for the most-recent 5 days where vix_close has rows, the model still has DXY/etc. missing on those bars. Every bar in the 2024-2026 window therefore has at least one missing input, hence 12818/12818 skipped.\n\nPer operator's explicit instruction in the resume prompt ('Do NOT retry if signal_history backfill fails again -- journal the failure, mark ARCHETYPE_EXHAUSTION, write paper, and stop'), hypothesis 500f6491 is now CLOSED.\n\nMechanism question (does regime_btc_v3 gate save VBO_RESEARCH on BTC 1h?) remains UNRESOLVED at the algo+ML mechanism layer. The closure is purely at the infrastructure layer: regime_btc_v3 cannot score on this backtest window until macro features are backfilled. That work is operator-only (blackheart-ingest macro pipeline, multi-source: FRED for DXY/real-yield/term-spread, equity sentiment API for VIX, etc.).\n\nThe canonical-VboParams-axis-names finding is preserved here for the next session: when macro backfill lands, the next VBO_RESEARCH HYBRID retry should sweep at minimum [adxEntryMin: [15,20,25], atrExpansionMin: [1.2,1.4,1.6], rvolMin: [1.0,1.3,1.5]] crossed with [_ml_gate_enabled: [true,false]] and [_ml_signal_name: ['regime_btc_v3']] sentinels.\n\nConstraint compliance audit (all UPHELD):\n- Hard rule #1 (BTC/ETH only): BTC.\n- Hard rule #2 (intervals 5m/15m/1h/4h): 1h.\n- Hard rule #3 (protected strategies untouchable): VBO_RESEARCH (research-mode clone), NOT prod VBO; defaults of LSR/VCB/VBO untouched.\n- Hard rule #6 (V11+V60 unchanged): no threshold loosening attempted.\n- Hard rule #10 (append-only): all findings via /journal POSTs; lockout-cleared row written via override not delete.\n- Hard rule #12 (reviewer authoritative): no plan submitted this session (blocked before queue stage).\n- Hard rule #13 (orchestrator-only): all actions via :8082 except feature_values diagnostic SELECT against trading_db (read-only, allowed for state inspection).",
+  "structured_data": {
+    "verdict": "INFRASTRUCTURE_BLOCKED_AT_FEATURE_LAYER",
+    "hypothesis_id": "500f6491-66e6-4a14-bb40-3531f72e20cf",
+    "hypothesis_status_after_session": "FALSIFIED_INFRA_LAYER",
+    "regime_btc_v3_model_id": "69619e36-4e14-4a28-b1c4-fbdb7ac8a7ca",
+    "regime_btc_v3_signal_id": "1526eb0a-2cc0-45e0-8f48-32a6dccfbd72",
+    "infrastructure_fixes_tested": {
+      "fix_1_inference_db_auth": {
+        "claim": "operator corrected blackheart-inference .env DB password and restarted service",
+        "verified_working": true,
+        "evidence": "POST /inference/backfill returned 200 OK with proper model_id and artifact_sha256 envelope; no InvalidPasswordError; sidecar /readyz db=true"
+      },
+      "fix_2_vbo_axis_names": {
+        "claim": "operator provided canonical VboParams axis names",
+        "verified_working": null,
+        "evidence": "Not reached; blocked one layer deeper"
+      }
+    },
+    "new_infrastructure_blocker": {
+      "description": "macro feature_values empty for regime_btc_v3 required inputs over backtest window",
+      "rows_in_window": 12818,
+      "rows_written": 0,
+      "rows_skipped_missing_features": 12818,
+      "missing_features": [
+        "dxy_close (0 rows)",
+        "dxy_momentum_20d (0 rows)",
+        "dxy_zscore_252d (0 rows)",
+        "dxy_zscore_30d (0 rows)",
+        "vix_percentile_252d (0 rows)",
+        "real_yield_10y_change_20d (0 rows)",
+        "vix_close (3 rows last 3 days only)",
+        "real_yield_10y_level (2 rows)",
+        "term_spread_2s10s (3 rows)"
+      ],
+      "blocker_type": "blackheart-ingest macro pipeline backfill (operator-only multi-source: FRED, equity API)"
+    },
+    "next_session_unblock_requirements": [
+      "Operator runs macro feature backfill for 2024-01-01 to 2026-05-29: dxy_close, dxy_momentum_20d, dxy_zscore_252d, dxy_zscore_30d, vix_close, vix_percentile_252d, real_yield_10y_level, real_yield_10y_change_20d, term_spread_2s10s. All sourced from FRED + equity APIs.",
+      "Then re-run POST /inference/backfill for signal_id 1526eb0a (regime_btc_v3) x BTCUSDT x 1h; expect rows_written > 12000.",
+      "Then re-queue VBO_RESEARCH HYBRID with correct VboParams axes: [adxEntryMin:[15,20,25], atrExpansionMin:[1.2,1.4,1.6], rvolMin:[1.0,1.3,1.5]] x [_ml_gate_enabled:[true,false], _ml_signal_name:['regime_btc_v3']].",
+      "Paired-delta gate on Sharpe (primary), then return+profit_factor for triangulation per playbook §7.45."
+    ],
+    "operator_instruction_compliance": "Operator's resume prompt explicitly stated: 'Do NOT retry if signal_history backfill fails again -- journal the failure, mark ARCHETYPE_EXHAUSTION, write paper, and stop. Do not ask questions.' This row + the ARCHETYPE_EXHAUSTION terminal + the paper satisfy that instruction."
+  },
+  "status": "ACTIVE"
+}

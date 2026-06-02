@@ -1,0 +1,72 @@
+{
+  "entry_type": "RUN_SUMMARY",
+  "strategy_code": "VBO_RESEARCH",
+  "title": "ARCHETYPE_EXHAUSTION_2026-05-29",
+  "content": "Session-level ARCHETYPE_EXHAUSTION terminal fires. This is the 4th+ ARCHETYPE_EXHAUSTION row in the trailing 7-day window (10 prior rows in the journal). VBO_RESEARCH HYBRID hypothesis 500f6491 was opened with operator-explicit lockout override (RESUME_LOCKOUT_CLEARED row 4fc67146) after operator claimed both prior infrastructure blockers were fixed.\n\nFIX 1 (blackheart-inference DB auth): VERIFIED WORKING by this session. POST /inference/backfill no longer 500s; returns 200 OK with correct model_id + artifact_sha256 envelope.\n\nFIX 2 (canonical VboParams axis names): NEVER REACHED. The new axes are confirmed correct from VboParams.java reference but could not be exercised.\n\nNEW SECOND-ORDER BLOCKER discovered + documented: macro feature_values are essentially empty. /inference/backfill reported rows_written=0, rows_skipped_missing_features=12818 (100% skip rate). Root cause: 7 of 20 features regime_btc_v3 requires (dxy_close, dxy_momentum_20d, dxy_zscore_252d, dxy_zscore_30d, vix_percentile_252d, real_yield_10y_change_20d, real_yield_10y_level) have 0 rows in feature_values; 3 more (vix_close, real_yield_10y_level, term_spread_2s10s) have 2-3 rows for the last 3 days only. LightGBM scores NULL on any NULL input, so every bar across 2024-2026 is missing at least one feature, hence 12818/12818 skipped.\n\nThe macro backfill is operator-only work in the blackheart-ingest macro pipeline (multi-source: FRED for DXY/real-yield/term-spread, equity sentiment API for VIX). Not researcher-fixable inside orchestrator edit boundary.\n\nFull diagnosis + per-feature row counts in companion STRATEGY_OUTCOME row dd869ae4.\n\nPer operator's explicit resume-prompt instruction ('Do NOT retry if signal_history backfill fails again -- journal the failure, mark ARCHETYPE_EXHAUSTION, write paper, and stop. Do not ask questions.'), this terminal fires now and the session ends.\n\nVBO_RESEARCH archetype is now FULLY EXHAUSTED in researcher edit scope: prior session (62104dc7) closed on wrong-axes + fail-open NEUTRAL paired-delta; this session closed on macro-feature-empty infra blocker before reaching paired-delta. The mechanism question (does regime_btc_v3 gate save VBO_RESEARCH on BTC 1h?) remains UNRESOLVED.\n\nCumulative VBO + VBO_RESEARCH ledger (6 prior + this = 7 attempts):\n- VBO BTC 1h ALGO (prior, extended-window) -- frequency-starved n<100\n- VBO BTC 1h CHAR (prior) -- characterization at production defaults\n- VBO ETH 4h ALGO (prior) -- catastrophic n=1-3\n- VBO BTC 15m ALGO (prior) -- edge destroyed at finer cadence\n- VBO BTC 1h HYBRID v1 (prior) -- infra-blocked at queue (PROTECTED_STRATEGY_CODES; resolved by V130 + VBO_RESEARCH clone)\n- VBO_RESEARCH BTC 1h HYBRID v2 (prior, queue 36bf3bbf) -- fail-open + wrong axes; closed NEUTRAL\n- VBO_RESEARCH BTC 1h HYBRID v3 (THIS session) -- macro feature_values empty; never queued\n\nFiles written this session:\n- C:/Project/blackheart-research-orchestrator/tmp/lockout-cleared.json -- intermediate body\n- C:/Project/blackheart-research-orchestrator/tmp/inference-backfill.json -- intermediate body  \n- C:/Project/blackheart-research-orchestrator/tmp/strategy-outcome-vbo-research.json -- intermediate body\n- C:/Project/blackheart-trading-engine/research/RESEARCH_PAPER_VBO_RESEARCH_BTCUSDT_1H_v3_HYBRID_2026-05-29.md -- filesystem paper\n- No DB paper generated (no queue was created this session; /papers/{queue_id}/generate needs a queue_id, and the prior queue 36bf3bbf already had paper v1 generated last session)\n\nNext-session recommendation: pivot to NON-VBO archetype. Re-open ATR_MOM-ETHUSDT-1h Path C resume (iter 3a7479e9-2244-4773-b8eb-a9cd44ebb9ad has 3 specialist CONCERN verdicts, no veto; ready for walk-forward; deferred by prior 2 sessions per VBO focus). OR fresh archetype on ETHUSDT. Do NOT retry VBO until operator backfills macro features.\n\nConstraint compliance audit (all UPHELD):\n- Hard rule #1 (BTC/ETH only): BTC.\n- Hard rule #2 (intervals 5m/15m/1h/4h): 1h.\n- Hard rule #3 (protected strategies untouchable): VBO_RESEARCH (research clone), NOT prod VBO.\n- Hard rule #6 (V11+V60 unchanged): no threshold loosening.\n- Hard rule #10 (append-only): all writes via /journal POSTs.\n- Hard rule #12 (reviewer authoritative): no plan submitted (blocked pre-queue).\n- Hard rule #13 (orchestrator-only): all actions via :8082 except read-only feature_values SELECT for diagnosis.",
+  "structured_data": {
+    "terminal": "ARCHETYPE_EXHAUSTION",
+    "active_hypothesis_id": "500f6491-66e6-4a14-bb40-3531f72e20cf",
+    "hypothesis_status_after_session": "FALSIFIED_INFRA_LAYER",
+    "companion_strategy_outcome_id": "dd869ae4-0823-405b-8eaf-1d66c2e31c8c",
+    "lockout_override_row_id": "4fc67146-ed02-4b04-8bee-9c3d4169d1ef",
+    "data_wishlist": [
+      {
+        "item": "Backfill macro features into feature_values for 2024-01-01 to 2026-05-29 BTCUSDT 1h: dxy_close, dxy_momentum_20d, dxy_zscore_252d, dxy_zscore_30d, vix_close, vix_percentile_252d, real_yield_10y_level, real_yield_10y_change_20d, term_spread_2s10s. Sources: FRED (DXY DTWEXBGS, real-yield DFII10, term-spread T10Y2Y), equity API for VIX.",
+        "priority": 1,
+        "blocker_type": "blackheart-ingest macro pipeline; operator-only multi-day work"
+      },
+      {
+        "item": "After (1), re-POST /inference/backfill for signal_id 1526eb0a (regime_btc_v3) x BTCUSDT x 1h x [2024-01-01, 2026-05-29). Expect rows_written > 12000.",
+        "priority": 2,
+        "blocker_type": "re-runnable after (1) lands"
+      },
+      {
+        "item": "After (1)+(2), re-queue VBO_RESEARCH HYBRID with canonical VboParams axes from this session's notes: adxEntryMin x atrExpansionMin x rvolMin x _ml_gate_enabled x _ml_signal_name=regime_btc_v3.",
+        "priority": 3,
+        "blocker_type": "re-runnable after (1)+(2)"
+      }
+    ],
+    "wall_clock_status": {
+      "this_session_seconds_approx": 2900,
+      "cumulative_seconds_used_at_terminal_approx": 4600,
+      "cumulative_budget_pct_used_approx": 15.0
+    },
+    "vbo_archetype_status": "FULLY_EXHAUSTED_IN_RESEARCHER_SCOPE -- 7 surface+retry attempts across VBO + VBO_RESEARCH closures; mechanism question UNRESOLVED pending operator-only macro backfill",
+    "lockout_bypass_history": "Lockout-override journal row 4fc67146 written under operator explicit authority in resume prompt (RESUME_LOCKOUT_CLEARED prefix, distinct from terminal prefixes so does NOT self-perpetuate). Override was respected per researcher prompt's operator-authority clause. New ARCHETYPE_EXHAUSTION terminal here starts a fresh 24h lockout window from 16:35Z.",
+    "infra_fixes_tested": {
+      "fix_1_inference_db_auth_verified_working": true,
+      "fix_2_vbo_axis_names_never_reached": "blocked one layer deeper at macro feature_values",
+      "new_blocker_discovered": "9 of 20 regime_btc_v3 input features have 0 or near-0 rows in feature_values"
+    },
+    "this_session_filesystem_papers": [
+      "C:/Project/blackheart-trading-engine/research/RESEARCH_PAPER_VBO_RESEARCH_BTCUSDT_1H_v3_HYBRID_2026-05-29.md"
+    ],
+    "this_session_db_papers": [],
+    "next_session_recommendation": "Pivot to NON-VBO archetype. Re-open ATR_MOM-ETHUSDT-1h Path C resume (iter 3a7479e9 has 3 specialist CONCERN verdicts, no veto). OR fresh ETH archetype. Do NOT retry VBO_RESEARCH HYBRID until operator macro backfill lands.",
+    "prior_exhaustion_journal_ids_in_7d_window": [
+      "62104dc7-9a72-4346-8eb8-97abca615a77 (2026-05-29T16:07Z, prior VBO_RESEARCH wrong-axes fail-open)",
+      "32b70027-e774-4779-9404-b9bce9de2a1f (2026-05-29T06:29Z)",
+      "487f1940-c7ae-4a07-b253-29eeb99a49dc (2026-05-29T00:16Z)",
+      "048561ba-4c54-4c4b-8722-382168bfe351 (2026-05-28T02:27Z ATR_MOM)",
+      "14d84688-5637-42ce-b8d5-5a0b6283af6f (2026-05-27T20:05Z)",
+      "5e56f8e3-2546-46e8-bfeb-af856de99bbb (2026-05-27T17:48Z)",
+      "822b4dfe-43eb-4712-a040-4886e713ad21 (2026-05-27T12:39Z)",
+      "636da3c7-c8dd-4e14-b61a-0f504bcbe721 (2026-05-27T01:38Z)",
+      "abbe7ab3-88a4-4a84-b105-cae76f7d244e (2026-05-26T17:49Z)",
+      "a9de6a35-0a14-4ce7-aff8-5af0105ae761 (2026-05-26T14:42Z)"
+    ],
+    "next_archetype_candidates_for_next_session": [
+      "Continue ATR_MOM Path C resume on iter 3a7479e9 (3 CONCERN verdicts ready for walk-forward, deferred by multiple sessions)",
+      "Fresh ETH archetype (DCB-ETH already graduated; consider MMR/MRO/TPB at new cadences)",
+      "Once operator macro-feature-backfills, retry VBO_RESEARCH HYBRID + regime_btc_v3"
+    ]
+  },
+  "status": "ACTIVE",
+  "iteration_id_refs": null,
+  "related_journal_ids": [
+    "500f6491-66e6-4a14-bb40-3531f72e20cf",
+    "dd869ae4-0823-405b-8eaf-1d66c2e31c8c",
+    "4fc67146-ed02-4b04-8bee-9c3d4169d1ef",
+    "62104dc7-9a72-4346-8eb8-97abca615a77"
+  ]
+}
