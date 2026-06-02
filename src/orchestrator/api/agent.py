@@ -1407,6 +1407,11 @@ class AgentState(BaseModel):
     last_null_screen_per_surface: list[NullScreenDigest] | None = None
     pending_specialist_reviews: list[PendingSpecialistReviewDigest] | None = None
     recent_specialist_verdicts: list[RecentSpecialistVerdictDigest] | None = None
+    # 2026-06-02: per-agent ML-training budget + in-flight runs so the
+    # researcher knows it can train before designing an ML hypothesis
+    # (instead of discovering the 4/day cap via a mid-session 429).
+    ml_training_budget: dict[str, Any] | None = None
+    pending_ml_training_runs: list[dict[str, Any]] | None = None
 
 
 @router.get("/state", response_model=AgentState)
@@ -1425,8 +1430,14 @@ async def agent_state(request: Request) -> AgentState:
     digest: dict[str, Any] | None = None
     if db_ok:
         try:
+            _settings = request.app.state.settings
             async with request.app.state.db.acquire() as conn:
-                digest = await agent_state_repo.get_state_digest(conn)
+                digest = await agent_state_repo.get_state_digest(
+                    conn,
+                    agent_name=request.state.agent_name,
+                    ml_training_cap=_settings.ml_training_daily_cap,
+                    ml_training_window_hours=_settings.ml_training_daily_window_hours,
+                )
         except Exception as exc:  # noqa: BLE001
             # Digest is best-effort. If a slice query fails we still return
             # health flags so the caller can fall back to the legacy queries.
@@ -1459,5 +1470,9 @@ async def agent_state(request: Request) -> AgentState:
         ),
         recent_specialist_verdicts=(
             (digest or {}).get("recent_specialist_verdicts") if digest else None
+        ),
+        ml_training_budget=(digest or {}).get("ml_training_budget") if digest else None,
+        pending_ml_training_runs=(
+            (digest or {}).get("pending_ml_training_runs") if digest else None
         ),
     )

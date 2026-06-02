@@ -288,6 +288,8 @@ async def test_get_state_digest_composes_all_slices() -> None:
         "last_null_screen_per_surface",
         "pending_specialist_reviews",
         "recent_specialist_verdicts",
+        "ml_training_budget",
+        "pending_ml_training_runs",
     }
     assert out["queue_counts"]["PENDING"] == 2
     assert len(out["last_iterations"]) == 1
@@ -295,6 +297,9 @@ async def test_get_state_digest_composes_all_slices() -> None:
     assert out["active_hypotheses"] == []
     assert out["last_run_summary"] is None
     assert out["last_null_screen_per_surface"] == []
+    # agent_name omitted in this call → ML budget slices are None.
+    assert out["ml_training_budget"] is None
+    assert out["pending_ml_training_runs"] is None
     assert out["pending_specialist_reviews"] == []
     assert out["recent_specialist_verdicts"] == []
 

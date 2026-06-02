@@ -254,17 +254,89 @@ async def _last_null_screen_per_surface(
     return out
 
 
+async def _ml_training_budget(
+    conn: asyncpg.Connection,
+    *,
+    agent_name: str,
+    cap: int,
+    window_hours: int,
+) -> dict[str, Any]:
+    """Per-agent ML-training budget snapshot so the researcher knows it can
+    train BEFORE designing an ML hypothesis (instead of hitting a 429 after).
+    Budget-counted statuses mirror ``count_active_in_window``: PENDING,
+    RUNNING, COMPLETED (FAILED rows don't count). Also surfaces the oldest
+    counted run so the caller can compute when a slot frees."""
+    row = await conn.fetchrow(
+        """
+        SELECT COUNT(*)::int AS used,
+               MIN(created_time) AS oldest_counted
+          FROM ml_training_runs
+         WHERE agent_name = $1
+           AND status IN ('PENDING', 'RUNNING', 'COMPLETED')
+           AND created_time > NOW() - make_interval(hours => $2)
+        """,
+        agent_name, window_hours,
+    )
+    used = int(row["used"]) if row else 0
+    oldest = row["oldest_counted"] if row else None
+    resets_at = None
+    if oldest is not None and used >= cap:
+        # Next slot frees when the oldest counted run ages out of the window.
+        resets_at = (oldest + __import__("datetime").timedelta(hours=window_hours)).isoformat()
+    return {
+        "used": used,
+        "cap": cap,
+        "window_hours": window_hours,
+        "exhausted": used >= cap,
+        "slot_frees_at": resets_at,
+    }
+
+
+async def _pending_ml_training_runs(
+    conn: asyncpg.Connection, limit: int = 5
+) -> list[dict[str, Any]]:
+    """In-flight training runs so a resuming session sees branch-4 work
+    (ML-training-pending) without a separate GET /ml/training-runs call."""
+    rows = await conn.fetch(
+        """
+        SELECT training_run_id, spec_name, status, created_time
+          FROM ml_training_runs
+         WHERE status IN ('PENDING', 'RUNNING')
+         ORDER BY created_time DESC
+         LIMIT $1
+        """,
+        limit,
+    )
+    return [
+        {
+            "training_run_id": str(r["training_run_id"]),
+            "spec_name": r["spec_name"],
+            "status": r["status"],
+            "created_time": r["created_time"].isoformat() if r["created_time"] else None,
+        }
+        for r in rows
+    ]
+
+
 async def get_state_digest(
     conn: asyncpg.Connection,
     *,
     sig_edge_window_days: int = 7,
     last_n_iterations: int = 5,
+    agent_name: str | None = None,
+    ml_training_cap: int = 4,
+    ml_training_window_hours: int = 24,
 ) -> dict[str, Any]:
-    """Compose the Phase-2 agent-state digest. Six small read queries.
+    """Compose the Phase-2 agent-state digest. Small read queries.
 
     Designed to replace the cold-boot SQL-script chain. Total latency on a
     local PG with warm caches is < 50ms; well under the cost of spawning a
     research sub-agent.
+
+    When ``agent_name`` is supplied, also surfaces the per-agent ML-training
+    budget and any in-flight training runs so the researcher resolves resume
+    branch 4 (ML-pending) and avoids a mid-session 429 — all from this one
+    call.
     """
     queue_counts = await _queue_counts(conn)
     last_iters = await _last_iterations(conn, last_n_iterations)
@@ -275,6 +347,15 @@ async def get_state_digest(
     pending_specialist_reviews = await _pending_specialist_reviews(conn)
     recent_specialist_verdicts = await _recent_specialist_verdicts(conn)
 
+    ml_budget: dict[str, Any] | None = None
+    pending_ml_runs: list[dict[str, Any]] | None = None
+    if agent_name:
+        ml_budget = await _ml_training_budget(
+            conn, agent_name=agent_name,
+            cap=ml_training_cap, window_hours=ml_training_window_hours,
+        )
+        pending_ml_runs = await _pending_ml_training_runs(conn)
+
     return {
         "queue_counts": queue_counts,
         "last_iterations": last_iters,
@@ -284,4 +365,6 @@ async def get_state_digest(
         "last_null_screen_per_surface": null_screens,
         "pending_specialist_reviews": pending_specialist_reviews,
         "recent_specialist_verdicts": recent_specialist_verdicts,
+        "ml_training_budget": ml_budget,
+        "pending_ml_training_runs": pending_ml_runs,
     }
