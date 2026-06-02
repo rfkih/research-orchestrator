@@ -235,6 +235,31 @@ async def test_drain_treats_run_tick_error_as_infra_fail(
 
 
 @pytest.mark.asyncio
+async def test_drain_routes_config_gap_to_config_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # account_strategy_missing is a non-self-healing config gap — it must
+    # terminate as CONFIG_FAIL (operator action), not INFRA_FAIL (wait/retry).
+    err = OrchestratorError(
+        status_code=412,
+        error_code="account_strategy_missing",
+        message="No account_strategy row for strategy_code=DCB",
+        retryable=False,
+    )
+    fake = _FakeRunTick([err])
+    monkeypatch.setattr(tick_drain, "run_tick", fake)
+
+    digest = await tick_drain.drain_ticks(
+        db=None, jvm=None, settings=None,
+        agent_name="quant-researcher", session_id=None, redis_client=None,
+        max_iters=10,
+    )
+
+    assert digest["terminal_action"] == "CONFIG_FAIL"
+    assert digest["last_error"]["error_code"] == "account_strategy_missing"
+
+
+@pytest.mark.asyncio
 async def test_drain_caps_at_max_iters(monkeypatch: pytest.MonkeyPatch) -> None:
     # Five CONTINUE ticks, asked to cap at 3.
     fake = _FakeRunTick(

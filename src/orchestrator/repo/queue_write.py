@@ -19,6 +19,42 @@ from uuid import UUID
 import asyncpg
 
 
+async def find_account_strategy_id(
+    conn: asyncpg.Connection,
+    *,
+    strategy_code: str,
+    account_id: UUID | None,
+) -> str | None:
+    """Pre-queue existence check for an account_strategy row.
+
+    Mirrors tick._resolve_account_strategy_id: when ``account_id`` is set
+    (prod via ORCH_RESEARCH_ACCOUNT_ID), pin the lookup to the research
+    account so admin rows can't satisfy the check. Returns the
+    account_strategy_id, or None when no row exists — letting POST /queue
+    reject the sweep up-front (412) instead of the first /tick failing
+    mid-drain after a budget slot is spent.
+    """
+    if account_id is not None:
+        return await conn.fetchval(
+            """
+            SELECT account_strategy_id
+            FROM account_strategy
+            WHERE strategy_code = $1 AND account_id = $2 AND is_deleted = false
+            LIMIT 1
+            """,
+            strategy_code, account_id,
+        )
+    return await conn.fetchval(
+        """
+        SELECT account_strategy_id
+        FROM account_strategy
+        WHERE strategy_code = $1 AND is_deleted = false
+        LIMIT 1
+        """,
+        strategy_code,
+    )
+
+
 async def insert_queue(
     conn: asyncpg.Connection,
     *,

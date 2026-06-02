@@ -30,6 +30,13 @@ ENV/
 env/
 .env.local
 .env.*.local
+.env.bak*
+
+# Runtime logs + scratch (never commit — may contain secrets/PII)
+logs/
+*.log
+tmp/
+orch_dev.*.log
 
 # IDEs
 .vscode/

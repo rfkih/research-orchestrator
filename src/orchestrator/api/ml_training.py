@@ -99,6 +99,24 @@ async def post_training_run(
     if cached is not None:
         return cached
 
+    # Reject unknown spec names up-front. Without this an invalid name only
+    # surfaces as a FAILED row with an argparse error in stderr_tail AFTER
+    # the subprocess spawns — wasted. Validated against the live cached spec
+    # list (lifespan). Skip the guard if the cache is empty (boot import
+    # failed) so we don't block legitimate specs on a cache miss.
+    known_specs = getattr(request.app.state, "available_specs", None)
+    if known_specs and body.spec_name not in known_specs:
+        raise OrchestratorError(
+            status_code=422,
+            error_code="unknown_spec_name",
+            message=(
+                f"spec_name={body.spec_name!r} is not a known blackheart-train "
+                f"spec. Call GET /ml/model-specs for the live list."
+            ),
+            retryable=False,
+            hint="Check for a typo or a spec that hasn't been deployed yet.",
+        )
+
     await enforce_daily_cap(
         conn,
         settings=request.app.state.settings,
@@ -178,25 +196,44 @@ async def list_model_specs(
     request: Request,
     _: str = Depends(get_agent_name),
 ) -> dict[str, Any]:
-    """Phase D — researcher discovery. Returns the operator-curated
-    list of blackheart-train model specs that can be invoked via
-    POST /ml/training-runs.
+    """Phase D — researcher discovery. Returns the LIVE blackheart-train
+    model specs that can be invoked via POST /ml/training-runs.
 
-    The list mirrors :mod:`blackheart_train.specs` but is stored
-    in orchestrator settings (``available_model_specs``) to avoid an
-    expensive subprocess import at request time. Operator keeps it in
-    sync when adding/removing specs.
-
-    Read-only, no DB, no auth except the standard ``X-Orch-Token``."""
-    settings = request.app.state.settings
+    Source of truth is ``app.state.available_specs``, cached at startup by a
+    one-shot subprocess import of ``blackheart_train.specs.SPECS`` (see
+    tasks/lifespan). Falls back to ``settings.available_model_specs`` only
+    when that import failed at boot. Read-only, public-ish (X-Orch-Token)."""
+    specs = getattr(request.app.state, "available_specs", None) or list(
+        request.app.state.settings.available_model_specs
+    )
     return {
-        "model_specs": list(settings.available_model_specs),
+        "model_specs": specs,
         "note": (
-            "spec names mirror blackheart-train/src/blackheart_train/specs.py "
-            "_spec_choices(). Pass any of these as POST /ml/training-runs body "
-            "spec_name. The subprocess validates the name; the orchestrator "
-            "does not — invalid names produce a FAILED row with the CLI's "
-            "argparse error in stderr_tail."
+            "Live spec list cached from blackheart_train.specs.SPECS at "
+            "startup. Pass any of these as POST /ml/training-runs spec_name; "
+            "unknown names are rejected at submit (422 unknown_spec_name)."
+        ),
+    }
+
+
+@router.get("/ml/excluded-features")
+async def list_excluded_features(
+    request: Request,
+    _: str = Depends(get_agent_name),
+) -> dict[str, Any]:
+    """Researcher discovery — the EXCLUDED_FROM_INPUTS set that the train
+    loader silently drops from every training matrix (source-capped Binance
+    features etc.). A feature here will NOT appear in a trained model even
+    though feature_registry shows it as 'registered' — so the researcher
+    must not design an ML hypothesis that depends on it. Cached at startup
+    from blackheart_train.specs.EXCLUDED_FROM_INPUTS."""
+    excluded = getattr(request.app.state, "excluded_ml_features", None) or []
+    return {
+        "excluded_features": excluded,
+        "note": (
+            "These features are dropped from ALL training matrices regardless "
+            "of feature_registry status (source-side history caps). Do not "
+            "design an ML spec whose signal depends on them."
         ),
     }
 

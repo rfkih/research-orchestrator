@@ -78,6 +78,38 @@ async def lifespan_for(settings: Settings, app: FastAPI) -> AsyncIterator[None]:
     except Exception:  # noqa: BLE001
         log.exception("orchestrator.ml_training_reaper_failed")
 
+    # Cache the LIVE blackheart-train spec list + EXCLUDED_FROM_INPUTS so
+    # GET /ml/model-specs and GET /ml/excluded-features serve ground truth
+    # instead of the stale hardcoded settings list. One subprocess at boot;
+    # falls back to settings.available_model_specs if the import fails.
+    app.state.available_specs = list(settings.available_model_specs)
+    app.state.excluded_ml_features = []
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            settings.ml_training_python_path, "-c",
+            "from blackheart_train.specs import SPECS, EXCLUDED_FROM_INPUTS; "
+            "import json; print(json.dumps({'specs': sorted(SPECS.keys()), "
+            "'excluded': sorted(EXCLUDED_FROM_INPUTS)}))",
+            cwd=settings.ml_training_repo_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+        if proc.returncode == 0:
+            import json as _json
+            payload = _json.loads(stdout.decode("utf-8").strip().splitlines()[-1])
+            app.state.available_specs = payload["specs"]
+            app.state.excluded_ml_features = payload["excluded"]
+            log.info(
+                "orchestrator.ml_specs_cached",
+                n_specs=len(app.state.available_specs),
+                n_excluded=len(app.state.excluded_ml_features),
+            )
+        else:
+            log.warning("orchestrator.ml_specs_cache_failed_nonzero_exit")
+    except Exception:  # noqa: BLE001
+        log.warning("orchestrator.ml_specs_cache_failed_fallback_to_settings")
+
     # Start hourly feature refresh task. Best-effort — failures do not crash
     # the app. The task runs in the background and refreshes features from
     # the last-persisted timestamp to the present every 3600 seconds.
