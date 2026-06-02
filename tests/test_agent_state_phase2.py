@@ -47,6 +47,7 @@ class FakeConn:
         self.null_screen_rows: list[dict[str, Any]] = []
         self.pending_specialist_rows: list[dict[str, Any]] = []
         self.recent_specialist_verdict_rows: list[dict[str, Any]] = []
+        self.lockout_row: dict[str, Any] | None = None
 
     async def fetch(self, sql: str, *args: Any) -> list[_Row]:
         s = sql.lower()
@@ -68,6 +69,10 @@ class FakeConn:
 
     async def fetchrow(self, sql: str, *args: Any) -> _Row | None:
         s = sql.lower()
+        # Lockout query is distinguished by its computed columns (it also
+        # mentions run_summary, so match it FIRST).
+        if "bypass_available" in s and "within_window" in s:
+            return _Row(self.lockout_row) if self.lockout_row else None
         if "entry_type = 'run_summary'" in s:
             if self.run_summary_row is None:
                 return None
@@ -378,3 +383,50 @@ async def test_recent_specialist_verdicts_handles_null_is_veto() -> None:
     ]
     out = await repo._recent_specialist_verdicts(conn)  # type: ignore[arg-type]
     assert out[0]["is_veto"] is False
+
+
+# ── _lockout_state (rank 10) ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_lockout_state_none_when_no_terminal() -> None:
+    conn = FakeConn()  # lockout_row=None
+    out = await repo._lockout_state(conn)  # type: ignore[arg-type]
+    assert out == {
+        "in_lockout": False,
+        "terminal_title": None,
+        "lockout_expires_at": None,
+        "bypass_available": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_lockout_state_active_within_window_no_bypass() -> None:
+    conn = FakeConn()
+    expires = datetime.now(timezone.utc) + timedelta(hours=18)
+    conn.lockout_row = {
+        "title": "ARCHETYPE_EXHAUSTION_2026-06-02",
+        "expires_at": expires,
+        "within_window": True,
+        "bypass_available": False,
+    }
+    out = await repo._lockout_state(conn)  # type: ignore[arg-type]
+    assert out["in_lockout"] is True
+    assert out["bypass_available"] is False
+    assert out["terminal_title"] == "ARCHETYPE_EXHAUSTION_2026-06-02"
+
+
+@pytest.mark.asyncio
+async def test_lockout_state_bypass_clears_lockout() -> None:
+    # Within window BUT a fresh hypothesis exists → not locked out.
+    conn = FakeConn()
+    expires = datetime.now(timezone.utc) + timedelta(hours=18)
+    conn.lockout_row = {
+        "title": "ARCHETYPE_EXHAUSTION_2026-06-02",
+        "expires_at": expires,
+        "within_window": True,
+        "bypass_available": True,
+    }
+    out = await repo._lockout_state(conn)  # type: ignore[arg-type]
+    assert out["in_lockout"] is False
+    assert out["bypass_available"] is True

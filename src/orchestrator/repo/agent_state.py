@@ -146,47 +146,47 @@ async def _lockout_state(conn: asyncpg.Connection) -> dict[str, Any]:
     Collapses the prior 3-4 sequential resume calls into the single
     mandatory /agent/state round-trip.
     """
+    # Compute the window check + bypass entirely in SQL so we never compare a
+    # (possibly naive) created_time against a tz-aware Python NOW().
     row = await conn.fetchrow(
         """
-        SELECT title, created_time,
-               CASE
-                   WHEN title LIKE 'ARCHETYPE_EXHAUSTION_%' THEN 24
-                   WHEN title LIKE 'OPERATOR_ESCALATION_%'   THEN 12
-               END AS window_hours
-        FROM research_journal
-        WHERE entry_type = 'RUN_SUMMARY'
-          AND (title LIKE 'ARCHETYPE_EXHAUSTION_%'
-               OR title LIKE 'OPERATOR_ESCALATION_%')
-        ORDER BY created_time DESC
-        LIMIT 1
+        WITH terminal AS (
+            SELECT title, created_time,
+                   CASE
+                       WHEN title LIKE 'ARCHETYPE_EXHAUSTION_%' THEN INTERVAL '24 hours'
+                       WHEN title LIKE 'OPERATOR_ESCALATION_%'   THEN INTERVAL '12 hours'
+                   END AS window_iv
+            FROM research_journal
+            WHERE entry_type = 'RUN_SUMMARY'
+              AND (title LIKE 'ARCHETYPE_EXHAUSTION_%'
+                   OR title LIKE 'OPERATOR_ESCALATION_%')
+            ORDER BY created_time DESC
+            LIMIT 1
+        )
+        SELECT t.title,
+               (t.created_time + t.window_iv) AS expires_at,
+               (NOW() < t.created_time + t.window_iv) AS within_window,
+               EXISTS(
+                   SELECT 1 FROM research_journal h
+                   WHERE h.entry_type = 'HYPOTHESIS' AND h.status = 'ACTIVE'
+                     AND h.created_time > t.created_time
+               ) AS bypass_available
+        FROM terminal t
+        WHERE t.window_iv IS NOT NULL
         """
     )
-    if row is None or row["window_hours"] is None:
+    if row is None:
         return {"in_lockout": False, "terminal_title": None,
                 "lockout_expires_at": None, "bypass_available": False}
 
-    fire_ts = row["created_time"]
-    window_hours = int(row["window_hours"])
-    expires_at = fire_ts + timedelta(hours=window_hours)
-    now = await conn.fetchval("SELECT NOW()")
-    within_window = now < expires_at
-
-    # Bypass: an ACTIVE hypothesis created strictly after the terminal row.
-    bypass = await conn.fetchval(
-        """
-        SELECT EXISTS(
-            SELECT 1 FROM research_journal
-            WHERE entry_type = 'HYPOTHESIS' AND status = 'ACTIVE'
-              AND created_time > $1
-        )
-        """,
-        fire_ts,
-    )
+    bypass = bool(row["bypass_available"])
+    within = bool(row["within_window"])
+    expires_at = row["expires_at"]
     return {
-        "in_lockout": bool(within_window and not bypass),
+        "in_lockout": bool(within and not bypass),
         "terminal_title": row["title"],
-        "lockout_expires_at": expires_at.isoformat(),
-        "bypass_available": bool(bypass),
+        "lockout_expires_at": expires_at.isoformat() if expires_at else None,
+        "bypass_available": bypass,
     }
 
 
