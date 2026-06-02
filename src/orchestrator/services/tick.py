@@ -283,6 +283,7 @@ def _build_submit_payload(
     allow_short: bool = True,
     start_time_override: str | None = None,
     ml_overrides: dict[str, Any] | None = None,
+    universe: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build the BacktestRunRequest payload for one sweep cell.
 
@@ -328,6 +329,13 @@ def _build_submit_payload(
         # (strategyMl*Overrides) → {strategy_code: value}. Spread into
         # the payload; absent keys are NOT added.
         payload.update(ml_overrides)
+    if universe:
+        # Cross-sectional run: the JVM routes to the XS coordinator. asset is
+        # set to the first universe symbol so the NOT-NULL backtest_run.asset
+        # column + @NotBlank validation stay satisfied; the XS path uses the
+        # full universe list, not asset.
+        payload["universe"] = universe
+        payload["asset"] = universe[0]
     return payload
 
 
@@ -583,6 +591,7 @@ async def _execute_after_claim(
         allow_short=as_row["allow_short"],
         start_time_override=start_time_override,
         ml_overrides=ml_override_payload,
+        universe=(sweep_config or {}).get("universe"),
     )
     backtest_run_id = await jvm.submit_backtest(payload)
     log.info(

@@ -114,6 +114,13 @@ class EnqueueRequest(BaseModel):
     strategy_code: str = Field(..., min_length=1, max_length=60)
     interval_name: str = Field(..., description="5m|15m|1h|4h")
     instrument: str = Field("BTCUSDT", min_length=1, max_length=30)
+    # Cross-sectional universe (Phase 1). When set, the run is a long-short
+    # universe-ranking backtest: the JVM routes to its XS coordinator. The
+    # `instrument` field stays a single stable label (e.g. "XS5") so
+    # hypothesis_audit/DSR keying + the re-discovery gate remain single-valued;
+    # the universe list rides inside sweep_config (no research_queue schema
+    # change). Null/empty = ordinary single-symbol sweep.
+    universe: list[str] | None = Field(None, max_length=12)
     sweep_config: SweepConfig
     hypothesis: str | None = Field(None, max_length=4000)
     priority: int = Field(100, ge=1, le=999)
@@ -275,6 +282,11 @@ async def enqueue(
         return cached
 
     sweep_dict = body.sweep_config.model_dump()
+    # Cross-sectional: stash the universe in sweep_config (JSONB) so it
+    # survives the queue round-trip without a research_queue schema change;
+    # tick.run_tick reads it back and forwards it to the JVM payload.
+    if body.universe:
+        sweep_dict["universe"] = body.universe
     effective_iter_budget, iter_budget_note = resolve_iter_budget(
         body.sweep_config, body.iter_budget
     )
