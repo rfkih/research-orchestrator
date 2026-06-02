@@ -60,12 +60,25 @@ class CapacitySweepRequest(BaseModel):
             "Omit to use the service default. Capped at 2% to catch typos."
         ),
     )
+    floor_capital_usd: float | None = Field(
+        default=None,
+        gt=0.0,
+        description=(
+            "Operator's live-trading floor (USD). max-viable below this ⇒ REJECT. "
+            "Omit to use the service default ($10k)."
+        ),
+    )
 
 
 class CapacitySweepResponse(BaseModel):
     capacity_sweep_id: str
     edge_decay_verdict: str
+    judge_verdict: str
     max_viable_capital_usd: float | None
+    floor_capital_usd: float | None
+    edge_at_floor_pct: float | None
+    edge_at_max_pct: float | None
+    result_row_id: str | None
     motivating_iteration_id: str | None
     per_scale: list[dict[str, Any]]
 
@@ -92,6 +105,8 @@ async def post_capacity_sweep(
     kwargs: dict[str, Any] = {}
     if body.slippage_rate is not None:
         kwargs["slippage_rate"] = body.slippage_rate
+    if body.floor_capital_usd is not None:
+        kwargs["floor_capital_usd"] = body.floor_capital_usd
     result = await run_capacity_sweep(
         db=request.app.state.db,
         jvm=request.app.state.jvm,

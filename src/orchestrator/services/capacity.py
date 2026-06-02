@@ -41,8 +41,12 @@ from ..config import Settings
 from ..errors import OrchestratorError
 from ..infra.db import Database
 from ..logging import get_logger
+from ..repo.capacity_write import insert_capacity_sweep_result
 from .sweep import build_ml_override_maps, split_ml_overrides
 from .tick import _fetch_run_metrics, _poll_backtest_status, _resolve_account_strategy
+
+# Operator's live-trading floor (USD). Capacity verdict is REJECT below this.
+DEFAULT_FLOOR_CAPITAL_USD: float = 10_000.0
 
 log = get_logger(__name__)
 
@@ -105,6 +109,46 @@ def _classify_verdict(
     return "SHARP_CLIFF", max_viable
 
 
+def _annualize_geom(geom_pct: float | None, days: float) -> float | None:
+    """Annualize a cumulative geometric return % over ``days`` (365-day year).
+    Mirrors analyze.annualize_geometric_return. Returns None on bad inputs."""
+    if geom_pct is None or days is None or days <= 0:
+        return None
+    multiplier = 1.0 + geom_pct / 100.0
+    if multiplier <= 0:  # ruin — annualized return is -100%
+        return -100.0
+    annual_mult = multiplier ** (365.0 / days)
+    return (annual_mult - 1.0) * 100.0
+
+
+def _provisional_judge_verdict(
+    verdict: EdgeDecayVerdict, max_viable: float | None, floor: float | None
+) -> str:
+    """Derive a PROCEED/CONCERN/REJECT verdict for the capacity_sweep_result row
+    from the edge-decay classification. Mirrors the quant-capacity-judge criteria;
+    the full agent (Phase 3) may overwrite. judge_verdict is NOT NULL on the table.
+
+      REJECT  — no viable capital, or max-viable below the operator's live floor.
+      CONCERN — viable only near the floor (< 5×) or a sharp cliff in the curve.
+      PROCEED — max-viable ≥ 5× floor with non-cliff decay (room to scale safely).
+    """
+    if max_viable is None or (floor is not None and max_viable < floor):
+        return "REJECT"
+    if verdict in ("SHARP_CLIFF", "INVERTED") or (floor is not None and max_viable < floor * 5):
+        return "CONCERN"
+    return "PROCEED"
+
+
+def _edge_at(per_scale: list[dict[str, Any]], target_scale: float | None) -> float | None:
+    """Annualized edge (ann_geom_pct) at the scale whose capital == target."""
+    if target_scale is None:
+        return None
+    for s in per_scale:
+        if s.get("scale_usd") == target_scale and "metrics" in s:
+            return s["metrics"].get("ann_geom_pct")
+    return None
+
+
 def _build_payload(
     *,
     account_strategy_id: str,
@@ -143,6 +187,15 @@ def _build_payload(
         "riskPerTradePct": 2.0,
         "feeRate": 0.00075,
         "slippageRate": float(slippage_rate),
+        # THE capacity lever (V143): size-dependent market impact. Flat
+        # slippageRate is identical across all tiers (a fixed %), so WITHOUT this
+        # every notional scale returns bit-identical metrics and the sweep is
+        # meaningless. With it on, the JVM charges
+        # coeff*sqrt(order_notional/bar_volume) (round-trip) using the
+        # tick-calibrated per-symbol coeff (omitting marketImpactCoeff ⇒ JVM
+        # resolves it), so larger capital → larger orders → more impact → edge
+        # decays. This is what produces the AUM-scaling curve.
+        "marketImpactEnabled": True,
         "minNotional": 5,
         "minQty": 0.000001,
         "qtyStep": 0.000001,
@@ -171,18 +224,33 @@ class CapacitySweepResult:
         max_viable_capital_usd: float | None,
         per_scale: list[dict[str, Any]],
         motivating_iteration_id: UUID | None,
+        judge_verdict: str,
+        floor_capital_usd: float | None,
+        edge_at_floor_pct: float | None,
+        edge_at_max_pct: float | None,
+        result_row_id: str | None,
     ) -> None:
         self.capacity_sweep_id = capacity_sweep_id
         self.edge_decay_verdict = edge_decay_verdict
         self.max_viable_capital_usd = max_viable_capital_usd
         self.per_scale = per_scale
         self.motivating_iteration_id = motivating_iteration_id
+        self.judge_verdict = judge_verdict
+        self.floor_capital_usd = floor_capital_usd
+        self.edge_at_floor_pct = edge_at_floor_pct
+        self.edge_at_max_pct = edge_at_max_pct
+        self.result_row_id = result_row_id
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "capacity_sweep_id": str(self.capacity_sweep_id),
             "edge_decay_verdict": self.edge_decay_verdict,
+            "judge_verdict": self.judge_verdict,
             "max_viable_capital_usd": self.max_viable_capital_usd,
+            "floor_capital_usd": self.floor_capital_usd,
+            "edge_at_floor_pct": self.edge_at_floor_pct,
+            "edge_at_max_pct": self.edge_at_max_pct,
+            "result_row_id": self.result_row_id,
             "motivating_iteration_id": (
                 str(self.motivating_iteration_id)
                 if self.motivating_iteration_id else None
@@ -206,8 +274,10 @@ async def run_capacity_sweep(
     overrides: dict[str, Any] | None = None,
     motivating_iteration_id: UUID | None = None,
     slippage_rate: float = DEFAULT_SLIPPAGE_RATE,
+    floor_capital_usd: float = DEFAULT_FLOOR_CAPITAL_USD,
 ) -> CapacitySweepResult:
-    """Run one backtest per notional scale; aggregate verdict."""
+    """Run one backtest per notional scale; aggregate verdict; persist a
+    capacity_sweep_result row (provisional judge verdict + AUM-curve edges)."""
     if not notional_scales:
         raise OrchestratorError(
             status_code=400,
@@ -236,6 +306,9 @@ async def run_capacity_sweep(
             hint="Seed an account_strategy row before requesting capacity sweep.",
         )
     as_id = as_row["account_strategy_id"]
+
+    # Same window for every scale → one annualization factor for the whole sweep.
+    window_days = max(1.0, (end_time - start_time).total_seconds() / 86400.0)
 
     per_scale: list[dict[str, Any]] = []
     sweep_id = uuid4()
@@ -294,13 +367,37 @@ async def run_capacity_sweep(
                 "trades": metrics.get("total_trades"),
                 "max_dd_pct": _safe_float(metrics.get("max_drawdown_pct")),
                 "net_profit": _safe_float(metrics.get("net_profit")),
-                "ann_geom_pct": _safe_float(
-                    metrics.get("annualized_geometric_return_pct_at_alloc_90")
+                # _fetch_run_metrics returns the RAW geometric_return_pct_at_alloc_90;
+                # annualize it here (the prior 'annualized_…' key never existed → always None).
+                "ann_geom_pct": _annualize_geom(
+                    _safe_float(metrics.get("geometric_return_pct_at_alloc_90")),
+                    window_days,
                 ),
             },
         })
 
     verdict, max_viable = _classify_verdict(per_scale)
+    judge_verdict = _provisional_judge_verdict(verdict, max_viable, floor_capital_usd)
+    edge_at_floor = _edge_at(per_scale, floor_capital_usd)
+    edge_at_max = _edge_at(per_scale, max_viable)
+
+    # Persist the summary row for the leaderboard CapacityFactor (V135).
+    result_row_id: str | None = None
+    try:
+        async with db.acquire() as conn:
+            result_row_id = await insert_capacity_sweep_result(
+                conn,
+                symbol=instrument,
+                strategy_code=strategy_code,
+                interval_name=interval_name,
+                judge_verdict=judge_verdict,
+                floor_capital_usd=floor_capital_usd,
+                max_viable_capital_usd=max_viable,
+                edge_at_floor_pct=edge_at_floor,
+                edge_at_max_pct=edge_at_max,
+            )
+    except Exception:  # noqa: BLE001 — the sweep result is still returned even if persist fails
+        log.exception("capacity.persist_failed", sweep_id=str(sweep_id), strategy_code=strategy_code)
 
     return CapacitySweepResult(
         capacity_sweep_id=sweep_id,
@@ -308,6 +405,11 @@ async def run_capacity_sweep(
         max_viable_capital_usd=max_viable,
         per_scale=per_scale,
         motivating_iteration_id=motivating_iteration_id,
+        judge_verdict=judge_verdict,
+        floor_capital_usd=floor_capital_usd,
+        edge_at_floor_pct=edge_at_floor,
+        edge_at_max_pct=edge_at_max,
+        result_row_id=result_row_id,
     )
 
 
