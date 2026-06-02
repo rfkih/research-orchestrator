@@ -15,8 +15,11 @@ from orchestrator.services.capacity import (
     DEGRADATION_PCT_GENTLE,
     DEGRADATION_PCT_GRADUAL,
     PF_NOISE_FLOOR,
+    _annualize_geom,
     _build_payload,
     _classify_verdict,
+    _edge_at,
+    _provisional_judge_verdict,
 )
 
 
@@ -190,3 +193,38 @@ def test_build_payload_omits_ml_keys_when_no_sentinels() -> None:
     assert "strategyMlGateOverrides" not in payload
     assert "strategyMlSignalNameOverrides" not in payload
     assert "strategyMlShadowModeOverrides" not in payload
+
+
+def test_build_payload_enables_market_impact():
+    # The capacity lever (V143): without marketImpactEnabled every tier returns
+    # identical metrics (flat slippage is size-invariant) → meaningless sweep.
+    payload = _build_payload(**_payload_kwargs(overrides=None))
+    assert payload["marketImpactEnabled"] is True
+
+
+def test_annualize_geom():
+    assert _annualize_geom(100.0, 365.0) == pytest.approx(100.0, abs=1e-6)
+    assert _annualize_geom(21.0, 182.5) == pytest.approx(46.41, abs=0.2)
+    assert _annualize_geom(None, 365.0) is None
+    assert _annualize_geom(10.0, 0.0) is None
+    assert _annualize_geom(-100.0, 365.0) == -100.0  # ruin
+
+
+def test_provisional_judge_verdict():
+    floor = 10_000.0
+    assert _provisional_judge_verdict("LINEAR_SCALABLE", None, floor) == "REJECT"
+    assert _provisional_judge_verdict("LINEAR_SCALABLE", 5_000.0, floor) == "REJECT"
+    assert _provisional_judge_verdict("GRADUAL_DECAY", 20_000.0, floor) == "CONCERN"
+    assert _provisional_judge_verdict("SHARP_CLIFF", 1_000_000.0, floor) == "CONCERN"
+    assert _provisional_judge_verdict("LINEAR_SCALABLE", 1_000_000.0, floor) == "PROCEED"
+
+
+def test_edge_at():
+    per_scale = [
+        {"scale_usd": 10_000.0, "metrics": {"ann_geom_pct": 18.0}},
+        {"scale_usd": 100_000.0, "metrics": {"ann_geom_pct": 12.0}},
+    ]
+    assert _edge_at(per_scale, 10_000.0) == 18.0
+    assert _edge_at(per_scale, 100_000.0) == 12.0
+    assert _edge_at(per_scale, 500_000.0) is None
+    assert _edge_at(per_scale, None) is None
