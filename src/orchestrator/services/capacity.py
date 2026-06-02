@@ -111,7 +111,13 @@ def _classify_verdict(
 
 def _annualize_geom(geom_pct: float | None, days: float) -> float | None:
     """Annualize a cumulative geometric return % over ``days`` (365-day year).
-    Mirrors analyze.annualize_geometric_return. Returns None on bad inputs."""
+
+    NB: uses CALENDAR days, whereas the V60 gate's
+    annualized_geometric_return_pct_at_alloc_90 uses deployed-time (sum of
+    holding periods). The edge_at_floor/edge_at_max absolute values therefore
+    differ from the gate metric for idle-heavy strategies — but the whole sweep
+    shares ONE factor (same window), so the leaderboard's edge_at_max/edge_at_floor
+    RATIO is unaffected. Returns None on bad inputs."""
     if geom_pct is None or days is None or days <= 0:
         return None
     multiplier = 1.0 + geom_pct / 100.0
@@ -140,13 +146,38 @@ def _provisional_judge_verdict(
 
 
 def _edge_at(per_scale: list[dict[str, Any]], target_scale: float | None) -> float | None:
-    """Annualized edge (ann_geom_pct) at the scale whose capital == target."""
+    """Annualized edge (ann_geom_pct) at the scale whose capital == target.
+    Exact match — used for max_viable, which is always one of the tested scales."""
     if target_scale is None:
         return None
     for s in per_scale:
         if s.get("scale_usd") == target_scale and "metrics" in s:
             return s["metrics"].get("ann_geom_pct")
     return None
+
+
+def _edge_at_floor(per_scale: list[dict[str, Any]], floor: float | None) -> float | None:
+    """Annualized edge at the operator's floor capital. The floor need NOT be a
+    tested scale, so pick the largest tested scale ≤ floor (the most capital you'd
+    actually deploy at the floor); fall back to the smallest tested scale if every
+    tier is above the floor. Exact-match would silently return None for an
+    off-ladder floor, breaking the leaderboard's edge_at_max/edge_at_floor ratio."""
+    if floor is None:
+        return None
+    valid = [
+        s for s in per_scale
+        if "metrics" in s and s["metrics"].get("ann_geom_pct") is not None
+        and s.get("scale_usd") is not None
+    ]
+    if not valid:
+        return None
+    at_or_below = [s for s in valid if s["scale_usd"] <= floor]
+    chosen = (
+        max(at_or_below, key=lambda s: s["scale_usd"])
+        if at_or_below
+        else min(valid, key=lambda s: s["scale_usd"])
+    )
+    return chosen["metrics"].get("ann_geom_pct")
 
 
 def _build_payload(
@@ -378,7 +409,7 @@ async def run_capacity_sweep(
 
     verdict, max_viable = _classify_verdict(per_scale)
     judge_verdict = _provisional_judge_verdict(verdict, max_viable, floor_capital_usd)
-    edge_at_floor = _edge_at(per_scale, floor_capital_usd)
+    edge_at_floor = _edge_at_floor(per_scale, floor_capital_usd)
     edge_at_max = _edge_at(per_scale, max_viable)
 
     # Persist the summary row for the leaderboard CapacityFactor (V135).

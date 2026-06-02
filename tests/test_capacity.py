@@ -19,6 +19,7 @@ from orchestrator.services.capacity import (
     _build_payload,
     _classify_verdict,
     _edge_at,
+    _edge_at_floor,
     _provisional_judge_verdict,
 )
 
@@ -228,3 +229,23 @@ def test_edge_at():
     assert _edge_at(per_scale, 100_000.0) == 12.0
     assert _edge_at(per_scale, 500_000.0) is None
     assert _edge_at(per_scale, None) is None
+
+
+def test_edge_at_floor_handles_off_ladder_floor():
+    per_scale = [
+        {"scale_usd": 1_000.0, "metrics": {"ann_geom_pct": 25.0}},
+        {"scale_usd": 10_000.0, "metrics": {"ann_geom_pct": 18.0}},
+        {"scale_usd": 100_000.0, "metrics": {"ann_geom_pct": 9.0}},
+    ]
+    # Floor exactly on a scale → that scale.
+    assert _edge_at_floor(per_scale, 10_000.0) == 18.0
+    # Floor between scales → largest tested scale <= floor (deployable-at-floor).
+    assert _edge_at_floor(per_scale, 50_000.0) == 18.0
+    # Floor below all scales → smallest tested scale (fallback).
+    assert _edge_at_floor(per_scale, 100.0) == 25.0
+    # Floor above all scales → largest <= floor.
+    assert _edge_at_floor(per_scale, 1_000_000.0) == 9.0
+    assert _edge_at_floor(per_scale, None) is None
+    # Errored scales (no metrics) are skipped.
+    errored = [{"scale_usd": 10_000.0, "error": "status=FAILED"}]
+    assert _edge_at_floor(errored, 10_000.0) is None
