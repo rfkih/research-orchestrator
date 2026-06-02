@@ -833,6 +833,7 @@ async def _execute_after_claim(
         iter_budget=iter_budget,
         early_stop=early_stop,
         statistical_verdict=stat_v,
+        decision_verdict=dec_v,
         agent_name=agent_name,
     )
 
@@ -869,6 +870,7 @@ async def _decide_next_state(
     iter_budget: int,
     early_stop: bool,
     statistical_verdict: str,
+    decision_verdict: str,
     agent_name: str,
 ) -> list[dict[str, Any]]:
     """Mirrors research-tick.sh lines 514-572. Returns agent next-action hints.
@@ -893,23 +895,63 @@ async def _decide_next_state(
         return [{"kind": "call", "method": "GET", "path": "/journal?entry_type=ANTI_PATTERN"}]
 
     if statistical_verdict == "SIGNIFICANT_EDGE":
-        # Walk-forward is a 6-fold × ~30min validation; running it inside
-        # /tick would block the HTTP request for hours. We park the row
-        # and direct the agent to POST /walk-forward, which writes a
-        # walk_forward_run row and (if ROBUST) flips the queue to
-        # COMPLETED/PASS. If not ROBUST, the agent re-enqueues a refined
-        # sweep — same semantics as the bash flow, just decoupled.
+        # V60 economic gate (CLAUDE.md): SIGNIFICANT_EDGE is graduation-
+        # eligible ONLY when the decision_verdict also PASSes the 10%/yr
+        # annualized geometric-return threshold. A stat edge that misses the
+        # economic bar is real but doesn't justify promotion → ITERATE:
+        # keep sweeping for a higher-return cell rather than parking.
+        #
+        # BUGFIX 2026-06-02: previously this branch parked for ALL
+        # SIGNIFICANT_EDGE regardless of decision_verdict. When V60 failed,
+        # the row went PARKED but the tick still returned a CONTINUE-shaped
+        # next_action, so a drain would call /tick again on what is now an
+        # empty queue and terminate EMPTY_QUEUE — silently stranding a valid
+        # stat-edge sweep mid-search.
+        if decision_verdict == "PASS":
+            # Walk-forward is a 6-fold × ~30min validation; running it inside
+            # /tick would block the HTTP request for hours. Park the row and
+            # direct the agent to POST /walk-forward, which (if ROBUST) flips
+            # the queue to COMPLETED/PASS.
+            note = (
+                f"[{ts}] iter {new_iter} SIGNIFICANT_EDGE + V60 PASS — needs "
+                f"walk-forward validation. POST /walk-forward to gate PASS."
+            )
+            async with db.acquire() as conn:
+                await queue_write.park_exhausted(conn, queue_id, note)
+            await _try_generate_paper(
+                db, queue_id, agent_name, state="PARKED/SIGNIFICANT_EDGE"
+            )
+            return [
+                {"kind": "call", "method": "POST", "path": "/walk-forward",
+                 "hint": "Body {strategy_code, queue_id} — gates PASS on stability_verdict=ROBUST."},
+            ]
+        # Stat edge real but economic return below 10%/yr — keep iterating
+        # (unless the budget is spent) to look for a higher-return cell.
+        if new_iter >= iter_budget:
+            note = (
+                f"[{ts}] iter {new_iter} SIGNIFICANT_EDGE but decision_verdict="
+                f"{decision_verdict} (V60 economic gate not met) and iter_budget "
+                f"exhausted. Completing as ITERATE_EXHAUSTED."
+            )
+            async with db.acquire() as conn:
+                await queue_write.complete_queue(
+                    conn,
+                    queue_id,
+                    final_verdict="INSUFFICIENT_EVIDENCE",
+                    walk_forward_id=None,
+                    note=note,
+                )
+            await _try_generate_paper(
+                db, queue_id, agent_name, state="COMPLETED/ITERATE_EXHAUSTED"
+            )
+            return [{"kind": "call", "method": "POST", "path": "/queue"}]
         note = (
-            f"[{ts}] iter {new_iter} SIGNIFICANT_EDGE — needs walk-forward "
-            f"validation. POST /walk-forward to gate PASS verdict."
+            f"[{ts}] iter {new_iter} SIGNIFICANT_EDGE but decision_verdict="
+            f"{decision_verdict} (V60 economic gate not met); continuing sweep."
         )
         async with db.acquire() as conn:
-            await queue_write.park_exhausted(conn, queue_id, note)
-        await _try_generate_paper(db, queue_id, agent_name, state="PARKED/SIGNIFICANT_EDGE")
-        return [
-            {"kind": "call", "method": "POST", "path": "/walk-forward",
-             "hint": "Body {strategy_code, queue_id} — gates PASS on stability_verdict=ROBUST."},
-        ]
+            await queue_write.reset_to_pending(conn, queue_id, note)
+        return [{"kind": "call", "method": "POST", "path": "/tick"}]
 
     if statistical_verdict in ("INSUFFICIENT_EVIDENCE", "NOT_TESTED"):
         if new_iter >= iter_budget:

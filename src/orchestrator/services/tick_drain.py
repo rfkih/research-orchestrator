@@ -121,6 +121,7 @@ async def drain_ticks(
         "last_tick_outcome": None,
         "last_summary": None,
         "last_error": None,
+        "last_queue_id": None,
     }
     terminal_action: str | None = None
     consecutive_waits = 0
@@ -211,6 +212,11 @@ async def drain_ticks(
             iteration_id = payload.get("iteration_id")
             if iteration_id:
                 tally["last_iteration_id"] = str(iteration_id)
+        # Track the queue_id from every tick (rank 16): a branch-3 resume
+        # needs it to construct the POST /paired-delta body without a second
+        # lookup. Present on all tick payloads, not just iterated ones.
+        if payload.get("queue_id"):
+            tally["last_queue_id"] = str(payload["queue_id"])
 
         if next_action == "GRADUATE":
             terminal_action = "GRADUATE"
@@ -280,6 +286,15 @@ def _shape_digest(tally: dict[str, Any], terminal_action: str) -> dict[str, Any]
     handoff = _HANDOFF_BY_TERMINAL.get(
         terminal_action, "Inspect drain digest manually."
     )
+    # rank 12: expose whether an INFRA_FAIL is retryable so the researcher
+    # waits/retries transient outages but escalates non-self-healing ones
+    # immediately. None for non-failure terminals.
+    last_err = tally.get("last_error") or {}
+    infra_fail_retryable = (
+        bool(last_err.get("retryable", True))
+        if terminal_action in ("INFRA_FAIL", "CONFIG_FAIL")
+        else None
+    )
     return {
         "terminal_action": terminal_action,
         "iters_completed": tally["iters"],
@@ -290,11 +305,13 @@ def _shape_digest(tally: dict[str, Any], terminal_action: str) -> dict[str, Any]
             "discard": tally["discard"],
         },
         "last_iteration_id": tally["last_iteration_id"],
+        "last_queue_id": tally["last_queue_id"],
         "last_verdict_line": tally["last_verdict_line"],
         "last_decision_hint": tally["last_decision_hint"],
         "last_tick_outcome": tally["last_tick_outcome"],
         "last_summary": tally["last_summary"],
         "last_error": tally["last_error"],
+        "infra_fail_retryable": infra_fail_retryable,
         "handoff_sentence": handoff,
         "next_actions": _next_actions_for_terminal(terminal_action),
     }

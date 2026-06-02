@@ -13,6 +13,7 @@ and idempotent — safe to call on every session start.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 
 import asyncpg
@@ -130,6 +131,65 @@ async def _last_run_summary(conn: asyncpg.Connection) -> dict[str, Any] | None:
     }
 
 
+async def _lockout_state(conn: asyncpg.Connection) -> dict[str, Any]:
+    """Resolve the resume lockout server-side (rank 10).
+
+    Finds the most-recent terminal-fire RUN_SUMMARY (ARCHETYPE_EXHAUSTION_*
+    24h window, OPERATOR_ESCALATION_* 12h window) and computes whether the
+    session is currently locked out — AND whether a bypass HYPOTHESIS exists.
+
+    The bypass check applies the temporal filter the playbook requires but
+    the raw active_hypotheses slice did not: a HYPOTHESIS clears the lockout
+    ONLY if its created_time is strictly after the terminal-fire row's. A
+    pre-existing ACTIVE hypothesis must NOT falsely clear a fresh lockout.
+
+    Collapses the prior 3-4 sequential resume calls into the single
+    mandatory /agent/state round-trip.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT title, created_time,
+               CASE
+                   WHEN title LIKE 'ARCHETYPE_EXHAUSTION_%' THEN 24
+                   WHEN title LIKE 'OPERATOR_ESCALATION_%'   THEN 12
+               END AS window_hours
+        FROM research_journal
+        WHERE entry_type = 'RUN_SUMMARY'
+          AND (title LIKE 'ARCHETYPE_EXHAUSTION_%'
+               OR title LIKE 'OPERATOR_ESCALATION_%')
+        ORDER BY created_time DESC
+        LIMIT 1
+        """
+    )
+    if row is None or row["window_hours"] is None:
+        return {"in_lockout": False, "terminal_title": None,
+                "lockout_expires_at": None, "bypass_available": False}
+
+    fire_ts = row["created_time"]
+    window_hours = int(row["window_hours"])
+    expires_at = fire_ts + timedelta(hours=window_hours)
+    now = await conn.fetchval("SELECT NOW()")
+    within_window = now < expires_at
+
+    # Bypass: an ACTIVE hypothesis created strictly after the terminal row.
+    bypass = await conn.fetchval(
+        """
+        SELECT EXISTS(
+            SELECT 1 FROM research_journal
+            WHERE entry_type = 'HYPOTHESIS' AND status = 'ACTIVE'
+              AND created_time > $1
+        )
+        """,
+        fire_ts,
+    )
+    return {
+        "in_lockout": bool(within_window and not bypass),
+        "terminal_title": row["title"],
+        "lockout_expires_at": expires_at.isoformat(),
+        "bypass_available": bool(bypass),
+    }
+
+
 async def _pending_specialist_reviews(
     conn: asyncpg.Connection, *, hard_cap: int = 50
 ) -> list[dict[str, Any]]:
@@ -170,16 +230,18 @@ async def _pending_specialist_reviews(
 
 
 async def _recent_specialist_verdicts(
-    conn: asyncpg.Connection, *, window_hours: int = 72, hard_cap: int = 50
+    conn: asyncpg.Connection, *, window_hours: int = 168, hard_cap: int = 50
 ) -> list[dict[str, Any]]:
     """Recent specialist verdicts (Path C). Researcher reads these on
     resume to decide whether the candidate iteration's adversarial
     review is fully complete.
 
-    Window: 72h. Verdicts older than that almost always belong to a
-    previously-resolved candidate; the researcher would have either
-    graduated or pivoted before then. Bounding the slice keeps the
-    digest small.
+    Window: 7 days (2026-06-02, widened from 72h — rank 13). The
+    operator drives /run-pending-specialists out-of-band; if that took
+    >72h, the verdicts aged out of the old window and Path C resume fell
+    through to the wrong branch (re-requesting a review already done). A
+    7-day window covers realistic operator turnaround; the hard_cap keeps
+    the slice bounded.
     """
     rows = await conn.fetch(
         """
@@ -282,7 +344,7 @@ async def _ml_training_budget(
     resets_at = None
     if oldest is not None and used >= cap:
         # Next slot frees when the oldest counted run ages out of the window.
-        resets_at = (oldest + __import__("datetime").timedelta(hours=window_hours)).isoformat()
+        resets_at = (oldest + timedelta(hours=window_hours)).isoformat()
     return {
         "used": used,
         "cap": cap,
@@ -346,6 +408,7 @@ async def get_state_digest(
     null_screens = await _last_null_screen_per_surface(conn)
     pending_specialist_reviews = await _pending_specialist_reviews(conn)
     recent_specialist_verdicts = await _recent_specialist_verdicts(conn)
+    lockout_state = await _lockout_state(conn)
 
     ml_budget: dict[str, Any] | None = None
     pending_ml_runs: list[dict[str, Any]] | None = None
@@ -365,6 +428,7 @@ async def get_state_digest(
         "last_null_screen_per_surface": null_screens,
         "pending_specialist_reviews": pending_specialist_reviews,
         "recent_specialist_verdicts": recent_specialist_verdicts,
+        "lockout_state": lockout_state,
         "ml_training_budget": ml_budget,
         "pending_ml_training_runs": pending_ml_runs,
     }

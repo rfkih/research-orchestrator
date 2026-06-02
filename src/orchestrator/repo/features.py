@@ -120,6 +120,26 @@ async def feature_coverage(conn, name: str, version: int) -> dict:
         name,
         version,
     )
+    # rank 14: per-(symbol, interval) breakdown. The aggregate row_count
+    # above hides the common new-symbol gap — a feature with 44k BTC rows
+    # and 0 BNB/1h rows reports distinct_symbols≥1 and looks "populated",
+    # but a BNB/1h sweep finds nothing. This surface lets the pre-queue
+    # coverage check see the actual per-surface depth.
+    by_surface_rows = await conn.fetch(
+        """
+        SELECT NULLIF(symbol, '')   AS symbol,
+               NULLIF(interval, '') AS interval,
+               COUNT(*)             AS row_count,
+               MIN(ts)              AS first_ts,
+               MAX(ts)              AS last_ts
+        FROM feature_values
+        WHERE feature_name = $1 AND version = $2
+        GROUP BY NULLIF(symbol, ''), NULLIF(interval, '')
+        ORDER BY symbol NULLS FIRST, interval NULLS FIRST
+        """,
+        name,
+        version,
+    )
     latest_run = await conn.fetchrow(
         """
         SELECT
@@ -142,6 +162,16 @@ async def feature_coverage(conn, name: str, version: int) -> dict:
         "min_value": cov["min_value"],
         "mean_value": cov["mean_value"],
         "max_value": cov["max_value"],
+        "by_surface": [
+            {
+                "symbol": r["symbol"],
+                "interval": r["interval"],
+                "row_count": int(r["row_count"] or 0),
+                "first_ts": r["first_ts"],
+                "last_ts": r["last_ts"],
+            }
+            for r in by_surface_rows
+        ],
         "latest_run": dict(latest_run) if latest_run else None,
     }
 

@@ -1412,6 +1412,10 @@ class AgentState(BaseModel):
     # (instead of discovering the 4/day cap via a mid-session 429).
     ml_training_budget: dict[str, Any] | None = None
     pending_ml_training_runs: list[dict[str, Any]] | None = None
+    # 2026-06-02: server-computed resume lockout (rank 10) — collapses the
+    # multi-call lockout scan and applies the created_time>terminal temporal
+    # filter so a pre-existing hypothesis can't falsely clear a fresh lockout.
+    lockout_state: dict[str, Any] | None = None
 
 
 @router.get("/state", response_model=AgentState)
@@ -1475,4 +1479,5 @@ async def agent_state(request: Request) -> AgentState:
         pending_ml_training_runs=(
             (digest or {}).get("pending_ml_training_runs") if digest else None
         ),
+        lockout_state=(digest or {}).get("lockout_state") if digest else None,
     )

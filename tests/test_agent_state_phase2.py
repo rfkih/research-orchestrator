@@ -288,6 +288,7 @@ async def test_get_state_digest_composes_all_slices() -> None:
         "last_null_screen_per_surface",
         "pending_specialist_reviews",
         "recent_specialist_verdicts",
+        "lockout_state",
         "ml_training_budget",
         "pending_ml_training_runs",
     }
