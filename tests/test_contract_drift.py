@@ -289,10 +289,20 @@ def test_agent_prompt_hard_rule_count_matches_terminal_reference(
 _LOAD_BEARING_CONSTANTS = (
     "annualized_geometric_return_pct_at_alloc_90",  # V60 economic gate field
     "MIN_TRADES_FOR_SIG",                           # V11 stat-rigor field
-    "BTCUSDT and ETHUSDT only",                     # universe constraint
+    # Universe expanded beyond BTC/ETH (SOL 2026-05-26; BNB+XRP 2026-06-02),
+    # so the prompt no longer says "only". Re-pinned to the current verbatim
+    # 5-symbol universe line so the guard still catches universe drift.
+    "BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT",   # universe constraint
     "5m / 15m / 1h / 4h",                           # interval constraint
-    "LSR, VCB, VBO",                                # protected book
-    "7.5",                                          # wall-clock cap (hours)
+    # Protected-book status for LSR/VCB/VBO was removed 2026-06-02 (operator
+    # decision: treat all strategies the same). The load-bearing invariant is
+    # no longer "these are untouchable" but the UNIVERSAL rule that research
+    # never mutates the live book — re-pinned to that so the guard still fires
+    # if the live-safety rule is dropped.
+    "Research never mutates live trading",          # universal live-safety rule
+    # Wall-clock cap changed 7.5h → 8.5h cumulative-across-sessions (marker-file
+    # run-state protocol). Re-pinned to the current cap.
+    "8.5",                                          # wall-clock cap (hours)
     "10%",                                          # profitability bar prose
     "PF lower 95% CI > 1.0",                        # V11 PF gate
     "DSR ≥ 0.95",                                   # V11 DSR threshold

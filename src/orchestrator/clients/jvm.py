@@ -137,7 +137,11 @@ class JvmClient:
             # is admin-only and would 401 here.
             r = await self.client.get("/actuator/health/liveness")
             return r.status_code == 200
-        except httpx.HTTPError:
+        except (httpx.HTTPError, RuntimeError):
+            # RuntimeError = the `client` property guard when the client was
+            # never .open()ed. A health probe must report False, never throw
+            # (matches Database.health_probe's contract); a caller asking "is
+            # the JVM healthy?" before open() should get False, not a crash.
             return False
 
     async def get(self, path: str, **kwargs: Any) -> httpx.Response:

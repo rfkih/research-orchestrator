@@ -64,7 +64,9 @@ class InferenceClient:
         try:
             r = await self.client.get("/healthz")
             return r.status_code == 200
-        except httpx.HTTPError:
+        except (httpx.HTTPError, RuntimeError):
+            # RuntimeError = the `client` property guard when the client was
+            # never .open()ed. A health probe must report False, never throw.
             return False
 
     async def run(self, *, body: dict[str, Any], agent_name: str) -> dict[str, Any]:
