@@ -34,12 +34,31 @@ from ..errors import OrchestratorError
 from ..repo import papers as papers_repo
 from ..services.paper_generator import build_paper_sections, generate_paper
 from ..services.latex_export import render_latex
-from .deps import get_agent_name, get_db_conn
+from .deps import get_agent_name, get_db_conn, get_viewer_is_admin
 from .pagination import Page, decode_cursor_ext, encode_cursor_ext
 
 router = APIRouter(prefix="/papers", tags=["papers"])
 
 _VALID_STATUS = {"WORKING_PAPER", "FINALIZED"}
+_FINALIZED = "FINALIZED"
+
+
+def _ensure_viewable(paper: dict[str, Any], is_admin: bool, paper_id: str) -> None:
+    """Guard a single-paper read for non-admin viewers.
+
+    Only FINALIZED ("completed") papers are visible to regular users; WORKING_PAPER
+    drafts are admin-only. Raises 404 (not 403) for a non-admin reading a non-final
+    paper so an in-progress paper isn't even discoverable by id — indistinguishable
+    from a paper that doesn't exist.
+    """
+    if not is_admin and paper.get("paper_status") != _FINALIZED:
+        raise OrchestratorError(
+            status_code=404,
+            error_code="paper_not_found",
+            message=f"No research_paper with paper_id={paper_id!r}.",
+            retryable=False,
+            hint="Use GET /papers to list available papers.",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +92,7 @@ async def list_papers(
     cursor: str | None = Query(None),
     limit: int = Query(20, ge=1, le=100),
     conn: asyncpg.Connection = Depends(get_db_conn),
+    is_admin: bool = Depends(get_viewer_is_admin),
 ) -> Page:
     if paper_status is not None and paper_status not in _VALID_STATUS:
         raise OrchestratorError(
@@ -81,6 +101,12 @@ async def list_papers(
             message=f"paper_status must be one of {sorted(_VALID_STATUS)}.",
             retryable=False,
         )
+    # Non-admins only ever see FINALIZED ("completed") papers — override any
+    # requested status (incl. an explicit WORKING_PAPER) so the in-progress
+    # drafts are never listed to regular users. Enforced server-side, so it
+    # holds even for direct API calls that bypass the dashboard UI.
+    if not is_admin:
+        paper_status = _FINALIZED
     if sort_by not in _VALID_SORT_BY:
         raise OrchestratorError(
             status_code=400,
@@ -174,6 +200,7 @@ async def list_papers(
 async def get_paper(
     paper_id: str,
     conn: asyncpg.Connection = Depends(get_db_conn),
+    is_admin: bool = Depends(get_viewer_is_admin),
 ) -> dict[str, Any]:
     paper = await papers_repo.get_paper(conn, paper_id)
     if paper is None:
@@ -184,6 +211,7 @@ async def get_paper(
             retryable=False,
             hint="Use GET /papers to list available papers.",
         )
+    _ensure_viewable(paper, is_admin, paper_id)
 
     enriched = await build_paper_sections(conn, paper)
 
@@ -214,6 +242,7 @@ async def get_paper(
 async def get_chart_data(
     paper_id: str,
     conn: asyncpg.Connection = Depends(get_db_conn),
+    is_admin: bool = Depends(get_viewer_is_admin),
 ) -> dict[str, Any]:
     paper = await papers_repo.get_paper(conn, paper_id)
     if paper is None:
@@ -223,6 +252,7 @@ async def get_chart_data(
             message=f"No research_paper with paper_id={paper_id!r}.",
             retryable=False,
         )
+    _ensure_viewable(paper, is_admin, paper_id)
 
     data = await papers_repo.get_chart_data(conn, paper_id)
     if data is None:
@@ -295,6 +325,7 @@ async def generate(
 async def export_latex(
     paper_id: str,
     conn: asyncpg.Connection = Depends(get_db_conn),
+    is_admin: bool = Depends(get_viewer_is_admin),
 ) -> Response:
     """Return a compilable .tex file for the paper.
 
@@ -311,6 +342,7 @@ async def export_latex(
             message=f"No research_paper with paper_id={paper_id!r}.",
             retryable=False,
         )
+    _ensure_viewable(paper_row, is_admin, paper_id)
 
     paper_data = await build_paper_sections(conn, paper_row)
     latex_source = render_latex(paper_data)
@@ -334,6 +366,7 @@ async def export_latex(
 async def export_pdf(
     paper_id: str,
     conn: asyncpg.Connection = Depends(get_db_conn),
+    is_admin: bool = Depends(get_viewer_is_admin),
 ) -> Response:
     """Return a compiled PDF of the research paper via pdflatex.
 
@@ -348,6 +381,7 @@ async def export_pdf(
             message=f"No research_paper with paper_id={paper_id!r}.",
             retryable=False,
         )
+    _ensure_viewable(paper_row, is_admin, paper_id)
 
     paper_data = await build_paper_sections(conn, paper_row)
     latex_source = render_latex(paper_data)
