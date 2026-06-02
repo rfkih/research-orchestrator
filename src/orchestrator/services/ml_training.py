@@ -116,6 +116,18 @@ def build_subprocess_env(settings: Settings) -> dict[str, str]:
     # bind + the secret it will accept.
     env["TRAIN_ORCHESTRATOR_URL"] = f"http://127.0.0.1:{settings.port}"
     env["TRAIN_ORCHESTRATOR_TOKEN"] = settings.auth_token.get_secret_value()
+    # Artifact output dir. blackheart-train.Settings.artifact_dir defaults
+    # to the Windows host path C:/Project/blackheart-train/artifacts, which
+    # is invalid inside the Linux container (the train repo is mounted
+    # read-only at /train:ro; `C:` does not exist) → write_artifact dies
+    # with OSError [Errno 30] Read-only file system AFTER a fully
+    # successful train+gauntlet. Only override when the operator has set a
+    # writable container path — empty string leaves the child's own
+    # default untouched so dev-host runs are unaffected (same conditional
+    # pattern as _dsn_to_train_db_env).
+    artifact_dir = settings.ml_training_artifact_dir.strip()
+    if artifact_dir:
+        env["TRAIN_ARTIFACT_DIR"] = artifact_dir
     return env
 
 

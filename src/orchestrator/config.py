@@ -175,6 +175,21 @@ class Settings(BaseSettings):
         r"C:\Project\blackheart-train\.venv\Scripts\python.exe"
     )
     ml_training_repo_path: str = r"C:\Project\blackheart-train"
+    # Artifact output dir for the train subprocess (TRAIN_ARTIFACT_DIR).
+    # blackheart-train's own Settings.artifact_dir defaults to the Windows
+    # host path C:/Project/blackheart-train/artifacts — wrong inside the
+    # Linux orchestrator container, where the train repo is bind-mounted
+    # read-only at /train:ro and `C:` does not exist (OSError [Errno 30]
+    # Read-only file system: 'C:' at write_artifact). When set, this value
+    # is injected into the subprocess env as TRAIN_ARTIFACT_DIR so the
+    # child writes to a WRITABLE in-container path (operator mounts a
+    # writable volume there, e.g. ORCH_ML_TRAINING_ARTIFACT_DIR=/artifacts
+    # with a `- artifacts:/artifacts` compose volume). Empty string = leave
+    # the child's own default untouched (dev-host behaviour preserved).
+    # Same wiring-only pattern as _dsn_to_train_db_env: only emit the env
+    # var when we have a value to emit. Contract-safe — no Settings/auth/
+    # gate change, just subprocess plumbing.
+    ml_training_artifact_dir: str = ""
     ml_training_daily_cap: int = Field(4, ge=1, le=100)
     ml_training_daily_window_hours: int = Field(24, ge=1, le=168)
     # Wall-clock cap per training subprocess. blackheart-train walk-

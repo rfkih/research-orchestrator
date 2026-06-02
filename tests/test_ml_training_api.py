@@ -353,3 +353,39 @@ def test_build_subprocess_env_overlays_train_vars() -> None:
     assert env["TRAIN_ORCHESTRATOR_TOKEN"] == "real-orch-token"
     # Inherited environment survives the overlay.
     assert "PATH" in env or "Path" in env
+    # Artifact dir unset by default → TRAIN_ARTIFACT_DIR not injected, so
+    # the child keeps its own Settings.artifact_dir default (dev-host
+    # behaviour preserved).
+    assert "TRAIN_ARTIFACT_DIR" not in env
+
+
+def test_build_subprocess_env_injects_artifact_dir_when_set() -> None:
+    """When the operator configures ORCH_ML_TRAINING_ARTIFACT_DIR (a
+    writable in-container path), build_subprocess_env injects it as
+    TRAIN_ARTIFACT_DIR so the train subprocess does not fall back to the
+    Windows host default C:/Project/blackheart-train/artifacts (OSError
+    Read-only file system: 'C:' inside the Linux container)."""
+    settings = Settings(
+        profile="dev",
+        auth_token="real-orch-token",
+        db_dsn="postgresql://bhr:pw@dbhost:5432/trading_db",
+        port=8082,
+        ml_training_artifact_dir="/artifacts",
+    )
+    env = build_subprocess_env(settings)
+    assert env["TRAIN_ARTIFACT_DIR"] == "/artifacts"
+
+
+def test_build_subprocess_env_artifact_dir_blank_is_not_injected() -> None:
+    """A whitespace-only override is treated as unset (strip → empty) so
+    a stray ORCH_ML_TRAINING_ARTIFACT_DIR='' does not clobber the child's
+    default with an empty path."""
+    settings = Settings(
+        profile="dev",
+        auth_token="real-orch-token",
+        db_dsn="postgresql://bhr:pw@dbhost:5432/trading_db",
+        port=8082,
+        ml_training_artifact_dir="   ",
+    )
+    env = build_subprocess_env(settings)
+    assert "TRAIN_ARTIFACT_DIR" not in env
