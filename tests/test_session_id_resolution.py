@@ -227,6 +227,23 @@ async def test_dispatch_public_path_sets_session_id_to_none(
 
 
 @pytest.mark.asyncio
+async def test_dispatch_non_ascii_token_returns_401_not_crash(
+    middleware: AuthMiddleware,
+) -> None:
+    # A non-ASCII X-Orch-Token must produce a clean auth_bad_token 401, NOT a
+    # 500 from secrets.compare_digest raising "comparing strings with non-ASCII
+    # characters is not supported" (regression: it used to crash the request).
+    call_next = AsyncMock()
+    req = _make_request(
+        "/agent/state",
+        {"X-Orch-Token": "tökén-with-ünicode", "X-Agent-Name": "quant-researcher"},
+    )
+    response = await middleware.dispatch(req, call_next)
+    call_next.assert_not_awaited()
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_dispatch_call_next_not_invoked_on_invalid_session_id(
     middleware: AuthMiddleware,
 ) -> None:
