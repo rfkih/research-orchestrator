@@ -70,7 +70,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
     def __init__(self, app, settings: Settings) -> None:
         super().__init__(app)
-        self._expected = settings.auth_token.get_secret_value()
+        # Store as UTF-8 bytes so the constant-time compare below never sees a
+        # ``str`` — ``secrets.compare_digest`` raises TypeError if EITHER ``str``
+        # arg contains a non-ASCII char, which would turn a malformed token into
+        # a 500 instead of a clean 401. Comparing bytes handles any input.
+        self._expected = settings.auth_token.get_secret_value().encode("utf-8")
 
     async def dispatch(
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
@@ -93,7 +97,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     next_action=NextAction(kind="read_doc", doc_anchor="auth.shared_secret"),
                 ),
             )
-        if not secrets.compare_digest(token, self._expected):
+        if not secrets.compare_digest(token.encode("utf-8"), self._expected):
             return _envelope(
                 status.HTTP_401_UNAUTHORIZED,
                 ErrorEnvelope(
