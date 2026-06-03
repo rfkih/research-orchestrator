@@ -97,3 +97,65 @@ sweep's ROBUST-but-sub-10% iterations into `POST /pool/evaluate` as first proof.
 
 XS_MOM (or another sub-10% ROBUST signal) is admitted to the pool, HRP-weighted,
 and `GET /pool` shows a combined book whose Sharpe exceeds any single member's.
+
+---
+
+# Phase 1-A — House Book live execution (capital-allocation overlay)
+
+**Status:** shipped 2026-06-03. **Goal:** make the weighted pool *tradable* by
+propagating `signal_pool.pool_weight` onto a dedicated **House Book account**'s
+`account_strategy.portfolio_weight` (the V109 column the live sizer already
+multiplies into every entry via `applyPortfolioWeight`). No new schema, no new
+JVM engine.
+
+## Why overlay (Option A), not a synthetic netted engine (Option B)
+
+The members are **stateful, event-driven** TA4j strategies that each manage
+their own entry/exit/stop lifecycle — that internal management *is* their edge.
+Netting them into one position per symbol (B) has no coherent owner for the
+netted position's exit logic, and would require rewriting members as stateless
+continuous-weight emitters (throwing away the edge). So each member stays its
+own `account_strategy` row; the book is the *weighted envelope* over them.
+Reserve B for a future generation of stateless continuous-signal models.
+
+## Boundary (deliberate — mirrors `rebalance.py`)
+
+The orchestrator only **UPDATEs weights on rows that already exist** on the book
+account. It never creates live-trading rows and never touches admin's account:
+
+- **`to_sync`** — member has a live row + non-null pool_weight → set
+  `portfolio_weight = pool_weight`, `weight_source='HOUSE_BOOK'`.
+- **`unmaterialized`** — member has no live row → *reported*, not created. The
+  operator provisions it via the trading JVM's normal strategy-creation flow,
+  then a re-sync picks it up. (Real-capital enablement stays operator-gated.)
+- **`to_zero`** — a book-account row that is no longer an active member and
+  still carries weight → soft-disabled (`portfolio_weight→0`, reversible;
+  `enabled` left untouched). This is how eviction propagates to live.
+- **`needs_rebalance`** — member with NULL pool_weight → run `/pool/rebalance`.
+
+## Components (all new/additive)
+
+- `config.house_book_account_id` (env `ORCH_HOUSE_BOOK_ACCOUNT_ID`). Unset →
+  `/pool/sync` returns `not_configured` (no-op).
+- `services/house_book.py`: `classify_book(members, live_rows)` (pure
+  reconciliation, unit-tested) + `reconcile_plan` + `apply_sync(dry_run=True)`
+  (writes weights via the `rebalance._write_weights` pattern + journals to
+  `research_journal`).
+- `api/pool.py`: `POST /pool/sync {dry_run=true}` (preview-only unless
+  `dry_run=false`) and `GET /pool/book` (live composition).
+
+## Operating cadence
+
+1. Loop admits members → `POST /pool/rebalance` (HRP weights).
+2. Operator materialises any `unmaterialized` members as `account_strategy`
+   rows on the book account (start `simulated=true`/paper).
+3. Cron `POST /pool/sync {dry_run:false}` → live weights track the pool;
+   evicted members zero out automatically.
+
+## Non-goals (Phase 1-A)
+
+- The orchestrator does NOT create or enable `account_strategy` rows — that's
+  the operator via the trading JVM (keeps real-capital provisioning gated).
+- No book-level aggregate risk guard yet (per-member guards still apply); a
+  book net-exposure cap is Phase 1-B.
+- Option B (synthetic netted engine) is explicitly deferred.

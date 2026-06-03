@@ -96,6 +96,15 @@ class Settings(BaseSettings):
     # the legacy "first matching row" behaviour for local convenience.
     research_account_id: UUID | None = None
 
+    # House Book account (Phase 1-A — signal pool live execution).
+    # The account_id whose account_strategy rows are the live materialisation
+    # of the signal pool. POST /pool/sync writes signal_pool.pool_weight onto
+    # this account's matching rows (account_id + strategy_code + symbol +
+    # interval_name). Unset → /pool/sync returns not_configured (no-op). The
+    # orchestrator NEVER touches admin's live-trading account — the book is a
+    # dedicated account and real-capital enablement stays operator-gated.
+    house_book_account_id: UUID | None = None
+
     telegram_bot_token: SecretStr | None = None
     telegram_chat_id: str | None = None
 

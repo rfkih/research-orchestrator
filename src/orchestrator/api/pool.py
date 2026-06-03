@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from ..errors import OrchestratorError
+from ..services import house_book
 from ..services import pool as pool_svc
 from ..services.pool import DEFAULT_THETA, _active_members_returns, _hrp_for
 from .deps import get_agent_name, get_db_conn
@@ -36,6 +37,12 @@ _MAX_W = 0.50
 class EvaluateBody(BaseModel):
     iteration_id: UUID
     theta: float = Field(DEFAULT_THETA, ge=0.0, le=5.0)
+
+
+class SyncBody(BaseModel):
+    # Safe by default: a bare POST /pool/sync only previews. Live weights move
+    # only when the caller explicitly sets dry_run=false.
+    dry_run: bool = True
 
 
 @router.post("/evaluate", status_code=201)
@@ -181,4 +188,66 @@ async def rebalance(
         "n_updated": n,
         "weights": {k: round(v, 5) for k, v in weights.items()},
         "guardrails": {"min_weight": _MIN_W, "max_weight": _MAX_W},
+    }
+
+
+# ── House Book live execution (Phase 1-A) ────────────────────────────
+
+
+@router.post("/sync")
+async def sync_book(
+    body: SyncBody,
+    request: Request,
+    conn: asyncpg.Connection = Depends(get_db_conn),
+    agent: str = Depends(get_agent_name),
+) -> dict[str, Any]:
+    """Propagate signal_pool weights onto the House Book account's
+    account_strategy rows. Preview-only unless body.dry_run=false. Members
+    without a live row are reported as ``unmaterialized`` (operator provisions
+    them via the trading JVM); evicted rows are soft-disabled (weight→0)."""
+    account_id = request.app.state.settings.house_book_account_id
+    if account_id is None:
+        return {
+            "applied": False,
+            "reason": "not_configured",
+            "hint": "Set ORCH_HOUSE_BOOK_ACCOUNT_ID to the dedicated book account.",
+        }
+    return await house_book.apply_sync(
+        conn, account_id, agent=agent, dry_run=body.dry_run
+    )
+
+
+@router.get("/book")
+async def get_book(
+    request: Request,
+    conn: asyncpg.Connection = Depends(get_db_conn),
+    _: str = Depends(get_agent_name),
+) -> dict[str, Any]:
+    """Live composition of the House Book: pool members reconciled against the
+    book account's account_strategy rows (synced / unmaterialized / evictable)."""
+    account_id = request.app.state.settings.house_book_account_id
+    if account_id is None:
+        return {"configured": False, "members": [], "count": 0}
+    plan = await house_book.reconcile_plan(conn, account_id)
+    return {
+        "configured": True,
+        "account_id": str(account_id),
+        "n_members": plan["n_members"],
+        "n_live_rows": plan["n_live_rows"],
+        "synced": [
+            {"surface": s["key"], "pool_weight": round(s["pool_weight"], 5),
+             "live_weight": s["current_weight"],
+             "account_strategy_id": str(s["account_strategy_id"])}
+            for s in plan["to_sync"]
+        ],
+        "unmaterialized": [
+            {"surface": m["key"], "pool_weight": round(m["pool_weight"], 5)}
+            for m in plan["unmaterialized"]
+        ],
+        "needs_rebalance": [{"surface": m["key"]} for m in plan["needs_weight"]],
+        "evictable": [
+            {"surface": z["key"], "live_weight": z["portfolio_weight"],
+             "account_strategy_id": str(z["account_strategy_id"])}
+            for z in plan["to_zero"]
+        ],
     }
