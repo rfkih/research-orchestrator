@@ -186,6 +186,26 @@ async def submit_review_verdict(
     if cached is not None:
         return cached
 
+    # Reviewer-distinctness: an agent may not post a verdict on a review it
+    # requested itself. The /queue gate accepts any APPROVED verdict, and the
+    # X-Agent-Name identity is self-asserted under a shared token, so without
+    # this check the quant-researcher could self-approve its own plan/graduation
+    # and clear the gate the paired-review loop exists to enforce. The
+    # deterministic /reviews/auto-run-checklist path posts as AUTO_REVIEWER_AGENT
+    # and bypasses this handler, so it is unaffected.
+    requester = await reviews_repo.fetch_latest_request_requester(conn, body.target_id)
+    if requester is not None and requester == agent:
+        raise OrchestratorError(
+            status_code=409,
+            error_code="self_review_forbidden",
+            message=(
+                "An agent cannot review its own request. The verdict reviewer "
+                f"({agent!r}) must differ from the agent that requested the "
+                "review. Have a distinct reviewer agent post the verdict."
+            ),
+            retryable=False,
+        )
+
     findings = [f.model_dump() for f in body.findings]
     summary = {
         "reason": body.summary_reason,
