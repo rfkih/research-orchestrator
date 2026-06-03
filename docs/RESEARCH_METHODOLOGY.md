@@ -58,17 +58,36 @@ produces. A pool fed price-action archetypes is a bad pool (redundant). A pool f
 funding/dispersion/carry/vol is a good one. Fix 1 (orthogonal engines) and Fix 2
 (hypothesis-first) are the same plan from two angles.
 
+## Enforcement & caveats (honesty notes)
+
+- **Enforcement.** This methodology is enforced via the **quant-researcher spawn
+  mandate** (each run is instructed hypothesis-first + lean, pointed at the ACTIVE
+  journal `HYPOTHESIS`) and the ACTIVE `HYPOTHESIS`/`IDEA_BACKLOG` rows. It is **not yet
+  enforced in code/playbook** — a future `/agent/playbook` update would make it durable.
+- **Multiplicity.** The "fewer trials → lower DSR bar" benefit applies to **new** search
+  effort. A surface already heavily grid-searched carries its accumulated trial count; a
+  fresh orthogonal hypothesis on a fresh feature largely sidesteps that.
+- **Carry ≠ signal.** Validating a *premium* (e.g. funding carry as a delta-neutral
+  return stream) does **not** validate a *directional strategy* that merely uses the same
+  data as a signal. Keep the two separate (see H1a vs H1b).
+
 ## Prioritised hypothesis backlog (economic strength × data readiness)
 
 | # | Hypothesis | Economic premium | Data | Status |
 |---|---|---|---|---|
-| **H1** | **Funding carry (FCARRY)** | leverage-demand funding premium; fade the crowded side | `funding_rate_z` 2022→2026 BTC/ETH | **ACTIVE** (seeded) |
+| **H1a** | Pure funding carry (delta-neutral long-spot/short-perp) | leverage-demand funding premium — **validated** (BTC +8–12%/yr, positive every year) | funding ready | **DEFERRED** — needs a two-leg backtest engine the platform lacks |
+| **H1b** | **Funding-extreme reversal (FCARRY)** | funding-z as a *signal* to fade crowded positioning (a **price-reversal** bet; per-trade carry ≈ 0.03% = negligible) | `funding_rate_z` 2022→2026 BTC/ETH | **ACTIVE** (seeded) — orthogonal but unvalidated as a price predictor |
 | H2 | Cross-sectional dispersion (XS_MOM) | relative-strength / dispersion premium | needs N>5 (2022 backfill → N=8 in progress) | NEXT |
-| H3 | Funding-extreme reversal | crowded-positioning capitulation | funding ready | exploratory variant of H1 |
-| H4 | Volatility risk premium | implied vol > realized (sell vol / fade IV) | needs Deribit options history (accumulate) | future |
-| H5 | Basis / term-structure carry | perp–spot basis convergence | needs two-leg engine + spot | future / infra |
-| H6 | Session / time-of-day effects | intraday/weekend calendar anomalies (a *different angle* on OHLCV) | ready | cheap exploratory |
+| H3 | Volatility risk premium | implied vol > realized (sell vol / fade IV) | needs Deribit options history (accumulate) | future |
+| H4 | Basis / term-structure carry | perp–spot basis convergence | needs two-leg engine + spot | future / infra |
+| H5 | Session / time-of-day effects | calendar anomalies — **price-derived, lower orthogonality**; only after H1–H4 | ready | cheap exploratory |
 
-H1 is live as the first test under this methodology (FCARRY seeded on the research
-account, BTC/ETH × 1h/4h). See `HYPOTHESIS_FUNDING_CARRY_FCARRY_2026-06-03` in the
+**H1b is live** as the first test under this methodology (FCARRY seeded on the research
+account, BTC/ETH × 1h/4h). See `HYPOTHESIS_FUNDING_REVERSAL_FCARRY_V2_2026-06-03` in the
 journal for its lean test design.
+
+> **Funding-feature caveat for any H1a/H1b test:** `funding_rate_z` is a rough z-score
+> (sd ≈ 1.48, **clamped to ±20**) that blows up toward the clamp in low-funding-variance
+> weeks (≈279 BTC-1h bars have |z|>5 — artifacts, not signal). It is PIT-safe (frozen at
+> bar close), but the `minAbsRate8h` (1bp) floor must stay **binding** in any sweep to
+> filter the clamp artifacts — do not chase z>5.
