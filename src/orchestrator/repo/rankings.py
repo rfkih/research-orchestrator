@@ -31,26 +31,31 @@ WITH best_per_combo AS (
         br.initial_capital,
         br.effective_params_snapshot,
         EXTRACT(DAY FROM (br.end_time - br.start_time))::INT         AS window_days,
-        (ril.metrics_snapshot->>'annualized_geometric_return_pct_at_alloc_90')::NUMERIC
+        -- Analyzer-computed metrics live nested under metrics_snapshot->'analysis'
+        -- (tick.py builds metrics_snapshot = {**run_metrics, "analysis": analysis}).
+        -- Reading them at the top level returned NULL for every row, so the
+        -- WHERE/ORDER below excluded every row and this endpoint returned [].
+        -- win_rate is the exception: it is a run-level column, only top-level.
+        (ril.metrics_snapshot->'analysis'->>'annualized_geometric_return_pct_at_alloc_90')::NUMERIC
                                                                       AS ann_return_pct,
-        (ril.metrics_snapshot->>'sharpe_annualized')::NUMERIC         AS sharpe_ann,
-        (ril.metrics_snapshot->>'max_drawdown_pct')::NUMERIC          AS max_drawdown_pct,
-        (ril.metrics_snapshot->>'n_trades')::INT                      AS n_trades,
-        (ril.metrics_snapshot->>'pf_point_estimate')::NUMERIC         AS profit_factor,
-        (ril.metrics_snapshot->>'dsr')::NUMERIC                       AS dsr,
-        (ril.metrics_snapshot->>'psr')::NUMERIC                       AS psr,
+        (ril.metrics_snapshot->'analysis'->>'sharpe_annualized')::NUMERIC AS sharpe_ann,
+        (ril.metrics_snapshot->'analysis'->>'max_drawdown_pct')::NUMERIC  AS max_drawdown_pct,
+        (ril.metrics_snapshot->'analysis'->>'n_trades')::INT             AS n_trades,
+        (ril.metrics_snapshot->'analysis'->>'pf_point_estimate')::NUMERIC AS profit_factor,
+        (ril.metrics_snapshot->'analysis'->>'dsr')::NUMERIC             AS dsr,
+        (ril.metrics_snapshot->'analysis'->>'psr')::NUMERIC             AS psr,
         (ril.metrics_snapshot->>'win_rate')::NUMERIC                  AS win_rate
     FROM research_iteration_log ril
     JOIN backtest_run br ON br.backtest_run_id = ril.backtest_run_id
     WHERE br.status = 'COMPLETED'
       AND ril.verdict NOT IN ('FAILED', 'DISCARD')
       AND EXTRACT(DAY FROM (br.end_time - br.start_time)) >= $1
-      AND (ril.metrics_snapshot->>'annualized_geometric_return_pct_at_alloc_90') IS NOT NULL
+      AND (ril.metrics_snapshot->'analysis'->>'annualized_geometric_return_pct_at_alloc_90') IS NOT NULL
     ORDER BY
         ril.strategy_code,
         br.asset,
         br.interval_name,
-        (ril.metrics_snapshot->>'annualized_geometric_return_pct_at_alloc_90')::NUMERIC DESC NULLS LAST
+        (ril.metrics_snapshot->'analysis'->>'annualized_geometric_return_pct_at_alloc_90')::NUMERIC DESC NULLS LAST
 )
 SELECT
     ROW_NUMBER() OVER (ORDER BY ann_return_pct DESC NULLS LAST)::INT AS rank,

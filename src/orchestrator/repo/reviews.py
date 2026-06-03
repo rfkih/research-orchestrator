@@ -205,6 +205,32 @@ async def fetch_latest_verdict(
     return dict(row) if row else None
 
 
+async def fetch_latest_request_requester(
+    conn: asyncpg.Connection, target_id: str
+) -> str | None:
+    """The agent that submitted the most recent review *request* for a target.
+
+    Used to enforce reviewer-distinctness in ``POST /reviews`` — an agent must
+    not post a verdict on a review it requested itself. Any status (a prior
+    verdict PARKs the request) so the most recent requester is found. Returns
+    None when no request exists for the target.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT structured_data->>'requested_by' AS requested_by
+          FROM research_journal
+         WHERE entry_type = 'IDEA_BACKLOG'
+           AND structured_data->>'kind' = $1
+           AND structured_data->>'target_id' = $2
+         ORDER BY created_time DESC
+         LIMIT 1
+        """,
+        KIND_REQUEST,
+        target_id,
+    )
+    return row["requested_by"] if row else None
+
+
 async def fetch_history_for_target(
     conn: asyncpg.Connection, target_id: str, limit: int = 20
 ) -> list[dict[str, Any]]:
