@@ -12,7 +12,7 @@ Uniform treatment: the marginal test is computed against whatever is currently
 from __future__ import annotations
 
 import math
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -37,28 +37,67 @@ DSR_THRESHOLD = 0.95
 _MIN_OBS = 5
 
 
+def _calendar_fill(series: dict[date, float], start: date, end: date) -> list[float]:
+    """Daily list over [start, end] inclusive; a day with no return is 0.0.
+
+    Turns the sparse exit-day series from ``daily_returns_from_trades`` into a
+    true calendar-daily grid so the √252 Sharpe annualisation is valid and
+    members with different trade frequencies are comparable. (The remaining
+    approximation — exit-day bucketing vs true mark-to-market — is documented
+    in ``portfolio.daily_returns_from_trades``.)"""
+    out: list[float] = []
+    d = start
+    while d <= end:
+        out.append(series.get(d, 0.0))
+        d += timedelta(days=1)
+    return out
+
+
+def _common_window(series_list: list[dict[date, float]]) -> tuple[date, date] | None:
+    """Overlapping [start, end] across all non-empty series (intersection of
+    spans). None when they don't overlap — combining over a union and
+    zero-filling the non-overlap would treat 'no data' as 'flat' and bias the
+    combined Sharpe."""
+    spans = [(min(s), max(s)) for s in series_list if s]
+    if not spans:
+        return None
+    start = max(s for s, _ in spans)
+    end = min(e for _, e in spans)
+    return (start, end) if start <= end else None
+
+
 def _combined_series(
     weights: dict[str, float],
     series_by_code: dict[str, dict[date, float]],
+    window: tuple[date, date],
 ) -> dict[date, float]:
-    """Portfolio daily-return series = Σ weight_c · return_c(date), over the
-    union of dates (a member missing a date contributes 0 that day)."""
+    """Portfolio daily-return series over the common ``window`` =
+    Σ weight_c · return_c(day), calendar-daily. Within the overlap a member
+    missing a day is a genuine flat day, so 0-fill is correct here."""
+    start, end = window
     out: dict[date, float] = {}
-    for code, w in weights.items():
-        s = series_by_code.get(code)
-        if not s:
-            continue
-        for d, r in s.items():
-            out[d] = out.get(d, 0.0) + w * r
+    d = start
+    while d <= end:
+        tot = 0.0
+        for code, w in weights.items():
+            s = series_by_code.get(code)
+            if s:
+                tot += w * s.get(d, 0.0)
+        out[d] = tot
+        d += timedelta(days=1)
     return out
 
 
 def annualised_sharpe(series: dict[date, float]) -> float:
-    """Annualised Sharpe of a daily-return series. 0.0 when too few points
-    or zero variance (can't distinguish signal from a flat line)."""
-    vals = list(series.values())
+    """Annualised Sharpe of a return series, computed on a CALENDAR-DAILY grid
+    (missing days = 0) so the √252 annualisation is valid. 0.0 when fewer than
+    ``_MIN_OBS`` actual return-days or zero variance."""
+    if len(series) < _MIN_OBS:
+        return 0.0
+    days = sorted(series)
+    vals = _calendar_fill(series, days[0], days[-1])
     n = len(vals)
-    if n < _MIN_OBS:
+    if n < 2:
         return 0.0
     mean = sum(vals) / n
     var = sum((v - mean) ** 2 for v in vals) / (n - 1)
@@ -92,29 +131,24 @@ def marginal_sharpe_contribution(
     *,
     candidate_key: str = "__candidate__",
 ) -> dict[str, Any]:
-    """Sharpe of the HRP pool before vs after adding the candidate.
+    """Sharpe of the HRP pool before vs after adding the candidate, measured
+    apples-to-apples on the dates the series actually OVERLAP.
 
-    Returns {marginal, sharpe_before, sharpe_after, max_abs_corr, n_overlap}.
-    Empty pool → marginal = candidate's own standalone Sharpe.
+    Returns {marginal, sharpe_before, sharpe_after, max_abs_corr, n_overlap,
+    reason}. Empty pool → marginal = candidate's own standalone Sharpe.
+    Insufficient overlap with the existing pool → marginal 0.0 (we do not
+    manufacture diversification out of non-overlapping windows).
     """
-    # Before: pool as-is.
-    if members_returns:
-        w_before = _hrp_for(members_returns)
-        sharpe_before = annualised_sharpe(_combined_series(w_before, members_returns))
-    else:
-        sharpe_before = 0.0
-
-    # After: pool + candidate.
     after_series = dict(members_returns)
     after_series[candidate_key] = candidate_returns
-    w_after = _hrp_for(after_series)
-    sharpe_after = annualised_sharpe(_combined_series(w_after, after_series))
 
-    # Max |corr| of the candidate vs any member (transparency; the marginal
-    # test already penalises redundancy).
+    # Diagnostics: candidate's max |corr| + max date-overlap vs any member.
     max_abs_corr: float | None = None
     n_overlap = 0
     if members_returns:
+        cand_dates = set(candidate_returns)
+        for s in members_returns.values():
+            n_overlap = max(n_overlap, len(cand_dates & set(s)))
         _, corr = spearman_corr_matrix(after_series, min_overlap=_MIN_OBS)
         codes = sorted(after_series.keys())
         ci = codes.index(candidate_key)
@@ -124,17 +158,33 @@ def marginal_sharpe_contribution(
         others = [abs(row[j]) for j in range(len(codes)) if j != ci and not np.isnan(row[j])]
         if others:
             max_abs_corr = float(max(others))
-        cand_dates = set(candidate_returns)
-        for c, s in members_returns.items():
-            n_overlap = max(n_overlap, len(cand_dates & set(s)))
 
-    return {
-        "marginal": round(sharpe_after - sharpe_before, 6),
-        "sharpe_before": round(sharpe_before, 6),
-        "sharpe_after": round(sharpe_after, 6),
-        "max_abs_corr": None if max_abs_corr is None else round(max_abs_corr, 4),
-        "n_overlap": n_overlap,
-    }
+    def _result(marginal: float, sb: float, sa: float, reason: str) -> dict[str, Any]:
+        return {
+            "marginal": round(marginal, 6),
+            "sharpe_before": round(sb, 6),
+            "sharpe_after": round(sa, 6),
+            "max_abs_corr": None if max_abs_corr is None else round(max_abs_corr, 4),
+            "n_overlap": n_overlap,
+            "reason": reason,
+        }
+
+    # Empty pool: the candidate stands alone on its own window.
+    if not members_returns:
+        sa = annualised_sharpe(candidate_returns)
+        return _result(sa, 0.0, sa, "standalone")
+
+    # Non-empty pool: require a real date-overlap so before/after are measured
+    # on the SAME window (else the marginal is comparing different periods).
+    window = _common_window(list(after_series.values()))
+    if n_overlap < _MIN_OBS or window is None:
+        return _result(0.0, 0.0, 0.0, "insufficient_overlap")
+
+    w_before = _hrp_for(members_returns)
+    sharpe_before = annualised_sharpe(_combined_series(w_before, members_returns, window))
+    w_after = _hrp_for(after_series)
+    sharpe_after = annualised_sharpe(_combined_series(w_after, after_series, window))
+    return _result(sharpe_after - sharpe_before, sharpe_before, sharpe_after, "ok")
 
 
 # ── DB-backed admission ──────────────────────────────────────────────
@@ -203,8 +253,14 @@ async def _returns_for_run(conn: asyncpg.Connection, backtest_run_id: UUID) -> d
 async def _active_members_returns(
     conn: asyncpg.Connection, *, exclude_iteration: UUID | None = None
 ) -> dict[str, dict[date, float]]:
-    """Latest COMPLETED backtest return series for each active pool member,
-    keyed by a stable member key (strategy_code:symbol:interval)."""
+    """Return series for each active pool member, keyed by member key
+    (strategy_code:symbol:interval).
+
+    Pinned to the backtest the member was ADMITTED on (its
+    signal_pool.iteration_id → research_iteration_log.backtest_run_id), NOT the
+    latest backtest for the surface — so a later, unrelated sweep on the same
+    (code,symbol,interval) can't silently swap a member's evidence and shift
+    its weight."""
     members = await conn.fetch(
         "SELECT strategy_code, symbol, interval_name, iteration_id "
         "FROM signal_pool WHERE status = 'active'"
@@ -214,13 +270,8 @@ async def _active_members_returns(
         if exclude_iteration is not None and m["iteration_id"] == exclude_iteration:
             continue
         run_id = await conn.fetchval(
-            """
-            SELECT backtest_run_id FROM backtest_run
-             WHERE strategy_code = $1 AND asset = $2 AND interval_name = $3
-               AND status = 'COMPLETED'
-             ORDER BY created_time DESC LIMIT 1
-            """,
-            m["strategy_code"], m["symbol"], m["interval_name"],
+            "SELECT backtest_run_id FROM research_iteration_log WHERE iteration_id = $1",
+            m["iteration_id"],
         )
         if run_id is None:
             continue

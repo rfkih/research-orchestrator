@@ -24,6 +24,8 @@ import asyncpg
 
 _WEIGHT_SOURCE = "HOUSE_BOOK"
 _WEIGHT_SOURCE_EVICTED = "HOUSE_BOOK_EVICTED"
+# Rows the book is allowed to soft-disable on eviction — only ones it wrote.
+_BOOK_WEIGHT_SOURCES = frozenset({_WEIGHT_SOURCE, _WEIGHT_SOURCE_EVICTED})
 
 
 def _key(strategy_code: str, symbol: str, interval_name: str) -> str:
@@ -42,12 +44,16 @@ def classify_book(
     * ``needs_weight``  — member exists but pool_weight is NULL (run
                           /pool/rebalance first) → skipped, reported.
     * ``unmaterialized``— member has no live row → operator must provision it.
-    * ``to_zero``       — a live row on the book account that is NOT an active
-                          member and still carries weight>0 → soft-disable
-                          (evicted/removed member).
+    * ``to_zero``       — a row THIS BOOK set (weight_source HOUSE_BOOK*) that
+                          is NOT an active member and still carries weight>0 →
+                          soft-disable (evicted/removed member).
 
-    Membership key is (strategy_code, symbol, interval_name). The book account
-    is assumed dedicated to the pool, so any non-member row on it is stale.
+    Membership key is (strategy_code, symbol, interval_name).
+
+    SAFETY: ``to_zero`` is restricted to rows the book itself wrote
+    (``weight_source`` in the HOUSE_BOOK family). A row the book never touched
+    is NEVER zeroed — so a misconfigured ``ORCH_HOUSE_BOOK_ACCOUNT_ID`` pointed
+    at an account holding other strategies cannot wipe their weights.
     """
     live_by_key = {r["key"]: r for r in live_rows}
     member_keys: set[str] = set()
@@ -72,7 +78,9 @@ def classify_book(
 
     to_zero = [
         r for r in live_rows
-        if r["key"] not in member_keys and float(r["portfolio_weight"] or 0) > 0
+        if r["key"] not in member_keys
+        and float(r["portfolio_weight"] or 0) > 0
+        and r.get("weight_source") in _BOOK_WEIGHT_SOURCES
     ]
     return {
         "to_sync": to_sync,
@@ -106,7 +114,7 @@ async def _book_rows(conn: asyncpg.Connection, account_id: UUID) -> list[dict[st
     rows = await conn.fetch(
         """
         SELECT account_strategy_id, strategy_code, symbol, interval_name,
-               portfolio_weight, enabled, simulated
+               portfolio_weight, weight_source, enabled, simulated
           FROM account_strategy
          WHERE account_id = $1 AND is_deleted = false
         """,
@@ -120,6 +128,7 @@ async def _book_rows(conn: asyncpg.Connection, account_id: UUID) -> list[dict[st
             "symbol": r["symbol"],
             "interval_name": r["interval_name"],
             "portfolio_weight": float(r["portfolio_weight"]) if r["portfolio_weight"] is not None else None,
+            "weight_source": r["weight_source"],
             "enabled": r["enabled"],
             "simulated": r["simulated"],
         }
@@ -185,6 +194,10 @@ async def apply_sync(
             zeroed += 1
         await _journal(conn, account_id, plan, applied, zeroed, agent)
 
+    # Capital actually deployed = Σ synced pool_weights. <1.0 means some members
+    # are still unmaterialized (their weight isn't on the book yet) — surfaced so
+    # an under-invested book isn't mistaken for a fully-deployed one.
+    deployed = sum(s["pool_weight"] for s in plan["to_sync"])
     return {
         "applied": not dry_run,
         "dry_run": dry_run,
@@ -193,6 +206,8 @@ async def apply_sync(
         "n_live_rows": plan["n_live_rows"],
         "n_synced": applied if not dry_run else len(plan["to_sync"]),
         "n_zeroed": zeroed if not dry_run else len(plan["to_zero"]),
+        "deployed_fraction": round(deployed, 5),
+        "undeployed_fraction": round(max(0.0, 1.0 - deployed), 5),
         "synced": [
             {"surface": s["key"], "weight": round(s["pool_weight"], 5),
              "from": s["current_weight"]}

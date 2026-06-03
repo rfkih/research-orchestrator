@@ -53,3 +53,27 @@ def test_redundant_add_has_near_zero_marginal():
     out = pool.marginal_sharpe_contribution(cand, {"M": member})
     assert abs(out["marginal"]) < 1e-6, out
     assert out["max_abs_corr"] is not None and out["max_abs_corr"] > 0.99
+
+
+def test_non_overlapping_windows_give_zero_marginal():
+    # #4 fix: member spans Jan, candidate spans a disjoint March. Combining over
+    # the union + zero-fill would invent diversification; the overlap guard must
+    # refuse instead.
+    from datetime import date
+
+    member = _series([0.02, -0.01, 0.02, -0.01, 0.02, -0.01], start=date(2026, 1, 1))
+    cand = _series([0.02, -0.01, 0.02, -0.01, 0.02, -0.01], start=date(2026, 3, 1))
+    out = pool.marginal_sharpe_contribution(cand, {"M": member})
+    assert out["marginal"] == 0.0
+    assert out["reason"] == "insufficient_overlap"
+
+
+def test_sparse_series_is_annualised_on_calendar_grid():
+    # #2 fix: a series with a long gap between trade-days must be diluted by the
+    # zero-fill (calendar-daily), NOT treated as if every entry were consecutive.
+    from datetime import date
+
+    dense = {date(2026, 1, 1) + timedelta(days=i): (0.02 if i % 2 == 0 else -0.01) for i in range(8)}
+    # Same 8 returns but spread far apart (weekly) → many zero days between.
+    sparse = {date(2026, 1, 1) + timedelta(days=7 * i): (0.02 if i % 2 == 0 else -0.01) for i in range(8)}
+    assert pool.annualised_sharpe(sparse) < pool.annualised_sharpe(dense)

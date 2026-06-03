@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from ..errors import OrchestratorError
 from ..services import house_book
 from ..services import pool as pool_svc
+from ..services.idempotency import cache_response, replay_cached_response
 from ..services.pool import DEFAULT_THETA, _active_members_returns, _hrp_for
 from .deps import get_agent_name, get_db_conn
 
@@ -45,13 +46,28 @@ class SyncBody(BaseModel):
     dry_run: bool = True
 
 
-@router.post("/evaluate", status_code=201)
+async def _existing_active(conn: asyncpg.Connection, ctx: dict[str, Any]) -> Any:
+    return await conn.fetchval(
+        """
+        SELECT pool_id FROM signal_pool
+         WHERE status = 'active'
+           AND strategy_code = $1 AND symbol = $2 AND interval_name = $3
+        """,
+        ctx["strategy_code"], ctx["symbol"], ctx["interval_name"],
+    )
+
+
+@router.post("/evaluate")
 async def evaluate(
     body: EvaluateBody,
     request: Request,
     conn: asyncpg.Connection = Depends(get_db_conn),
     agent: str = Depends(get_agent_name),
 ) -> dict[str, Any]:
+    cached, idem_key = await replay_cached_response(request, agent, "pool_evaluate")
+    if cached is not None:
+        return cached
+
     verdict = await pool_svc.evaluate_admission(conn, body.iteration_id, theta=body.theta)
     ctx = verdict.get("ctx")
     if not verdict["admit"]:
@@ -62,24 +78,6 @@ async def evaluate(
             "contribution": verdict.get("contribution"),
         }
 
-    # Idempotent on the active surface (the partial-unique index also enforces
-    # this at the DB level).
-    existing = await conn.fetchval(
-        """
-        SELECT pool_id FROM signal_pool
-         WHERE status = 'active'
-           AND strategy_code = $1 AND symbol = $2 AND interval_name = $3
-        """,
-        ctx["strategy_code"], ctx["symbol"], ctx["interval_name"],
-    )
-    if existing is not None:
-        return {
-            "admitted": True,
-            "reason": "already_pooled",
-            "pool_id": str(existing),
-            "iteration_id": str(body.iteration_id),
-        }
-
     metrics = {
         "dsr": ctx.get("dsr"),
         "statistical_verdict": ctx.get("statistical_verdict"),
@@ -87,25 +85,42 @@ async def evaluate(
            ("marginal", "sharpe_before", "sharpe_after", "max_abs_corr", "n_overlap")},
         "theta": verdict["theta"],
     }
+    # Atomic admission: ON CONFLICT against the active-surface partial-unique
+    # index makes this race-safe (no check-then-insert gap). A conflict means a
+    # concurrent admit already pooled this surface → report already_pooled.
     pool_id = await conn.fetchval(
         """
         INSERT INTO signal_pool
           (iteration_id, strategy_code, symbol, interval_name,
            admission_metrics, status, created_by, updated_by)
         VALUES ($1, $2, $3, $4, $5, 'active', $6, $6)
+        ON CONFLICT (strategy_code, symbol, interval_name)
+            WHERE status = 'active'
+        DO NOTHING
         RETURNING pool_id
         """,
         body.iteration_id, ctx["strategy_code"], ctx["symbol"],
         ctx["interval_name"], metrics, agent,
     )
-    return {
-        "admitted": True,
-        "reason": "admitted",
-        "pool_id": str(pool_id),
-        "iteration_id": str(body.iteration_id),
-        "surface": f"{ctx['strategy_code']}:{ctx['symbol']}:{ctx['interval_name']}",
-        "contribution": verdict["contribution"],
-    }
+    if pool_id is None:
+        existing = await _existing_active(conn, ctx)
+        response = {
+            "admitted": True,
+            "reason": "already_pooled",
+            "pool_id": str(existing) if existing is not None else None,
+            "iteration_id": str(body.iteration_id),
+        }
+    else:
+        response = {
+            "admitted": True,
+            "reason": "admitted",
+            "pool_id": str(pool_id),
+            "iteration_id": str(body.iteration_id),
+            "surface": f"{ctx['strategy_code']}:{ctx['symbol']}:{ctx['interval_name']}",
+            "contribution": verdict["contribution"],
+        }
+    await cache_response(request, agent, "pool_evaluate", idem_key, response)
+    return response
 
 
 @router.get("")
@@ -147,8 +162,12 @@ async def rebalance(
     conn: asyncpg.Connection = Depends(get_db_conn),
     agent: str = Depends(get_agent_name),
 ) -> dict[str, Any]:
-    """HRP-weight the active pool members from their latest backtest return
+    """HRP-weight the active pool members from their admitted backtest return
     series, clamp to [0.05, 0.50], renormalise, and write ``pool_weight``."""
+    cached, idem_key = await replay_cached_response(request, agent, "pool_rebalance")
+    if cached is not None:
+        return cached
+
     members = await conn.fetch(
         "SELECT pool_id, strategy_code, symbol, interval_name "
         "FROM signal_pool WHERE status = 'active'"
@@ -182,13 +201,15 @@ async def rebalance(
         )
         n += 1
 
-    return {
+    response = {
         "applied": True,
         "optimizer": "HRP",
         "n_updated": n,
         "weights": {k: round(v, 5) for k, v in weights.items()},
         "guardrails": {"min_weight": _MIN_W, "max_weight": _MAX_W},
     }
+    await cache_response(request, agent, "pool_rebalance", idem_key, response)
+    return response
 
 
 # ── House Book live execution (Phase 1-A) ────────────────────────────
@@ -212,9 +233,17 @@ async def sync_book(
             "reason": "not_configured",
             "hint": "Set ORCH_HOUSE_BOOK_ACCOUNT_ID to the dedicated book account.",
         }
-    return await house_book.apply_sync(
-        conn, account_id, agent=agent, dry_run=body.dry_run
-    )
+    # Idempotency only matters for a real write; a dry-run preview is read-only.
+    if not body.dry_run:
+        cached, idem_key = await replay_cached_response(request, agent, "pool_sync")
+        if cached is not None:
+            return cached
+        response = await house_book.apply_sync(
+            conn, account_id, agent=agent, dry_run=False
+        )
+        await cache_response(request, agent, "pool_sync", idem_key, response)
+        return response
+    return await house_book.apply_sync(conn, account_id, agent=agent, dry_run=True)
 
 
 @router.get("/book")

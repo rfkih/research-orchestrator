@@ -159,3 +159,44 @@ account. It never creates live-trading rows and never touches admin's account:
 - No book-level aggregate risk guard yet (per-member guards still apply); a
   book net-exposure cap is Phase 1-B.
 - Option B (synthetic netted engine) is explicitly deferred.
+
+---
+
+# Hardening — audit fixes (2026-06-03)
+
+A self-audit of Phase 0 + 1-A found and fixed:
+
+- **#1 (safety)** `house_book` eviction (`to_zero`) now only soft-disables rows
+  the book itself wrote (`weight_source ∈ {HOUSE_BOOK, HOUSE_BOOK_EVICTED}`). A
+  misconfigured `ORCH_HOUSE_BOOK_ACCOUNT_ID` can no longer wipe another
+  account's weights.
+- **#2 (correctness)** `annualised_sharpe` now computes on a **calendar-daily**
+  grid (zero-filled), so √252 is valid and members of different trade
+  frequencies are comparable. (`daily_returns_from_trades` is sparse exit-day.)
+- **#3 (correctness)** member return series are pinned to the **admitted**
+  backtest (`signal_pool.iteration_id → backtest_run_id`), not "latest for the
+  surface" — a later unrelated sweep can't silently re-weight a member.
+- **#4 (correctness)** `marginal_sharpe_contribution` measures before/after on
+  the **overlapping** date window; non-overlapping series return marginal 0
+  (`reason=insufficient_overlap`) instead of inventing diversification.
+- **#6** `/pool/sync` reports `deployed_fraction` / `undeployed_fraction` so a
+  partially-materialised (under-invested) book isn't read as fully deployed.
+- **#7** `/pool/evaluate|rebalance|sync` honour `Idempotency-Key`; admission
+  INSERT is atomic (`ON CONFLICT … DO NOTHING`) — no check-then-insert race.
+- **#8** `/pool/evaluate` returns `200` (was `201`) — it's an evaluation, not
+  always a creation.
+- **#11** FK `signal_pool.iteration_id → research_iteration_log` (Flyway V148).
+
+## Remaining known limitations (documented, not yet fixed)
+
+- **#5** Exit-day PnL bucketing (`daily_returns_from_trades`) still approximates
+  a true mark-to-market equity curve. The calendar-daily fix (#2) corrects the
+  *annualisation*, but precise daily correlation/Sharpe needs a JVM-side
+  `daily_equity` series — a cross-repo change, deferred.
+- **#9** The tick near-miss route walk-forwards the *last* iteration of the
+  exhausted sweep, not the best-DSR cell — `research_iteration_log` has no
+  queue linkage to cleanly pick "best of sweep". Walk-forward re-validates
+  regardless; low impact.
+- **#10** `signal_pool ↔ account_strategy` match is by exact
+  `symbol`/`interval_name` strings; relies on consistent conventions (they are
+  today). A canonicalisation layer would remove the latent coupling.

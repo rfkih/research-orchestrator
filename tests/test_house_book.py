@@ -16,10 +16,11 @@ def _member(code, sym, iv, w):
             "interval_name": iv, "pool_weight": w}
 
 
-def _row(code, sym, iv, w, asid="as-1"):
+def _row(code, sym, iv, w, asid="as-1", weight_source="HOUSE_BOOK"):
     return {"key": _key(code, sym, iv), "account_strategy_id": asid,
             "strategy_code": code, "symbol": sym, "interval_name": iv,
-            "portfolio_weight": w, "enabled": True, "simulated": True}
+            "portfolio_weight": w, "weight_source": weight_source,
+            "enabled": True, "simulated": True}
 
 
 def test_member_with_live_row_and_weight_syncs():
@@ -73,3 +74,16 @@ def test_distinct_intervals_are_distinct_surfaces():
     )
     assert [s["account_strategy_id"] for s in out["to_sync"]] == ["h1"]
     assert [z["account_strategy_id"] for z in out["to_zero"]] == ["h4"]
+
+
+def test_foreign_weighted_row_is_never_zeroed():
+    # SAFETY (#1): a weighted, non-member row that the book did NOT write
+    # (weight_source outside the HOUSE_BOOK family) must never be touched — so a
+    # misconfigured book account pointed at a populated trading account can't
+    # have its weights wiped.
+    out = house_book.classify_book(
+        [_member("XS_MOM", "SOLUSDT", "1h", 0.5)],
+        [_row("LSR", "BTCUSDT", "1h", 0.30, "foreign", weight_source="EQUAL_WEIGHT"),
+         _row("VBO", "ETHUSDT", "4h", 0.20, "foreign-hrp", weight_source="HRP")],
+    )
+    assert out["to_zero"] == []
