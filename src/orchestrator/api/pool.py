@@ -1,0 +1,184 @@
+"""Signal Pool / House Book API (Phase 0).
+
+Three endpoints over the ``signal_pool`` table (Flyway V147):
+
+* ``POST /pool/evaluate {iteration_id}`` — run the admission rule (validity +
+  marginal-Sharpe contribution) on a validated candidate; insert a member row
+  on admit. Idempotent per active surface.
+* ``GET /pool`` — list active members + weights + admission metrics.
+* ``POST /pool/rebalance`` — HRP-weight the active members, write pool_weight.
+
+All deterministic; no specialist agent. The standalone V11/V60 gate is
+untouched — this is the additive pool lane.
+"""
+from __future__ import annotations
+
+from typing import Any
+from uuid import UUID
+
+import asyncpg
+from fastapi import APIRouter, Depends, Request
+from pydantic import BaseModel, Field
+
+from ..errors import OrchestratorError
+from ..services import pool as pool_svc
+from ..services.pool import DEFAULT_THETA, _active_members_returns, _hrp_for
+from .deps import get_agent_name, get_db_conn
+
+router = APIRouter(prefix="/pool", tags=["pool"])
+
+# Weight clamp — same band as the account_strategy rebalance guardrails so a
+# single pool member can't dominate or be dust.
+_MIN_W = 0.05
+_MAX_W = 0.50
+
+
+class EvaluateBody(BaseModel):
+    iteration_id: UUID
+    theta: float = Field(DEFAULT_THETA, ge=0.0, le=5.0)
+
+
+@router.post("/evaluate", status_code=201)
+async def evaluate(
+    body: EvaluateBody,
+    request: Request,
+    conn: asyncpg.Connection = Depends(get_db_conn),
+    agent: str = Depends(get_agent_name),
+) -> dict[str, Any]:
+    verdict = await pool_svc.evaluate_admission(conn, body.iteration_id, theta=body.theta)
+    ctx = verdict.get("ctx")
+    if not verdict["admit"]:
+        return {
+            "admitted": False,
+            "reason": verdict["reason"],
+            "iteration_id": str(body.iteration_id),
+            "contribution": verdict.get("contribution"),
+        }
+
+    # Idempotent on the active surface (the partial-unique index also enforces
+    # this at the DB level).
+    existing = await conn.fetchval(
+        """
+        SELECT pool_id FROM signal_pool
+         WHERE status = 'active'
+           AND strategy_code = $1 AND symbol = $2 AND interval_name = $3
+        """,
+        ctx["strategy_code"], ctx["symbol"], ctx["interval_name"],
+    )
+    if existing is not None:
+        return {
+            "admitted": True,
+            "reason": "already_pooled",
+            "pool_id": str(existing),
+            "iteration_id": str(body.iteration_id),
+        }
+
+    metrics = {
+        "dsr": ctx.get("dsr"),
+        "statistical_verdict": ctx.get("statistical_verdict"),
+        **{k: verdict["contribution"][k] for k in
+           ("marginal", "sharpe_before", "sharpe_after", "max_abs_corr", "n_overlap")},
+        "theta": verdict["theta"],
+    }
+    pool_id = await conn.fetchval(
+        """
+        INSERT INTO signal_pool
+          (iteration_id, strategy_code, symbol, interval_name,
+           admission_metrics, status, created_by, updated_by)
+        VALUES ($1, $2, $3, $4, $5, 'active', $6, $6)
+        RETURNING pool_id
+        """,
+        body.iteration_id, ctx["strategy_code"], ctx["symbol"],
+        ctx["interval_name"], metrics, agent,
+    )
+    return {
+        "admitted": True,
+        "reason": "admitted",
+        "pool_id": str(pool_id),
+        "iteration_id": str(body.iteration_id),
+        "surface": f"{ctx['strategy_code']}:{ctx['symbol']}:{ctx['interval_name']}",
+        "contribution": verdict["contribution"],
+    }
+
+
+@router.get("")
+async def list_pool(
+    conn: asyncpg.Connection = Depends(get_db_conn),
+    _: str = Depends(get_agent_name),
+) -> dict[str, Any]:
+    rows = await conn.fetch(
+        """
+        SELECT pool_id, iteration_id, strategy_code, symbol, interval_name,
+               admitted_at, admission_metrics, pool_weight, weight_source,
+               weight_updated_at
+          FROM signal_pool
+         WHERE status = 'active'
+         ORDER BY strategy_code, symbol, interval_name
+        """
+    )
+    members = [
+        {
+            "pool_id": str(r["pool_id"]),
+            "iteration_id": str(r["iteration_id"]),
+            "surface": f"{r['strategy_code']}:{r['symbol']}:{r['interval_name']}",
+            "strategy_code": r["strategy_code"],
+            "symbol": r["symbol"],
+            "interval_name": r["interval_name"],
+            "admitted_at": r["admitted_at"].isoformat() if r["admitted_at"] else None,
+            "pool_weight": float(r["pool_weight"]) if r["pool_weight"] is not None else None,
+            "weight_source": r["weight_source"],
+            "admission_metrics": r["admission_metrics"],
+        }
+        for r in rows
+    ]
+    return {"count": len(members), "members": members}
+
+
+@router.post("/rebalance")
+async def rebalance(
+    request: Request,
+    conn: asyncpg.Connection = Depends(get_db_conn),
+    agent: str = Depends(get_agent_name),
+) -> dict[str, Any]:
+    """HRP-weight the active pool members from their latest backtest return
+    series, clamp to [0.05, 0.50], renormalise, and write ``pool_weight``."""
+    members = await conn.fetch(
+        "SELECT pool_id, strategy_code, symbol, interval_name "
+        "FROM signal_pool WHERE status = 'active'"
+    )
+    if not members:
+        return {"applied": False, "reason": "empty_pool", "n_updated": 0}
+
+    series = await _active_members_returns(conn)  # keyed code:symbol:interval
+    if not series:
+        return {"applied": False, "reason": "no_return_series", "n_updated": 0}
+
+    raw = _hrp_for(series)
+    clamped = {k: min(_MAX_W, max(_MIN_W, w)) for k, w in raw.items()}
+    total = sum(clamped.values()) or 1.0
+    weights = {k: w / total for k, w in clamped.items()}
+
+    n = 0
+    for m in members:
+        key = f"{m['strategy_code']}:{m['symbol']}:{m['interval_name']}"
+        w = weights.get(key)
+        if w is None:
+            continue
+        await conn.execute(
+            """
+            UPDATE signal_pool
+               SET pool_weight = $1, weight_source = 'HRP',
+                   weight_updated_at = NOW(), updated_time = NOW(), updated_by = $2
+             WHERE pool_id = $3
+            """,
+            round(w, 5), agent, m["pool_id"],
+        )
+        n += 1
+
+    return {
+        "applied": True,
+        "optimizer": "HRP",
+        "n_updated": n,
+        "weights": {k: round(v, 5) for k, v in weights.items()},
+        "guardrails": {"min_weight": _MIN_W, "max_weight": _MAX_W},
+    }
