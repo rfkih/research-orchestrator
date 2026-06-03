@@ -844,6 +844,8 @@ async def _execute_after_claim(
         statistical_verdict=stat_v,
         decision_verdict=dec_v,
         agent_name=agent_name,
+        iteration_id=iteration_id,
+        dsr=analysis.get("dsr") if isinstance(analysis, dict) else None,
     )
 
     _pf_pt = analysis.get("pf_point_estimate") if isinstance(analysis, dict) else None
@@ -881,6 +883,8 @@ async def _decide_next_state(
     statistical_verdict: str,
     decision_verdict: str,
     agent_name: str,
+    iteration_id: Any = None,
+    dsr: float | None = None,
 ) -> list[dict[str, Any]]:
     """Mirrors research-tick.sh lines 514-572. Returns agent next-action hints.
 
@@ -953,7 +957,34 @@ async def _decide_next_state(
             await _try_generate_paper(
                 db, queue_id, agent_name, state="COMPLETED/ITERATE_EXHAUSTED"
             )
-            return [{"kind": "call", "method": "POST", "path": "/queue"}]
+            # Signal Pool / House Book lane (Phase 0). A stat-real near-miss that
+            # only failed the standalone 10%/yr bar is a candidate for the
+            # managed pool — IF it adds uncorrelated return. Don't silently
+            # discard it: when its DSR already clears the pool's validity bar,
+            # route it to a pool-candidate walk-forward (the only remaining
+            # validity check) instead of just enqueuing a fresh hypothesis. The
+            # standalone V60 gate is untouched — this is the additive pool path.
+            actions: list[dict[str, Any]] = []
+            if (
+                dsr is not None
+                and dsr >= analyze.DSR_SIGNIFICANCE_THRESHOLD
+                and iteration_id is not None
+            ):
+                actions.append({
+                    "kind": "call", "method": "POST", "path": "/walk-forward",
+                    "hint": (
+                        "Pool candidate — statistically real (DSR "
+                        f"{dsr:.3f} ≥ {analyze.DSR_SIGNIFICANCE_THRESHOLD}) but "
+                        "sub-10%/yr standalone. Body {strategy_code, interval_name, "
+                        f"instrument, motivating_iteration_id: '{iteration_id}', "
+                        "pool_candidate: true}. On stability_verdict=ROBUST the "
+                        "response routes you to POST /pool/evaluate "
+                        f"{{iteration_id: '{iteration_id}'}} to admit it to the "
+                        "House Book (admitted only if it ADDS uncorrelated return)."
+                    ),
+                })
+            actions.append({"kind": "call", "method": "POST", "path": "/queue"})
+            return actions
         note = (
             f"[{ts}] iter {new_iter} SIGNIFICANT_EDGE but decision_verdict="
             f"{decision_verdict} (V60 economic gate not met); continuing sweep."

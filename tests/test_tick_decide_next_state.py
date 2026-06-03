@@ -80,4 +80,38 @@ async def test_sig_edge_v60_fail_budget_exhausted_completes(calls: dict) -> None
     )
     assert calls["park"] == []
     assert calls["complete"] == [("q3", "INSUFFICIENT_EVIDENCE")]
+    # No DSR passed (None) → no pool route; first action is a fresh hypothesis.
     assert actions[0]["path"] == "/queue"
+
+
+@pytest.mark.asyncio
+async def test_exhausted_near_miss_with_strong_dsr_routes_to_pool(calls: dict) -> None:
+    # Signal Pool lane (Phase 0): an exhausted sub-10% SIGNIFICANT_EDGE whose
+    # DSR already clears the pool's validity bar is routed to a pool-candidate
+    # walk-forward (then /pool/evaluate) instead of being silently discarded.
+    actions = await tick_mod._decide_next_state(
+        db=_FakeDb(), queue_id="q4", new_iter=10, iter_budget=10,
+        early_stop=False, statistical_verdict="SIGNIFICANT_EDGE",
+        decision_verdict="ITERATE", agent_name="quant-researcher",
+        iteration_id="11111111-1111-1111-1111-111111111111", dsr=0.97,
+    )
+    # Still honestly completed as a standalone non-graduation.
+    assert calls["complete"] == [("q4", "INSUFFICIENT_EVIDENCE")]
+    assert actions[0]["path"] == "/walk-forward"
+    assert "pool_candidate" in actions[0]["hint"]
+    assert "11111111-1111-1111-1111-111111111111" in actions[0]["hint"]
+    # The fresh-hypothesis path is still offered as the fallback.
+    assert actions[-1]["path"] == "/queue"
+
+
+@pytest.mark.asyncio
+async def test_exhausted_near_miss_with_weak_dsr_no_pool_route(calls: dict) -> None:
+    # DSR below the pool validity bar → don't burn ~3h of walk-forward; just
+    # enqueue a fresh hypothesis.
+    actions = await tick_mod._decide_next_state(
+        db=_FakeDb(), queue_id="q5", new_iter=10, iter_budget=10,
+        early_stop=False, statistical_verdict="SIGNIFICANT_EDGE",
+        decision_verdict="ITERATE", agent_name="quant-researcher",
+        iteration_id="22222222-2222-2222-2222-222222222222", dsr=0.80,
+    )
+    assert [a["path"] for a in actions] == ["/queue"]

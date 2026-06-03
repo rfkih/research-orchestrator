@@ -74,6 +74,12 @@ class WalkForwardRequest(BaseModel):
     # without an APPROVED graduation review for motivating_iteration_id.
     # override_review_gate=true requires operator-level justification.
     override_review_gate: bool = False
+    # Signal Pool / House Book lane (Phase 0, 2026-06-03). When true, this
+    # walk-forward validates a sub-10% near-miss for *pool admission*, not
+    # graduation to live capital. The graduation-review gate is skipped (pool
+    # admission has its own gate in POST /pool/evaluate), the trade-frequency
+    # guard still applies, and a ROBUST verdict routes to /pool/evaluate.
+    pool_candidate: bool = False
 
 
 class WalkForwardResponse(BaseModel):
@@ -116,7 +122,11 @@ async def post_walk_forward(
                 "for APPROVED, then re-submit /walk-forward."
             ),
         )
-    if body.motivating_iteration_id is not None and not body.override_review_gate:
+    if (
+        body.motivating_iteration_id is not None
+        and not body.override_review_gate
+        and not body.pool_candidate
+    ):
         target_id = reviews_repo.graduation_target_id(body.motivating_iteration_id)
         latest = await reviews_repo.fetch_latest_verdict(conn, target_id)
         sd = (latest or {}).get("structured_data") or {}
@@ -250,7 +260,19 @@ async def post_walk_forward(
 
     payload = result.to_dict()
     next_actions: list[dict[str, Any]] = []
-    if result.stability_verdict == "ROBUST":
+    if result.stability_verdict == "ROBUST" and body.pool_candidate:
+        # Pool lane: ROBUST clears the last validity check. Route to the
+        # House Book admission gate (marginal-Sharpe contribution vs the
+        # current pool) rather than the graduation rule.
+        next_actions.append({
+            "kind": "call", "method": "POST", "path": "/pool/evaluate",
+            "hint": (
+                "ROBUST — pool candidate passes walk-forward. POST /pool/evaluate "
+                f"{{iteration_id: '{body.motivating_iteration_id}'}} to admit it to "
+                "the House Book (admitted only if it ADDS uncorrelated return)."
+            ),
+        })
+    elif result.stability_verdict == "ROBUST":
         next_actions.append({
             "kind": "note",
             "hint": "ROBUST — strategy passes walk-forward. Promote per graduation rule.",
