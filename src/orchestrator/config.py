@@ -105,6 +105,12 @@ class Settings(BaseSettings):
     # dedicated account and real-capital enablement stays operator-gated.
     house_book_account_id: UUID | None = None
 
+    # House Book risk guard (Phase 1-B). Max aggregate book weight on any one
+    # symbol — caps concentration when several pool members trade the same
+    # symbol. Applied during /pool/rebalance. Infeasible compositions
+    # (n_symbols × cap < 1) skip the cap and flag rather than under-deploy.
+    house_book_max_per_symbol: float = 0.50
+
     telegram_bot_token: SecretStr | None = None
     telegram_chat_id: str | None = None
 

@@ -200,3 +200,38 @@ A self-audit of Phase 0 + 1-A found and fixed:
 - **#10** `signal_pool ↔ account_strategy` match is by exact
   `symbol`/`interval_name` strings; relies on consistent conventions (they are
   today). A canonicalisation layer would remove the latent coupling.
+
+---
+
+# Phase 1-B — book risk guard + eviction lifecycle (shipped 2026-06-03)
+
+- **Per-symbol concentration cap** (`config.house_book_max_per_symbol`, default
+  0.50). `/pool/rebalance` water-fills weight off any symbol over the cap onto
+  under-cap members (so the book diversifies across *symbols*, not just
+  members). Infeasible compositions (n_symbols × cap < 1) skip the cap and flag
+  rather than under-deploy. Pure `pool.apply_per_symbol_cap`, unit-tested.
+- **Eviction by marginal** — `POST /pool/reconcile {dry_run=true, evict_theta=0}`
+  re-scores each active member's marginal Sharpe vs the REST of the pool
+  (member-as-candidate, reusing the admission math) and evicts members that
+  have gone redundant (marginal ≤ evict_theta). Sets `status='evicted'` +
+  `evicted_reason`. The sole remaining member is never evicted. Preview-only
+  unless `dry_run=false`; idempotent.
+
+# Phase 1-C — book performance + attribution (shipped 2026-06-03)
+
+- **`GET /pool/performance`** — combined HRP-weighted book vs each member
+  standalone, per-member attribution (`weight × mean_daily_return`), the
+  combined equity curve, and the headline `combined_beats_best_member` — the
+  diversification payoff the pool exists to capture.
+
+## Remaining for 1-B / 1-C (deferred — need members and/or other repos)
+
+- **Cron** for periodic `rebalance → sync → reconcile`. Held until the pool has
+  members (it would no-op now). One `CronCreate` when ready; cadence documented.
+- **Live decay eviction** — the current eviction criterion is *redundancy*
+  (marginal vs pool). True performance *decay* needs live `trade_history`,
+  available only once the book trades. Wire in then.
+- **Frontend product surface** — "House Book" as a subscribable picker entry +
+  attribution view + leaderboard row. Lives in the frontend/trading-JVM repos;
+  consumes `GET /pool/performance` + `GET /pool/book`. Premature to build before
+  member #1.

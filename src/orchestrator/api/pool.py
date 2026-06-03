@@ -46,6 +46,13 @@ class SyncBody(BaseModel):
     dry_run: bool = True
 
 
+class ReconcileBody(BaseModel):
+    # Preview by default. Evicts active members whose marginal Sharpe vs the
+    # rest of the pool has fallen to/below evict_theta (gone redundant).
+    dry_run: bool = True
+    evict_theta: float = Field(0.0, ge=-5.0, le=5.0)
+
+
 async def _existing_active(conn: asyncpg.Connection, ctx: dict[str, Any]) -> Any:
     return await conn.fetchval(
         """
@@ -184,6 +191,15 @@ async def rebalance(
     total = sum(clamped.values()) or 1.0
     weights = {k: w / total for k, w in clamped.items()}
 
+    # Phase 1-B book risk guard: cap aggregate weight per symbol (diversify
+    # across symbols, not just members) before persisting.
+    symbol_by_key = {
+        f"{m['strategy_code']}:{m['symbol']}:{m['interval_name']}": m["symbol"]
+        for m in members
+    }
+    cap = request.app.state.settings.house_book_max_per_symbol
+    weights, cap_diag = pool_svc.apply_per_symbol_cap(weights, symbol_by_key, cap)
+
     n = 0
     for m in members:
         key = f"{m['strategy_code']}:{m['symbol']}:{m['interval_name']}"
@@ -206,7 +222,9 @@ async def rebalance(
         "optimizer": "HRP",
         "n_updated": n,
         "weights": {k: round(v, 5) for k, v in weights.items()},
-        "guardrails": {"min_weight": _MIN_W, "max_weight": _MAX_W},
+        "guardrails": {"min_weight": _MIN_W, "max_weight": _MAX_W,
+                       "max_per_symbol": cap},
+        "per_symbol_cap": cap_diag,
     }
     await cache_response(request, agent, "pool_rebalance", idem_key, response)
     return response
@@ -280,3 +298,76 @@ async def get_book(
             for z in plan["to_zero"]
         ],
     }
+
+
+# ── Phase 1-B: eviction lifecycle ────────────────────────────────────
+
+
+@router.post("/reconcile")
+async def reconcile(
+    body: ReconcileBody,
+    request: Request,
+    conn: asyncpg.Connection = Depends(get_db_conn),
+    agent: str = Depends(get_agent_name),
+) -> dict[str, Any]:
+    """Re-score each active member's marginal contribution vs the rest of the
+    pool; evict members that have gone redundant (marginal ≤ evict_theta).
+    Preview-only unless body.dry_run=false."""
+    verdicts = await pool_svc.evaluate_members_for_eviction(conn, evict_theta=body.evict_theta)
+    to_evict = [v for v in verdicts if v["evict"]]
+
+    evicted = 0
+    if not body.dry_run and to_evict:
+        cached, idem_key = await replay_cached_response(request, agent, "pool_reconcile")
+        if cached is not None:
+            return cached
+        for v in to_evict:
+            await conn.execute(
+                """
+                UPDATE signal_pool
+                   SET status = 'evicted', evicted_at = NOW(),
+                       evicted_reason = $1, updated_time = NOW(), updated_by = $2
+                 WHERE pool_id = $3 AND status = 'active'
+                """,
+                f"marginal {v['marginal']} ≤ evict_theta {body.evict_theta}",
+                agent, v["pool_id"],
+            )
+            evicted += 1
+        response = {
+            "applied": True, "dry_run": False, "n_evicted": evicted,
+            "evict_theta": body.evict_theta,
+            "evicted": [{"surface": v["key"], "marginal": v["marginal"]} for v in to_evict],
+            "verdicts": _redact_verdicts(verdicts),
+        }
+        await cache_response(request, agent, "pool_reconcile", idem_key, response)
+        return response
+
+    return {
+        "applied": False, "dry_run": True,
+        "evict_theta": body.evict_theta,
+        "would_evict": [{"surface": v["key"], "marginal": v["marginal"]} for v in to_evict],
+        "verdicts": _redact_verdicts(verdicts),
+    }
+
+
+def _redact_verdicts(verdicts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {"surface": v["key"], "marginal": v["marginal"],
+         "evict": v["evict"], "reason": v["reason"]}
+        for v in verdicts
+    ]
+
+
+# ── Phase 1-C: book performance + attribution ────────────────────────
+
+
+@router.get("/performance")
+async def performance(
+    conn: asyncpg.Connection = Depends(get_db_conn),
+    _: str = Depends(get_agent_name),
+) -> dict[str, Any]:
+    """Combined HRP-weighted book performance vs each member standalone, with
+    per-member attribution and the combined equity curve. Headline:
+    ``combined_beats_best_member`` — the diversification payoff the pool exists
+    to capture."""
+    return await pool_svc.book_performance(conn)

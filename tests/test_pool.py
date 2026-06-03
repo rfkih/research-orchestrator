@@ -77,3 +77,34 @@ def test_sparse_series_is_annualised_on_calendar_grid():
     # Same 8 returns but spread far apart (weekly) → many zero days between.
     sparse = {date(2026, 1, 1) + timedelta(days=7 * i): (0.02 if i % 2 == 0 else -0.01) for i in range(8)}
     assert pool.annualised_sharpe(sparse) < pool.annualised_sharpe(dense)
+
+
+# ── Phase 1-B: per-symbol cap (pure) ─────────────────────────────────
+
+_SYM = {"BTC_a": "BTCUSDT", "BTC_b": "BTCUSDT", "ETH": "ETHUSDT"}
+
+
+def test_per_symbol_cap_scales_down_concentrated_symbol():
+    # BTC holds 0.8 across two members, over the 0.5 cap → scaled to 0.5, the
+    # freed 0.3 water-filled to ETH. Weights still sum to 1.
+    weights = {"BTC_a": 0.6, "BTC_b": 0.2, "ETH": 0.2}
+    out, diag = pool.apply_per_symbol_cap(weights, _SYM, 0.50)
+    assert diag["capped"] is True
+    assert abs(sum(out.values()) - 1.0) < 1e-6
+    assert out["BTC_a"] + out["BTC_b"] <= 0.5 + 1e-6
+    assert diag["per_symbol"]["BTCUSDT"] <= 0.5 + 1e-6
+
+
+def test_per_symbol_cap_noop_when_within_cap():
+    weights = {"BTC_a": 0.3, "BTC_b": 0.2, "ETH": 0.5}  # BTC=0.5 exactly at cap
+    out, diag = pool.apply_per_symbol_cap(weights, _SYM, 0.50)
+    assert diag["capped"] is False
+    assert abs(sum(out.values()) - 1.0) < 1e-6
+
+
+def test_per_symbol_cap_infeasible_single_symbol_returns_unchanged():
+    # One symbol can't be held below 0.5 while summing to 1 → cap skipped, flagged.
+    weights = {"BTC_a": 0.7, "BTC_b": 0.3}
+    out, diag = pool.apply_per_symbol_cap(weights, _SYM, 0.50)
+    assert diag["capped"] is False and diag["reason"] == "infeasible_cap"
+    assert out == weights

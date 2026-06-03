@@ -318,3 +318,135 @@ async def evaluate_admission(
         "ctx": ctx,
         "contribution": contribution,
     }
+
+
+# ── Phase 1-B: book risk guard + eviction lifecycle ──────────────────
+
+
+def apply_per_symbol_cap(
+    weights: dict[str, float],
+    symbol_by_key: dict[str, str],
+    cap: float,
+) -> tuple[dict[str, float], dict[str, Any]]:
+    """Cap aggregate book weight on any single symbol at ``cap``, water-filling
+    the freed weight to under-cap members. Returns (weights, diagnostics).
+
+    Infeasible compositions (n_symbols × cap < 1) can't honour the cap while
+    summing to 1, so we return the input unchanged + ``capped=False`` rather
+    than silently under-deploying the book."""
+    eps = 1e-9
+    symbols = {symbol_by_key[k] for k in weights}
+    if not weights:
+        return {}, {"capped": False, "reason": "empty"}
+    if len(symbols) * cap < 1.0 - eps:
+        return dict(weights), {
+            "capped": False, "reason": "infeasible_cap",
+            "n_symbols": len(symbols), "cap": cap,
+        }
+    w = dict(weights)
+    changed = False
+    for _ in range(20):
+        sym_total: dict[str, float] = {}
+        for k, val in w.items():
+            sym_total[symbol_by_key[k]] = sym_total.get(symbol_by_key[k], 0.0) + val
+        over = {s for s, t in sym_total.items() if t > cap + eps}
+        if not over:
+            break
+        changed = True
+        for k in w:
+            s = symbol_by_key[k]
+            if s in over and sym_total[s] > 0:
+                w[k] *= cap / sym_total[s]
+        deficit = 1.0 - sum(w.values())
+        if deficit <= eps:
+            break
+        uncapped = [k for k in w if symbol_by_key[k] not in over]
+        unc_total = sum(w[k] for k in uncapped)
+        if unc_total <= eps:
+            break
+        for k in uncapped:
+            w[k] += deficit * w[k] / unc_total
+    total = sum(w.values()) or 1.0
+    w = {k: v / total for k, v in w.items()}
+    per_symbol = {
+        s: round(sum(w[k] for k in w if symbol_by_key[k] == s), 5) for s in symbols
+    }
+    return w, {"capped": changed, "cap": cap, "per_symbol": per_symbol}
+
+
+async def evaluate_members_for_eviction(
+    conn: asyncpg.Connection, *, evict_theta: float = 0.0
+) -> list[dict[str, Any]]:
+    """Per active member, recompute its marginal Sharpe contribution vs the
+    REST of the pool (member-as-candidate). A member that no longer adds
+    return (marginal ≤ ``evict_theta``) is flagged for eviction — it has gone
+    redundant. The sole remaining member is never evicted."""
+    members = await conn.fetch(
+        "SELECT pool_id, strategy_code, symbol, interval_name "
+        "FROM signal_pool WHERE status = 'active'"
+    )
+    series = await _active_members_returns(conn)
+    out: list[dict[str, Any]] = []
+    for m in members:
+        key = f"{m['strategy_code']}:{m['symbol']}:{m['interval_name']}"
+        cand = series.get(key)
+        if cand is None:
+            out.append({"pool_id": m["pool_id"], "key": key, "marginal": None,
+                        "evict": False, "reason": "no_series"})
+            continue
+        others = {k: s for k, s in series.items() if k != key}
+        contrib = marginal_sharpe_contribution(cand, others)
+        evict = bool(others) and contrib["marginal"] <= evict_theta
+        out.append({"pool_id": m["pool_id"], "key": key,
+                    "marginal": contrib["marginal"], "evict": evict,
+                    "reason": contrib.get("reason")})
+    return out
+
+
+# ── Phase 1-C: book performance + attribution ────────────────────────
+
+
+async def book_performance(conn: asyncpg.Connection) -> dict[str, Any]:
+    """Combined HRP-weighted book performance vs each member standalone, plus
+    per-member attribution and the combined equity curve. The headline metric
+    is ``combined_beats_best_member`` — the diversification payoff."""
+    series = await _active_members_returns(conn)
+    if not series:
+        return {"n_members": 0, "members": [], "combined_sharpe": 0.0,
+                "best_member_sharpe": 0.0, "combined_beats_best_member": False,
+                "equity_curve": [], "window": None}
+    w = _hrp_for(series)
+    window = _common_window(list(series.values()))
+    members_out = []
+    best = 0.0
+    for key, s in series.items():
+        sa = annualised_sharpe(s)
+        best = max(best, sa)
+        weight = round(w.get(key, 0.0), 5)
+        mean_ret = sum(s.values()) / len(s) if s else 0.0
+        members_out.append({
+            "surface": key,
+            "weight": weight,
+            "standalone_sharpe": round(sa, 4),
+            "mean_daily_return": round(mean_ret, 6),
+            "contribution": round(weight * mean_ret, 6),
+        })
+    combined_sharpe = 0.0
+    equity: list[dict[str, Any]] = []
+    if window is not None:
+        combined = _combined_series(w, series, window)
+        combined_sharpe = annualised_sharpe(combined)
+        cum = 0.0
+        for d in sorted(combined):
+            cum += combined[d]
+            equity.append({"date": d.isoformat(), "cum_return": round(cum, 6)})
+    return {
+        "n_members": len(series),
+        "combined_sharpe": round(combined_sharpe, 4),
+        "best_member_sharpe": round(best, 4),
+        "combined_beats_best_member": combined_sharpe > best,
+        "members": sorted(members_out, key=lambda r: r["surface"]),
+        "equity_curve": equity,
+        "window": None if window is None
+        else {"start": window[0].isoformat(), "end": window[1].isoformat()},
+    }
