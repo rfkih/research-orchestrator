@@ -169,6 +169,9 @@ def resolve_iter_budget(
 async def list_queue(
     status: str | None = Query(None, description="PENDING|RUNNING|PARKED|COMPLETED|FAILED"),
     strategy_code: str | None = Query(None),
+    final_verdict: str | None = Query(
+        None, description="Server-side filter on the row's final_verdict (e.g. SIGNIFICANT_EDGE)."
+    ),
     cursor: str | None = Query(None, description="Opaque. From a prior next_cursor."),
     limit: int = Query(25, ge=1, le=200),
     conn: asyncpg.Connection = Depends(get_db_conn),
@@ -188,6 +191,7 @@ async def list_queue(
         conn,
         status=status,
         strategy_code=strategy_code,
+        final_verdict=final_verdict,
         after_created_time=after_t,
         after_id=after_id,
         limit=limit + 1,  # over-fetch by one to detect "has next"
