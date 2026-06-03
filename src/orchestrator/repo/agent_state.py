@@ -41,7 +41,9 @@ async def _last_iterations(conn: asyncpg.Connection, n: int) -> list[dict[str, A
         SELECT iteration_id, strategy_code, iteration_number,
                statistical_verdict, verdict, created_time,
                (metrics_snapshot->>'profit_factor')::numeric AS pf,
-               (metrics_snapshot->>'trade_count')::int       AS n_trades
+               -- top-level run metric is ``total_trades`` (no ``trade_count`` key);
+               -- the prior read was always NULL. See iterations.py _LEADERBOARD_SORTS.
+               (metrics_snapshot->>'total_trades')::int       AS n_trades
         FROM research_iteration_log
         ORDER BY created_time DESC, iteration_id::text DESC
         LIMIT $1

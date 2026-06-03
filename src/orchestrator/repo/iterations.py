@@ -26,7 +26,12 @@ _LEADERBOARD_SORTS = {
     "pf": "(metrics_snapshot->>'profit_factor')::numeric",
     "return_pct": "(metrics_snapshot->>'return_pct')::numeric",
     "sharpe": "(metrics_snapshot->>'sharpe_ratio')::numeric",
-    "trade_count": "(metrics_snapshot->>'trade_count')::int",
+    # metrics_snapshot = {**run_metrics, "analysis": analysis} (tick.py). The
+    # run-level trade count is the top-level ``total_trades`` key (from
+    # backtest_run); there is no ``trade_count`` key, so the prior read was
+    # always NULL → this sort silently no-op'd. (The analyzer's nested count
+    # is metrics_snapshot->'analysis'->>'n_trades'.)
+    "trade_count": "(metrics_snapshot->>'total_trades')::int",
     "created": "created_time",
 }
 
@@ -194,7 +199,7 @@ async def leaderboard(
                (confidence_intervals->'pf_95'->>'high')::numeric       AS pf_hi,
                (metrics_snapshot->>'return_pct')::numeric              AS return_pct,
                (metrics_snapshot->>'sharpe_ratio')::numeric            AS sharpe,
-               (metrics_snapshot->>'trade_count')::int                 AS trade_count,
+               (metrics_snapshot->>'total_trades')::int               AS trade_count,
                sample_size_adequate,
                git_commit_hash,
                created_time
