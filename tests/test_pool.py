@@ -108,3 +108,23 @@ def test_per_symbol_cap_infeasible_single_symbol_returns_unchanged():
     out, diag = pool.apply_per_symbol_cap(weights, _SYM, 0.50)
     assert diag["capped"] is False and diag["reason"] == "infeasible_cap"
     assert out == weights
+
+
+def test_per_symbol_cap_never_leaves_a_symbol_over_cap():
+    # B1 regression: the case the old water-fill oscillated on. Every symbol
+    # must end ≤ cap and weights must sum to 1.
+    sym = {"A": "SA", "B": "SB", "C": "SC", "D": "SD"}
+    out, diag = pool.apply_per_symbol_cap({"A": 0.4, "B": 0.3, "C": 0.2, "D": 0.1}, sym, 0.30)
+    assert abs(sum(out.values()) - 1.0) < 1e-6
+    for s, w in diag["per_symbol"].items():
+        assert w <= 0.30 + 1e-6, (s, w)
+
+
+def test_greedy_eviction_keeps_one_of_a_redundant_pair():
+    # B2 regression: two identical members (each adds 0 marginal vs the other).
+    # A single-pass rule would flag BOTH and wipe the signal entirely. Greedy
+    # must evict exactly ONE and keep the other.
+    s = _series([0.02, -0.01, 0.02, -0.01, 0.02, -0.01, 0.02, -0.01])
+    evicted = pool._greedy_evictions({"A": dict(s), "A2": dict(s)}, 0.001)
+    assert len(evicted) == 1
+    assert evicted[0]["key"] in {"A", "A2"}

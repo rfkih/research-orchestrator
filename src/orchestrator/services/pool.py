@@ -333,74 +333,112 @@ def apply_per_symbol_cap(
 
     Infeasible compositions (n_symbols × cap < 1) can't honour the cap while
     summing to 1, so we return the input unchanged + ``capped=False`` rather
-    than silently under-deploying the book."""
+    than silently under-deploying the book.
+
+    Algorithm: water-fill at the SYMBOL level with pinning — a symbol that would
+    exceed its fair share is pinned at exactly ``cap`` and removed from the free
+    pool (never re-inflates), then the remaining budget is split among the free
+    symbols. Converges in ≤ n_symbols passes and guarantees every symbol ≤ cap.
+    Each symbol's weight is then split among its members by their input share."""
     eps = 1e-9
-    symbols = {symbol_by_key[k] for k in weights}
     if not weights:
         return {}, {"capped": False, "reason": "empty"}
+    symbols = {symbol_by_key[k] for k in weights}
     if len(symbols) * cap < 1.0 - eps:
         return dict(weights), {
             "capped": False, "reason": "infeasible_cap",
             "n_symbols": len(symbols), "cap": cap,
         }
-    w = dict(weights)
-    changed = False
-    for _ in range(20):
-        sym_total: dict[str, float] = {}
-        for k, val in w.items():
-            sym_total[symbol_by_key[k]] = sym_total.get(symbol_by_key[k], 0.0) + val
-        over = {s for s, t in sym_total.items() if t > cap + eps}
-        if not over:
+    # Symbol-level base shares (input weights sum to ~1).
+    sym_base: dict[str, float] = {}
+    for k, val in weights.items():
+        sym_base[symbol_by_key[k]] = sym_base.get(symbol_by_key[k], 0.0) + val
+
+    pinned: set[str] = set()
+    sym_w: dict[str, float] = {}
+    for _ in range(len(symbols) + 1):
+        free = [s for s in sym_base if s not in pinned]
+        free_budget = max(0.0, 1.0 - cap * len(pinned))
+        free_total = sum(sym_base[s] for s in free) or 1.0
+        newly = [s for s in free if free_budget * sym_base[s] / free_total > cap + eps]
+        if not newly:
+            for s in sym_base:
+                sym_w[s] = cap if s in pinned else free_budget * sym_base[s] / free_total
             break
-        changed = True
-        for k in w:
-            s = symbol_by_key[k]
-            if s in over and sym_total[s] > 0:
-                w[k] *= cap / sym_total[s]
-        deficit = 1.0 - sum(w.values())
-        if deficit <= eps:
+        pinned.update(newly)
+
+    # Split each symbol's weight among its members by within-symbol share.
+    out: dict[str, float] = {}
+    for s, w_s in sym_w.items():
+        members_s = [k for k in weights if symbol_by_key[k] == s]
+        tot = sum(weights[k] for k in members_s) or 1.0
+        for k in members_s:
+            out[k] = w_s * weights[k] / tot
+    per_symbol = {s: round(sym_w.get(s, 0.0), 5) for s in symbols}
+    return out, {"capped": bool(pinned), "cap": cap, "per_symbol": per_symbol}
+
+
+def _greedy_evictions(
+    series_by_key: dict[str, dict[date, float]], evict_theta: float
+) -> list[dict[str, Any]]:
+    """Greedily flag redundant members ONE AT A TIME: find the member whose
+    marginal vs the rest is lowest and ≤ θ, evict it, then re-evaluate the
+    survivors. Stops when none qualify or one member remains.
+
+    One-at-a-time is essential: a mutually-redundant pair (A≈B) would BOTH show
+    ~0 marginal in a single pass and both be evicted, wiping a signal the book
+    should keep. After A is removed, B's marginal vs the rest jumps positive and
+    B survives — exactly the intended behaviour."""
+    remaining = dict(series_by_key)
+    evicted: list[dict[str, Any]] = []
+    while len(remaining) > 1:
+        worst_key: str | None = None
+        worst_marg: float | None = None
+        for k, s in remaining.items():
+            others = {kk: ss for kk, ss in remaining.items() if kk != k}
+            m = marginal_sharpe_contribution(s, others)["marginal"]
+            if m <= evict_theta and (worst_marg is None or m < worst_marg):
+                worst_key, worst_marg = k, m
+        if worst_key is None:
             break
-        uncapped = [k for k in w if symbol_by_key[k] not in over]
-        unc_total = sum(w[k] for k in uncapped)
-        if unc_total <= eps:
-            break
-        for k in uncapped:
-            w[k] += deficit * w[k] / unc_total
-    total = sum(w.values()) or 1.0
-    w = {k: v / total for k, v in w.items()}
-    per_symbol = {
-        s: round(sum(w[k] for k in w if symbol_by_key[k] == s), 5) for s in symbols
-    }
-    return w, {"capped": changed, "cap": cap, "per_symbol": per_symbol}
+        evicted.append({"key": worst_key, "marginal": worst_marg})
+        del remaining[worst_key]
+    return evicted
 
 
 async def evaluate_members_for_eviction(
     conn: asyncpg.Connection, *, evict_theta: float = 0.0
-) -> list[dict[str, Any]]:
-    """Per active member, recompute its marginal Sharpe contribution vs the
-    REST of the pool (member-as-candidate). A member that no longer adds
-    return (marginal ≤ ``evict_theta``) is flagged for eviction — it has gone
-    redundant. The sole remaining member is never evicted."""
+) -> dict[str, Any]:
+    """Decide which active members to evict (greedy, one-at-a-time). Returns
+    {evict: [{pool_id, key, marginal}], verdicts: [...]} where ``evict`` is the
+    ordered eviction list and ``verdicts`` is the per-member first-pass view.
+    Pure of writes — the API layer applies + journals."""
     members = await conn.fetch(
         "SELECT pool_id, strategy_code, symbol, interval_name "
         "FROM signal_pool WHERE status = 'active'"
     )
     series = await _active_members_returns(conn)
-    out: list[dict[str, Any]] = []
-    for m in members:
-        key = f"{m['strategy_code']}:{m['symbol']}:{m['interval_name']}"
+    pool_id_by_key = {
+        f"{m['strategy_code']}:{m['symbol']}:{m['interval_name']}": m["pool_id"]
+        for m in members
+    }
+
+    # First-pass per-member view (diagnostics).
+    verdicts: list[dict[str, Any]] = []
+    for key, pid in pool_id_by_key.items():
         cand = series.get(key)
         if cand is None:
-            out.append({"pool_id": m["pool_id"], "key": key, "marginal": None,
-                        "evict": False, "reason": "no_series"})
+            verdicts.append({"key": key, "marginal": None, "reason": "no_series"})
             continue
         others = {k: s for k, s in series.items() if k != key}
-        contrib = marginal_sharpe_contribution(cand, others)
-        evict = bool(others) and contrib["marginal"] <= evict_theta
-        out.append({"pool_id": m["pool_id"], "key": key,
-                    "marginal": contrib["marginal"], "evict": evict,
-                    "reason": contrib.get("reason")})
-    return out
+        c = marginal_sharpe_contribution(cand, others)
+        verdicts.append({"key": key, "marginal": c["marginal"], "reason": c.get("reason")})
+
+    evict = [
+        {"pool_id": pool_id_by_key.get(e["key"]), "key": e["key"], "marginal": e["marginal"]}
+        for e in _greedy_evictions(series, evict_theta)
+    ]
+    return {"evict": evict, "verdicts": verdicts}
 
 
 # ── Phase 1-C: book performance + attribution ────────────────────────
@@ -417,10 +455,19 @@ async def book_performance(conn: asyncpg.Connection) -> dict[str, Any]:
                 "equity_curve": [], "window": None}
     w = _hrp_for(series)
     window = _common_window(list(series.values()))
+
+    def _on_window(s: dict[date, float]) -> dict[date, float]:
+        # Restrict a member to the common window so its standalone Sharpe is
+        # measured on the SAME period as the combined book (apples-to-apples).
+        if window is None:
+            return s
+        start, end = window
+        return {d: r for d, r in s.items() if start <= d <= end}
+
     members_out = []
     best = 0.0
     for key, s in series.items():
-        sa = annualised_sharpe(s)
+        sa = annualised_sharpe(_on_window(s))
         best = max(best, sa)
         weight = round(w.get(key, 0.0), 5)
         mean_ret = sum(s.values()) / len(s) if s else 0.0
@@ -436,10 +483,10 @@ async def book_performance(conn: asyncpg.Connection) -> dict[str, Any]:
     if window is not None:
         combined = _combined_series(w, series, window)
         combined_sharpe = annualised_sharpe(combined)
-        cum = 0.0
+        equity_val = 1.0  # geometric compounding of daily returns
         for d in sorted(combined):
-            cum += combined[d]
-            equity.append({"date": d.isoformat(), "cum_return": round(cum, 6)})
+            equity_val *= 1.0 + combined[d]
+            equity.append({"date": d.isoformat(), "cum_return": round(equity_val - 1.0, 6)})
     return {
         "n_members": len(series),
         "combined_sharpe": round(combined_sharpe, 4),

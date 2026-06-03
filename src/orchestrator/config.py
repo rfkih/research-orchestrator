@@ -109,7 +109,7 @@ class Settings(BaseSettings):
     # symbol — caps concentration when several pool members trade the same
     # symbol. Applied during /pool/rebalance. Infeasible compositions
     # (n_symbols × cap < 1) skip the cap and flag rather than under-deploy.
-    house_book_max_per_symbol: float = 0.50
+    house_book_max_per_symbol: float = Field(0.50, gt=0.0, le=1.0)
 
     telegram_bot_token: SecretStr | None = None
     telegram_chat_id: str | None = None

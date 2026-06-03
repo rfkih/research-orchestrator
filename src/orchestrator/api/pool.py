@@ -311,51 +311,55 @@ async def reconcile(
     agent: str = Depends(get_agent_name),
 ) -> dict[str, Any]:
     """Re-score each active member's marginal contribution vs the rest of the
-    pool; evict members that have gone redundant (marginal ≤ evict_theta).
+    pool; evict members that have gone redundant (marginal ≤ evict_theta),
+    greedily one-at-a-time so a mutually-redundant pair isn't both wiped.
     Preview-only unless body.dry_run=false."""
-    verdicts = await pool_svc.evaluate_members_for_eviction(conn, evict_theta=body.evict_theta)
-    to_evict = [v for v in verdicts if v["evict"]]
-
-    evicted = 0
-    if not body.dry_run and to_evict:
+    # Idempotency at the TOP for the write path, so a retry replays the original
+    # response shape (not a post-eviction "nothing to do" body).
+    idem_key = None
+    if not body.dry_run:
         cached, idem_key = await replay_cached_response(request, agent, "pool_reconcile")
         if cached is not None:
             return cached
-        for v in to_evict:
-            await conn.execute(
-                """
-                UPDATE signal_pool
-                   SET status = 'evicted', evicted_at = NOW(),
-                       evicted_reason = $1, updated_time = NOW(), updated_by = $2
-                 WHERE pool_id = $3 AND status = 'active'
-                """,
-                f"marginal {v['marginal']} ≤ evict_theta {body.evict_theta}",
-                agent, v["pool_id"],
-            )
-            evicted += 1
-        response = {
-            "applied": True, "dry_run": False, "n_evicted": evicted,
+
+    result = await pool_svc.evaluate_members_for_eviction(conn, evict_theta=body.evict_theta)
+    to_evict = result["evict"]
+
+    if body.dry_run:
+        return {
+            "applied": False, "dry_run": True,
             "evict_theta": body.evict_theta,
-            "evicted": [{"surface": v["key"], "marginal": v["marginal"]} for v in to_evict],
-            "verdicts": _redact_verdicts(verdicts),
+            "would_evict": [{"surface": e["key"], "marginal": e["marginal"]} for e in to_evict],
+            "verdicts": result["verdicts"],
         }
-        await cache_response(request, agent, "pool_reconcile", idem_key, response)
-        return response
 
-    return {
-        "applied": False, "dry_run": True,
+    for e in to_evict:
+        await conn.execute(
+            """
+            UPDATE signal_pool
+               SET status = 'evicted', evicted_at = NOW(),
+                   evicted_reason = $1, updated_time = NOW(), updated_by = $2
+             WHERE pool_id = $3 AND status = 'active'
+            """,
+            f"marginal {e['marginal']} ≤ evict_theta {body.evict_theta}",
+            agent, e["pool_id"],
+        )
+    response: dict[str, Any] = {
+        "applied": True, "dry_run": False, "n_evicted": len(to_evict),
         "evict_theta": body.evict_theta,
-        "would_evict": [{"surface": v["key"], "marginal": v["marginal"]} for v in to_evict],
-        "verdicts": _redact_verdicts(verdicts),
+        "evicted": [{"surface": e["key"], "marginal": e["marginal"]} for e in to_evict],
+        "verdicts": result["verdicts"],
     }
-
-
-def _redact_verdicts(verdicts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        {"surface": v["key"], "marginal": v["marginal"],
-         "evict": v["evict"], "reason": v["reason"]}
-        for v in verdicts
-    ]
+    if to_evict:
+        # Eviction only flips signal_pool.status; the live weight is zeroed by
+        # the next sync (evicted member → non-member → to_zero).
+        response["next_action"] = {
+            "kind": "call", "method": "POST", "path": "/pool/sync",
+            "hint": "POST /pool/sync {dry_run:false} to zero the evicted "
+                    "members' live weights, then /pool/rebalance the survivors.",
+        }
+    await cache_response(request, agent, "pool_reconcile", idem_key, response)
+    return response
 
 
 # ── Phase 1-C: book performance + attribution ────────────────────────

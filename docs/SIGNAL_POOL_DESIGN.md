@@ -235,3 +235,19 @@ A self-audit of Phase 0 + 1-A found and fixed:
   attribution view + leaderboard row. Lives in the frontend/trading-JVM repos;
   consumes `GET /pool/performance` + `GET /pool/book`. Premature to build before
   member #1.
+
+## 1-B / 1-C audit fixes (2026-06-03)
+
+- **B1** `apply_per_symbol_cap` rewritten as symbol-level water-fill with
+  pinning — guarantees every symbol ≤ cap (the old version could re-inflate a
+  capped symbol and leave it marginally over).
+- **B2** eviction is greedy one-at-a-time (`_greedy_evictions`) — a
+  mutually-redundant pair no longer wipes itself out; one is kept.
+- **B3** `combined_beats_best_member` now compares each member's standalone
+  Sharpe on the SAME overlap window as the combined book (was full-window).
+- **B4** `/pool/reconcile` checks idempotency at the top so a retry replays the
+  original response shape.
+- **B5** `/pool/reconcile` returns a `next_action` hint to `/pool/sync` (eviction
+  only flips status; live weight is zeroed by the next sync).
+- **B6** combined equity curve compounds geometrically `(1+r)`.
+- **B7** `house_book_max_per_symbol` bounded to (0, 1].
