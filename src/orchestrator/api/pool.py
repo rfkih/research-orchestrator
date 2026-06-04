@@ -40,6 +40,16 @@ class EvaluateBody(BaseModel):
     theta: float = Field(DEFAULT_THETA, ge=0.0, le=5.0)
 
 
+class EvaluateStreamBody(BaseModel):
+    """Stream admission (carry/basis/vol). ``iteration_id`` is the reference backtest
+    (audit anchor / signal_pool FK); the trade-count verdict is bypassed for streams."""
+    strategy_code: str
+    symbol: str
+    interval_name: str
+    iteration_id: UUID
+    theta: float = Field(DEFAULT_THETA, ge=0.0, le=5.0)
+
+
 class SyncBody(BaseModel):
     # Safe by default: a bare POST /pool/sync only previews. Live weights move
     # only when the caller explicitly sets dry_run=false.
@@ -127,6 +137,75 @@ async def evaluate(
             "contribution": verdict["contribution"],
         }
     await cache_response(request, agent, "pool_evaluate", idem_key, response)
+    return response
+
+
+@router.post("/evaluate-stream")
+async def evaluate_stream(
+    body: EvaluateStreamBody,
+    request: Request,
+    conn: asyncpg.Connection = Depends(get_db_conn),
+    agent: str = Depends(get_agent_name),
+) -> dict[str, Any]:
+    """Admit a market-neutral STREAM (carry) on its return-series validity instead of
+    the trade-count SIGNIFICANT_EDGE gate. Same marginal-Sharpe + signal_pool insert."""
+    cached, idem_key = await replay_cached_response(request, agent, "pool_evaluate_stream")
+    if cached is not None:
+        return cached
+
+    verdict = await pool_svc.evaluate_stream_admission(
+        conn, body.strategy_code, body.symbol, body.interval_name,
+        body.iteration_id, theta=body.theta,
+    )
+    surface = f"{body.strategy_code}:{body.symbol}:{body.interval_name}"
+    if not verdict["admit"]:
+        return {
+            "admitted": False,
+            "reason": verdict["reason"],
+            "surface": surface,
+            "validity": verdict.get("validity"),
+            "contribution": verdict.get("contribution"),
+        }
+
+    v, c = verdict["validity"], verdict["contribution"]
+    metrics = {
+        "kind": "stream",
+        "psr": v.get("psr"),
+        "ann_sharpe": v.get("ann_sharpe"),
+        "years_positive": v.get("years_positive"),
+        "n_obs": v.get("n_obs"),
+        **{k: c[k] for k in ("marginal", "sharpe_before", "sharpe_after", "max_abs_corr", "n_overlap")},
+        "theta": verdict["theta"],
+    }
+    pool_id = await conn.fetchval(
+        """
+        INSERT INTO signal_pool
+          (iteration_id, strategy_code, symbol, interval_name,
+           admission_metrics, status, created_by, updated_by)
+        VALUES ($1, $2, $3, $4, $5, 'active', $6, $6)
+        ON CONFLICT (strategy_code, symbol, interval_name)
+            WHERE status = 'active'
+        DO NOTHING
+        RETURNING pool_id
+        """,
+        body.iteration_id, body.strategy_code, body.symbol, body.interval_name, metrics, agent,
+    )
+    if pool_id is None:
+        existing = await conn.fetchval(
+            "SELECT pool_id FROM signal_pool WHERE status = 'active' "
+            "AND strategy_code = $1 AND symbol = $2 AND interval_name = $3",
+            body.strategy_code, body.symbol, body.interval_name,
+        )
+        response = {
+            "admitted": True, "reason": "already_pooled",
+            "pool_id": str(existing) if existing is not None else None, "surface": surface,
+        }
+    else:
+        response = {
+            "admitted": True, "reason": "admitted", "pool_id": str(pool_id),
+            "surface": surface, "validity": v, "contribution": c,
+        }
+    await cache_response(request, agent, "pool_evaluate_stream", idem_key, response)
     return response
 
 
