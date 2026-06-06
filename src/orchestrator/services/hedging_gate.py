@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 import math
+import random
 
 # ── Pinned gate constants (operator-tunable; pin-tested below) ──────────
 TOL_CAGR_PCT: float = 5.0       # hedge may give up at most this much CAGR vs buy-hold
@@ -88,4 +89,98 @@ def beats_buy_hold_risk_adj(*, strat: dict[str, Any], bench: dict[str, Any]) -> 
             "beats buy-hold risk-adjusted" if passed
             else ("CAGR floor breached" if not floor_ok else "no material risk improvement")
         ),
+    }
+
+
+def improvement_significant(
+    *, strat_returns: list[float], bench_returns: list[float]
+) -> dict[str, Any]:
+    """Stationary block bootstrap of the paired daily-return series.
+
+    Replaces V11 (trade-level) for track=hedging. The strategy and benchmark
+    daily returns are paired index-aligned over the common window; each
+    bootstrap resample draws contiguous blocks (with wraparound) at matching
+    positions in BOTH series, then computes ``sharpe(strat) - sharpe(bench)``.
+    The improvement is "significant" iff the ``CI_LEVEL`` lower percentile of
+    those paired differences is strictly > 0.
+
+    Deterministic: uses ``random.Random(RNG_SEED)`` (never global ``random``)
+    so the same inputs always yield the same CI. Block length is the standard
+    n**(1/3) rule. Fails closed (not significant) on thin data (< 30 paired
+    obs) with ``reason="insufficient_overlap"``.
+    """
+    n = min(len(strat_returns), len(bench_returns))
+    if n < 30:
+        return {
+            "sharpe_improvement_significant": False,
+            "ci_low": 0.0,
+            "ci_high": 0.0,
+            "n_obs": n,
+            "reason": "insufficient_overlap",
+        }
+
+    strat = list(strat_returns[:n])
+    bench = list(bench_returns[:n])
+    block = max(1, round(n ** (1.0 / 3.0)))
+    rng = random.Random(RNG_SEED)
+
+    # Bootstrap-local Sharpe: reuses _sharpe but resolves its degenerate
+    # zero-variance case (which returns None) so the paired difference stays
+    # defined. A constant return stream is the limiting best/worst risk-adjusted
+    # case — positive mean → +inf Sharpe (capped), negative → -inf, flat → 0.
+    # _sharpe itself is left untouched (decision-gate metrics rely on its
+    # None-on-zero-variance contract).
+    _CONST_SHARPE_CAP = 1e6
+
+    def _bs_sharpe(rets: list[float]) -> float | None:
+        s = _sharpe(rets)
+        if s is not None:
+            return s
+        if len(rets) < 2:
+            return None
+        mu = sum(rets) / len(rets)
+        if mu > 0:
+            return _CONST_SHARPE_CAP
+        if mu < 0:
+            return -_CONST_SHARPE_CAP
+        return 0.0
+
+    diffs: list[float] = []
+    for _ in range(BOOTSTRAP_REPS):
+        s_sample: list[float] = []
+        b_sample: list[float] = []
+        while len(s_sample) < n:
+            start = rng.randrange(n)
+            for k in range(block):
+                if len(s_sample) >= n:
+                    break
+                idx = (start + k) % n
+                s_sample.append(strat[idx])
+                b_sample.append(bench[idx])
+        s_sh = _bs_sharpe(s_sample)
+        b_sh = _bs_sharpe(b_sample)
+        if s_sh is None or b_sh is None:
+            continue
+        diffs.append(s_sh - b_sh)
+
+    if not diffs:
+        return {
+            "sharpe_improvement_significant": False,
+            "ci_low": 0.0,
+            "ci_high": 0.0,
+            "n_obs": n,
+            "reason": "no finite bootstrap resamples",
+        }
+
+    diffs.sort()
+    alpha = (1.0 - CI_LEVEL) / 2.0
+    lo_idx = int(alpha * len(diffs))
+    hi_idx = max(int((1.0 - alpha) * len(diffs)) - 1, 0)
+    ci_low = diffs[lo_idx]
+    ci_high = diffs[hi_idx]
+    return {
+        "sharpe_improvement_significant": bool(ci_low > 0.0),
+        "ci_low": round(ci_low, 6),
+        "ci_high": round(ci_high, 6),
+        "n_obs": n,
     }

@@ -48,3 +48,34 @@ def test_hedging_constants_pinned():
     assert hedging_gate.TOL_CAGR_PCT == 5.0
     assert hedging_gate.THETA_SHARPE == 0.25
     assert hedging_gate.THETA_DD_PCT == 5.0
+
+
+def test_improvement_significant_when_strat_dominates():
+    # strat returns strictly less volatile + higher-mean than bench → improvement CI > 0
+    strat = [0.01] * 60
+    bench = [0.02, -0.02] * 30
+    v = hedging_gate.improvement_significant(strat_returns=strat, bench_returns=bench)
+    assert v["sharpe_improvement_significant"] is True
+
+
+def test_improvement_not_significant_when_identical():
+    series = [0.01, -0.005] * 40
+    v = hedging_gate.improvement_significant(strat_returns=series, bench_returns=list(series))
+    assert v["sharpe_improvement_significant"] is False
+
+
+def test_improvement_insufficient_overlap():
+    v = hedging_gate.improvement_significant(
+        strat_returns=[0.01] * 10, bench_returns=[0.0] * 10
+    )
+    assert v["sharpe_improvement_significant"] is False
+    assert v["reason"] == "insufficient_overlap"
+
+
+def test_improvement_deterministic_same_seed():
+    strat = [0.01, 0.012, -0.003] * 20
+    bench = [0.02, -0.02, 0.005] * 20
+    a = hedging_gate.improvement_significant(strat_returns=strat, bench_returns=bench)
+    b = hedging_gate.improvement_significant(strat_returns=strat, bench_returns=bench)
+    assert a["ci_low"] == b["ci_low"]
+    assert a["ci_high"] == b["ci_high"]
