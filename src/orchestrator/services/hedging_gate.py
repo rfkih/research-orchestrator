@@ -4,7 +4,7 @@ Separate, additive objective for track=hedging. Does NOT touch V11/V60, which
 stay frozen for track=trading. Operator-authorized 2026-06-07.
 """
 from __future__ import annotations
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 from uuid import UUID
 import math
@@ -193,6 +193,50 @@ def improvement_significant(
     }
 
 
+def _align_returns_by_date(
+    *,
+    strat_returns: list[float],
+    strat_start: date,
+    closes: list[tuple[date, float]],
+) -> tuple[list[float], list[float]]:
+    """Phase-align the strat and benchmark daily-return series on calendar date.
+
+    The two series are built on DIFFERENT day-0 conventions, so a naive
+    ``[:common]`` length-truncation pairs day *i* of strat with day *i+1* of
+    bench (a 1-day phase offset):
+
+      * ``strat_returns`` is a calendar grid over ``[start, end]`` inclusive,
+        so ``strat_returns[i]`` is the return realised ON calendar date
+        ``strat_start + i`` (``strat_returns[0]`` is the start date itself —
+        a leading 0/level entry from ``pool._calendar_fill``).
+      * ``bench`` comes from ``_returns(closes)``, which DROPS day-0: the k-th
+        benchmark return ``closes[k+1]/closes[k] - 1`` is realised ON date
+        ``closes[k+1]``.
+
+    To pair the SAME calendar day's returns we key each series by the date its
+    return is realised on, intersect the date sets, and emit values in
+    sorted-date order. This is robust to gaps/holidays in either series, not
+    just the uniform 1-day offset.
+    """
+    strat_by_date: dict[date, float] = {}
+    d = strat_start
+    for r in strat_returns:
+        strat_by_date[d] = r
+        d += timedelta(days=1)
+
+    bench_by_date: dict[date, float] = {}
+    for (_, prev_px), (cur_date, cur_px) in zip(closes, closes[1:]):
+        if prev_px:
+            # close[k] -> close[k+1] return is realised on close[k+1]'s date.
+            cd = cur_date.date() if isinstance(cur_date, datetime) else cur_date
+            bench_by_date[cd] = cur_px / prev_px - 1.0
+
+    common_dates = sorted(set(strat_by_date) & set(bench_by_date))
+    strat_aligned = [strat_by_date[cd] for cd in common_dates]
+    bench_aligned = [bench_by_date[cd] for cd in common_dates]
+    return strat_aligned, bench_aligned
+
+
 def _equity_curve(returns: list[float]) -> list[float]:
     """Cumulative-compounded equity curve from a daily-return series, starting
     at 1.0. ``[r0, r1, ...]`` → ``[1.0, 1+r0, (1+r0)(1+r1), ...]``."""
@@ -261,12 +305,18 @@ async def evaluate(
     strat_returns = pool._calendar_fill(sparse, start.date(), end.date())
     strat = _strat_metrics(strat_returns)
 
-    # 3. Benchmark daily returns from the close prices, aligned to the strat
-    #    series over the common window length before bootstrapping.
-    bench_returns = _returns([c for _, c in closes])
-    common = min(len(strat_returns), len(bench_returns))
-    strat_aligned = strat_returns[:common]
-    bench_aligned = bench_returns[:common]
+    # 3. Benchmark daily returns from the close prices, PHASE-aligned to the
+    #    strat series on calendar date before bootstrapping. The two series use
+    #    different day-0 conventions (strat day-0 = the start date's level entry;
+    #    bench drops day-0), so a plain length-truncation would pair strat day i
+    #    with bench day i+1. _align_returns_by_date keys both by the date each
+    #    return is realised on and intersects, so the SAME calendar day's returns
+    #    are paired. See _align_returns_by_date for the offset derivation.
+    strat_aligned, bench_aligned = _align_returns_by_date(
+        strat_returns=strat_returns,
+        strat_start=start.date(),
+        closes=[(d, px) for d, px in closes],
+    )
 
     # 4-5. Decision gate + significance.
     decision = beats_buy_hold_risk_adj(strat=strat, bench=bench)

@@ -872,6 +872,7 @@ async def _execute_after_claim(
         agent_name=agent_name,
         iteration_id=iteration_id,
         dsr=analysis.get("dsr") if isinstance(analysis, dict) else None,
+        track=(sweep_config or {}).get("track"),
     )
 
     _pf_pt = analysis.get("pf_point_estimate") if isinstance(analysis, dict) else None
@@ -936,15 +937,33 @@ async def _select_track_gate(
 
     # Benchmark the underlying on DAILY closes regardless of the strategy's bar
     # interval (buy-hold is an equity-level, daily-frequency baseline).
-    async with db.acquire() as conn:
-        payload = await hedging_gate.evaluate(
-            conn,
-            backtest_run_id=backtest_run_id,
-            symbol=instrument,
-            interval="1d",
-            start=window_start,
-            end=window_end,
+    #
+    # Defensive guard (Fix 2, 2026-06-07): any failure inside the hedging gate
+    # (DB read, thin/None metrics, bootstrap edge case) must NOT 500 the tick.
+    # The trading path never reaches here (it short-circuits above), so this
+    # only affects hedging rows. On error we log and map to the SAME non-PASS
+    # ITERATE/continue outcome a hedging FAIL produces — never raise, never
+    # mark PASS — and stash an auditable error marker on the payload so it
+    # surfaces on metrics_snapshot.hedging_gate.
+    try:
+        async with db.acquire() as conn:
+            payload = await hedging_gate.evaluate(
+                conn,
+                backtest_run_id=backtest_run_id,
+                symbol=instrument,
+                interval="1d",
+                start=window_start,
+                end=window_end,
+            )
+    except Exception as exc:  # noqa: BLE001 — must not propagate to the tick
+        log.exception(
+            "tick.hedging_gate_error",
+            instrument=instrument,
+            backtest_run_id=str(backtest_run_id),
         )
+        error_payload = {"error": f"{type(exc).__name__}: {exc}", "passed": False}
+        # Same control-flow signal as a hedging FAIL: ITERATE/continue.
+        return "SIGNIFICANT_EDGE", "ITERATE", error_payload
     # Drive existing control flow off the equity-level verdict. V11/V60 are
     # intentionally bypassed for hedging rows.
     new_stat_v = "SIGNIFICANT_EDGE"
@@ -964,6 +983,7 @@ async def _decide_next_state(
     agent_name: str,
     iteration_id: Any = None,
     dsr: float | None = None,
+    track: str | None = None,
 ) -> list[dict[str, Any]]:
     """Mirrors research-tick.sh lines 514-572. Returns agent next-action hints.
 
@@ -1043,9 +1063,19 @@ async def _decide_next_state(
             # route it to a pool-candidate walk-forward (the only remaining
             # validity check) instead of just enqueuing a fresh hypothesis. The
             # standalone V60 gate is untouched — this is the additive pool path.
+            #
+            # Fix 3 (2026-06-07): this trade-level pool lane gates on the
+            # TRADE-LEVEL DSR, which is the WRONG objective for a hedging
+            # candidate — the hedging gate intentionally bypasses trade-level
+            # stats (it judges equity-level beats-buy-hold). A failing hedging
+            # row arrives here as ("SIGNIFICANT_EDGE", "ITERATE") and could be
+            # mis-routed into the trade-level pool on a coincidental DSR. Restrict
+            # this branch to the trading track (None ⇒ legacy/default). Hedging
+            # FAILs just continue/ITERATE below without touching this pool.
             actions: list[dict[str, Any]] = []
             if (
-                dsr is not None
+                track in (None, "trading")
+                and dsr is not None
                 and dsr >= analyze.DSR_SIGNIFICANCE_THRESHOLD
                 and iteration_id is not None
             ):
