@@ -173,13 +173,17 @@ def admit(
 # ── Persistence — coexist with the strategy pool (Task 5) ────────────────────
 #
 # Combination members live in the SAME ``signal_pool`` table the strategy pool
-# uses (services/pool.py + api/pool.py), discriminated by
-# ``kind='signal_combination'`` (+ a ``track`` tag). This mirrors the existing
-# pool's dedicated-table mechanism rather than inventing a parallel scheme; the
-# only addition is the kind/track discriminator so both books coexist without a
-# separate table. The strategy pool's writes default ``kind='signal_pool'``,
-# so its reads (when filtered to that kind) never see a combination member and
-# vice-versa.
+# uses (services/pool.py + api/pool.py). They are discriminated by
+# ``admission_metrics->>'kind' = 'signal_combination'`` (+ a ``track`` tag) —
+# carried INSIDE the existing ``admission_metrics`` JSONB column, NOT as new
+# physical columns, so the two books coexist WITHOUT a Flyway migration on the
+# prod ``signal_pool`` table (V147). The strategy pool's reads treat untagged /
+# ``kind='signal_pool'`` rows as theirs, so they never see a combination member;
+# this book's read filters to ``kind='signal_combination'`` so it never sees a
+# strategy member. The prod active-unique index is ``(strategy_code, symbol,
+# interval_name) WHERE status='active'`` (V147) — combination surfaces use
+# distinct ``strategy_code``s, so a combination member and a strategy member
+# never collide on it in practice.
 
 
 async def add_member(
@@ -194,49 +198,58 @@ async def add_member(
     created_by: str,
 ) -> UUID | None:
     """Persist an admitted combination member into ``signal_pool`` tagged
-    ``kind='signal_combination'`` (+ ``track``).
+    ``admission_metrics->>'kind' = 'signal_combination'`` (+ ``track``).
 
     ``residual_metrics`` (alpha_tstat, ic, marginal, max_abs_corr, …) is the
     residual-fed admission snapshot — the residual analogue of the strategy
-    pool's ``admission_metrics``. Atomic + idempotent per active surface via the
-    partial-unique index on ``(kind, strategy_code, symbol, interval_name)
-    WHERE status='active'``: a concurrent/duplicate admit ON CONFLICT DO NOTHING
-    returns NULL (already a member). Returns the new ``pool_id`` on insert.
+    pool's ``admission_metrics``. The ``kind``/``track`` discriminators are
+    merged INTO that JSONB payload (no new columns). Atomic + idempotent per
+    active surface via the prod partial-unique index on ``(strategy_code,
+    symbol, interval_name) WHERE status='active'``: a concurrent/duplicate admit
+    ON CONFLICT DO NOTHING returns NULL (already a member). Returns the new
+    ``pool_id`` on insert.
     """
+    admission_metrics = {
+        **residual_metrics,
+        "kind": COMBINATION_KIND,
+        "track": track,
+    }
+    # Pass the dict directly — the asyncpg JSONB codec (infra/db.py) encodes it;
+    # do NOT json.dumps (would double-encode). See CLAUDE.md.
     return await conn.fetchval(
         """
         INSERT INTO signal_pool
             (iteration_id, strategy_code, symbol, interval_name,
-             kind, track, admission_metrics, status, created_by, updated_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', $8, $8)
-        ON CONFLICT (kind, strategy_code, symbol, interval_name)
+             admission_metrics, status, created_by, updated_by)
+        VALUES ($1, $2, $3, $4, $5, 'active', $6, $6)
+        ON CONFLICT (strategy_code, symbol, interval_name)
             WHERE status = 'active'
         DO NOTHING
         RETURNING pool_id
         """,
         iteration_id, strategy_code, symbol, interval_name,
-        COMBINATION_KIND, track, residual_metrics, created_by,
+        admission_metrics, created_by,
     )
 
 
 async def list_members(
     conn: asyncpg.Connection, *, track: str | None = None
 ) -> list[dict[str, Any]]:
-    """List active combination-book members (``kind='signal_combination'``),
-    optionally filtered to a single ``track``.
+    """List active combination-book members
+    (``admission_metrics->>'kind' = 'signal_combination'``), optionally filtered
+    to a single ``track`` (``admission_metrics->>'track'``).
 
-    The ``kind`` filter is what enforces coexistence isolation: this read can
-    NEVER return a strategy-pool (``kind='signal_pool'``) row.
+    The ``kind`` JSONB filter is what enforces coexistence isolation: this read
+    can NEVER return a strategy-pool (untagged / ``kind='signal_pool'``) row.
     """
     rows = await conn.fetch(
         """
         SELECT pool_id, iteration_id, strategy_code, symbol, interval_name,
-               kind, track, admitted_at, admission_metrics, pool_weight,
-               weight_source
+               admitted_at, admission_metrics, pool_weight, weight_source
           FROM signal_pool
          WHERE status = 'active'
-           AND kind = $1
-           AND ($2::text IS NULL OR track = $2)
+           AND admission_metrics->>'kind' = $1
+           AND ($2::text IS NULL OR admission_metrics->>'track' = $2)
          ORDER BY strategy_code, symbol, interval_name
         """,
         COMBINATION_KIND, track,
@@ -249,8 +262,8 @@ async def list_members(
             "strategy_code": r["strategy_code"],
             "symbol": r["symbol"],
             "interval_name": r["interval_name"],
-            "kind": r["kind"],
-            "track": r["track"],
+            "kind": r["admission_metrics"].get("kind"),
+            "track": r["admission_metrics"].get("track"),
             "admitted_at": r["admitted_at"].isoformat() if r["admitted_at"] else None,
             "admission_metrics": r["admission_metrics"],
             "pool_weight": float(r["pool_weight"]) if r["pool_weight"] is not None else None,

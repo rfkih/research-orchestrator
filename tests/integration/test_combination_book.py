@@ -2,17 +2,18 @@
 
 The signal-level combination book persists admitted *idiosyncratic residual*
 signals in the SAME ``signal_pool`` table the strategy pool uses, discriminated
-by ``kind='signal_combination'`` (+ a ``track`` tag) so the two books coexist
-without a separate table / Flyway migration. These tests prove the round-trip
-AND the coexistence isolation: a combination member never leaks into the
-strategy-pool reads, and a strategy-pool member never leaks into the
-combination-book reads.
+by ``admission_metrics->>'kind' = 'signal_combination'`` (+ a ``track`` tag, both
+carried INSIDE the existing ``admission_metrics`` JSONB column — NOT new physical
+columns) so the two books coexist without a separate table / Flyway migration.
+These tests prove the round-trip AND the coexistence isolation: a combination
+member never leaks into the strategy-pool reads, a strategy-pool member never
+leaks into the combination-book reads, and an UNTAGGED legacy strategy-pool row
+(``admission_metrics`` with no ``kind``) is still returned by the strategy-pool
+reads (backward-compat for existing prod rows).
 """
 from __future__ import annotations
 
 import pytest
-
-from datetime import datetime
 
 pytestmark = pytest.mark.integration
 
@@ -90,16 +91,19 @@ async def test_combination_and_strategy_pool_are_isolated(db_conn):
     strategy-pool reads, and a strategy-pool member must NOT appear in the
     combination-book reads — even though both live in ``signal_pool``."""
     from orchestrator.services import combination_book as cb
+    from orchestrator.services import house_book
 
-    # A strategy-pool member (kind defaults to 'signal_pool').
+    # A strategy-pool member self-tagged kind='signal_pool' in admission_metrics
+    # (exactly how api/pool.py:evaluate writes it).
     it_pool = await _seed_iteration(db_conn, strategy_code="POOL_X")
     await db_conn.execute(
         """
         INSERT INTO signal_pool
-            (iteration_id, strategy_code, symbol, interval_name, status, created_by)
-        VALUES ($1, 'POOL_X', 'BTCUSDT', '1h', 'active', 'x')
+            (iteration_id, strategy_code, symbol, interval_name,
+             admission_metrics, status, created_by)
+        VALUES ($1, 'POOL_X', 'BTCUSDT', '1h', $2, 'active', 'x')
         """,
-        it_pool,
+        it_pool, {"kind": "signal_pool"},
     )
 
     # A combination member.
@@ -112,26 +116,40 @@ async def test_combination_and_strategy_pool_are_isolated(db_conn):
     cmb_members = await cb.list_members(db_conn)
     assert {m["strategy_code"] for m in cmb_members} == {"CMB_X"}
 
-    # Strategy-pool read sees ONLY the strategy member.
-    pool_codes = {
-        r["strategy_code"]
-        for r in await db_conn.fetch(
-            "SELECT strategy_code FROM signal_pool "
-            "WHERE status = 'active' AND kind = 'signal_pool'"
-        )
-    }
-    assert pool_codes == {"POOL_X"}
+    # The live strategy-pool service read (house_book._active_members, which
+    # carries the JSONB kind filter) sees ONLY the strategy member — it must
+    # never weight a residual combination signal as a strategy.
+    svc_members = await house_book._active_members(db_conn)
+    assert {m["strategy_code"] for m in svc_members} == {"POOL_X"}
 
-    # And the live pool service's active-members membership read excludes the
-    # combination member (it must never weight a residual signal as a strategy).
-    # We assert the exact membership SELECT the service uses — keeping the test
-    # in the minimal Phase-1 schema (which has no backtest_run_id to assemble
-    # full return series), while still proving the kind filter is in place.
-    svc_members = await db_conn.fetch(
-        "SELECT strategy_code, symbol, interval_name, iteration_id "
-        "FROM signal_pool WHERE status = 'active' AND kind = 'signal_pool'"
+
+@pytest.mark.asyncio
+async def test_untagged_strategy_pool_row_is_still_returned(db_conn):
+    """Backward-compat: an EXISTING prod strategy-pool row whose
+    ``admission_metrics`` has NO ``kind`` key (e.g. ``{}``, the V147 default)
+    must still be returned by the strategy-pool reads, and must NOT leak into
+    the combination-book read."""
+    from orchestrator.services import combination_book as cb
+    from orchestrator.services import house_book
+
+    it = await _seed_iteration(db_conn, strategy_code="LEGACY_X")
+    # Default admission_metrics '{}' — no kind tag, like a pre-Phase-3 row.
+    await db_conn.execute(
+        """
+        INSERT INTO signal_pool
+            (iteration_id, strategy_code, symbol, interval_name, status, created_by)
+        VALUES ($1, 'LEGACY_X', 'BTCUSDT', '1h', 'active', 'x')
+        """,
+        it,
     )
-    assert {r["strategy_code"] for r in svc_members} == {"POOL_X"}
+
+    # Strategy-pool service read INCLUDES the untagged legacy row.
+    svc_members = await house_book._active_members(db_conn)
+    assert {m["strategy_code"] for m in svc_members} == {"LEGACY_X"}
+
+    # Combination-book read does NOT see it (kind filter is strict equality).
+    cmb_members = await cb.list_members(db_conn)
+    assert cmb_members == []
 
 
 @pytest.mark.asyncio

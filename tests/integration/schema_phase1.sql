@@ -142,13 +142,15 @@ CREATE TABLE IF NOT EXISTS research_iteration_log (
     CONSTRAINT uq_research_iteration_strategy_n UNIQUE (strategy_code, iteration_number)
 );
 
--- Signal Pool / Combination Book (Flyway V147 + Phase-3 kind/track columns).
--- The strategy pool (kind='signal_pool', Phase 0) AND the signal-level
--- combination book (kind='signal_combination', Phase 3) COEXIST in this one
--- table; the kind discriminator (+ track) keeps their reads isolated without a
--- separate table. Trimmed FK-free copy of the prod table — only the columns the
--- orchestrator reads/writes; types match V147. The kind/track columns are the
--- Phase-3 additions (a Flyway migration carries them in prod).
+-- Signal Pool / Combination Book (Flyway V147). The strategy pool (Phase 0)
+-- AND the signal-level combination book (Phase 3) COEXIST in this one table;
+-- they are discriminated by ``admission_metrics->>'kind'`` (a JSONB key, NOT a
+-- physical column) so the two books' reads stay isolated WITHOUT any schema
+-- migration. Strategy-pool rows are 'signal_pool' (or untagged = legacy);
+-- combination rows are 'signal_combination'. Trimmed FK-free copy of the prod
+-- table — only the columns the orchestrator reads/writes; types + the
+-- active-unique index match V147 exactly so this schema can't mask a prod-only
+-- column/index drift again.
 CREATE TABLE IF NOT EXISTS signal_pool (
     pool_id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
     iteration_id       UUID         NOT NULL,
@@ -161,13 +163,6 @@ CREATE TABLE IF NOT EXISTS signal_pool (
     weight_source      VARCHAR(24),
     weight_updated_at  TIMESTAMPTZ,
     status             VARCHAR(16)  NOT NULL DEFAULT 'active',
-    -- Phase-3 coexistence discriminator: 'signal_pool' (strategy book) or
-    -- 'signal_combination' (residual combination book). Default keeps every
-    -- existing strategy-pool write a 'signal_pool' row with no code change.
-    kind               VARCHAR(24)  NOT NULL DEFAULT 'signal_pool',
-    -- Dual-track tag for combination members ('trading' | 'hedging'); NULL for
-    -- the (untracked) strategy pool.
-    track              VARCHAR(20),
     evicted_at         TIMESTAMPTZ,
     evicted_reason     TEXT,
     created_time       TIMESTAMP    NOT NULL DEFAULT now(),
@@ -176,8 +171,10 @@ CREATE TABLE IF NOT EXISTS signal_pool (
     updated_by         VARCHAR(150)
 );
 
--- One active membership per (kind, surface) — so the same surface can hold both
--- a strategy-pool row and a combination row without colliding.
+-- One active membership per (strategy_code, symbol, interval) surface — matches
+-- prod V147. A combination member and a strategy member CANNOT both be active on
+-- the identical surface; in practice combination surfaces are distinct
+-- strategy_codes, so this does not collide.
 CREATE UNIQUE INDEX IF NOT EXISTS signal_pool_active_unique
-    ON signal_pool (kind, strategy_code, symbol, interval_name)
+    ON signal_pool (strategy_code, symbol, interval_name)
     WHERE status = 'active';

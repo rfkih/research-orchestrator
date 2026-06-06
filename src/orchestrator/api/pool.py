@@ -57,7 +57,9 @@ async def _existing_active(conn: asyncpg.Connection, ctx: dict[str, Any]) -> Any
     return await conn.fetchval(
         """
         SELECT pool_id FROM signal_pool
-         WHERE status = 'active' AND kind = 'signal_pool'
+         WHERE status = 'active'
+           AND (admission_metrics->>'kind' IS NULL
+                OR admission_metrics->>'kind' = 'signal_pool')
            AND strategy_code = $1 AND symbol = $2 AND interval_name = $3
         """,
         ctx["strategy_code"], ctx["symbol"], ctx["interval_name"],
@@ -86,6 +88,11 @@ async def evaluate(
         }
 
     metrics = {
+        # Self-tag the book this row belongs to inside admission_metrics (the
+        # JSONB discriminator) — strategy-pool reads treat untagged rows as
+        # 'signal_pool' too, so this is cosmetic for new rows but keeps the
+        # data self-describing.
+        "kind": "signal_pool",
         "dsr": ctx.get("dsr"),
         "statistical_verdict": ctx.get("statistical_verdict"),
         **{k: verdict["contribution"][k] for k in
@@ -93,15 +100,17 @@ async def evaluate(
         "theta": verdict["theta"],
     }
     # Atomic admission: ON CONFLICT against the active-surface partial-unique
-    # index makes this race-safe (no check-then-insert gap). A conflict means a
-    # concurrent admit already pooled this surface → report already_pooled.
+    # index (prod V147: (strategy_code, symbol, interval_name) WHERE
+    # status='active') makes this race-safe (no check-then-insert gap). A
+    # conflict means a concurrent admit already pooled this surface →
+    # already_pooled.
     pool_id = await conn.fetchval(
         """
         INSERT INTO signal_pool
           (iteration_id, strategy_code, symbol, interval_name,
-           kind, admission_metrics, status, created_by, updated_by)
-        VALUES ($1, $2, $3, $4, 'signal_pool', $5, 'active', $6, $6)
-        ON CONFLICT (kind, strategy_code, symbol, interval_name)
+           admission_metrics, status, created_by, updated_by)
+        VALUES ($1, $2, $3, $4, $5, 'active', $6, $6)
+        ON CONFLICT (strategy_code, symbol, interval_name)
             WHERE status = 'active'
         DO NOTHING
         RETURNING pool_id
@@ -141,7 +150,9 @@ async def list_pool(
                admitted_at, admission_metrics, pool_weight, weight_source,
                weight_updated_at
           FROM signal_pool
-         WHERE status = 'active' AND kind = 'signal_pool'
+         WHERE status = 'active'
+           AND (admission_metrics->>'kind' IS NULL
+                OR admission_metrics->>'kind' = 'signal_pool')
          ORDER BY strategy_code, symbol, interval_name
         """
     )
@@ -177,7 +188,9 @@ async def rebalance(
 
     members = await conn.fetch(
         "SELECT pool_id, strategy_code, symbol, interval_name "
-        "FROM signal_pool WHERE status = 'active' AND kind = 'signal_pool'"
+        "FROM signal_pool WHERE status = 'active' "
+        "AND (admission_metrics->>'kind' IS NULL "
+        "OR admission_metrics->>'kind' = 'signal_pool')"
     )
     if not members:
         return {"applied": False, "reason": "empty_pool", "n_updated": 0}
