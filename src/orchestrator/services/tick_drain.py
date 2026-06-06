@@ -100,6 +100,7 @@ async def drain_ticks(
     settings: Settings,
     agent_name: str,
     session_id: UUID | None,
+    track: str | None = None,
     redis_client: AsyncRedis | None,
     max_iters: int = DEFAULT_MAX_ITERS,
     max_wall_clock_s: int = DEFAULT_MAX_WALL_CLOCK_S,
@@ -108,6 +109,10 @@ async def drain_ticks(
     """Drive ``run_tick`` until terminal or a cap fires.
 
     Returns the digest dict the API layer renders verbatim.
+
+    ``track`` (Phase 1): forwarded to every interior ``run_tick`` so the
+    drain only claims rows belonging to one research loop. None ⇒ the
+    legacy global drain (claims any PENDING row).
     """
     tally = {
         "iters": 0,
@@ -140,6 +145,7 @@ async def drain_ticks(
                 agent_name=agent_name,
                 session_id=session_id,
                 redis_client=redis_client,
+                track=track,
             )
         except OrchestratorError as err:
             envelope = err.envelope

@@ -13,7 +13,7 @@ gets ``empty_queue``).
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
@@ -62,15 +62,24 @@ class TickResponse(BaseModel):
     summary: TickSummary | None = None
 
 
+class TickBody(BaseModel):
+    """Optional input for ``POST /tick``. ``track`` (Phase 1) scopes the
+    queue claim to one research loop; omit for the legacy global queue."""
+
+    track: Literal["trading", "hedging"] | None = None
+
+
 @router.post("/tick", response_model=TickResponse)
 async def post_tick(
     request: Request,
+    body: TickBody | None = None,
     agent: str = Depends(get_agent_name),
 ) -> dict[str, Any]:
     cached, idempotency_key = await replay_cached_response(request, agent, "tick")
     if cached is not None:
         return cached
 
+    params = body or TickBody()
     result = await run_tick(
         db=request.app.state.db,
         jvm=request.app.state.jvm,
@@ -78,6 +87,7 @@ async def post_tick(
         agent_name=agent,
         session_id=request.state.session_id,
         redis_client=request.app.state.redis,
+        track=params.track,
     )
     response = result.to_dict()
     await cache_response(request, agent, "tick", idempotency_key, response)
@@ -97,6 +107,9 @@ class TickDrainBody(BaseModel):
     max_iters: int = Field(DEFAULT_MAX_ITERS, ge=1, le=200)
     max_wall_clock_s: int = Field(DEFAULT_MAX_WALL_CLOCK_S, ge=60, le=21600)
     max_consecutive_waits: int = Field(DEFAULT_MAX_CONSECUTIVE_WAITS, ge=1, le=10)
+    # Dual-track (Phase 1): scope the drain to one research loop. None ⇒ the
+    # legacy global drain (claims any PENDING row).
+    track: Literal["trading", "hedging"] | None = None
 
 
 @router.post("/tick/drain")
@@ -136,6 +149,7 @@ async def post_tick_drain(
         settings=request.app.state.settings,
         agent_name=agent,
         session_id=request.state.session_id,
+        track=params.track,
         redis_client=request.app.state.redis,
         max_iters=params.max_iters,
         max_wall_clock_s=params.max_wall_clock_s,

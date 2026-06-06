@@ -347,9 +347,14 @@ async def run_tick(
     agent_name: str,
     session_id: UUID | None = None,
     redis_client: AsyncRedis | None = None,
+    track: str | None = None,
 ) -> TickResult:
     """One tick. Idempotent at the queue level — re-runs are safe because
-    each tick claims a fresh row and atomically increments iteration_number."""
+    each tick claims a fresh row and atomically increments iteration_number.
+
+    ``track`` (Phase 1): scope the claim to one research loop. None ⇒ the
+    legacy global claim (picks any PENDING row); a value restricts to rows
+    whose ``sweep_config['track']`` matches."""
 
     # ── Step 0: reap any RUNNING rows older than the poll cap ─────────
     # Covers SIGKILL-style crashes whose rollback handler never ran.
@@ -364,7 +369,7 @@ async def run_tick(
     # ── Step 1: claim row ──────────────────────────────────────────────
     async with db.acquire() as conn:
         async with conn.transaction():
-            claim = await queue_write.claim_next(conn)
+            claim = await queue_write.claim_next(conn, track=track)
 
     if claim is None:
         return TickResult(

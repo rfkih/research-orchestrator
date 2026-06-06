@@ -254,7 +254,9 @@ async def playbook() -> Playbook:
                     "axis_previously_discarded if this strategy has already "
                     "produced a DISCARD verdict on the same axis-set; pass "
                     "override_discard_gate=true with a documented "
-                    "justification to bypass."
+                    "justification to bypass. "
+                    "Pass track ('trading'|'hedging') to scope this to one "
+                    "research loop; omit for the legacy global queue."
                 ),
                 idempotent=False,
             ),
@@ -293,7 +295,9 @@ async def playbook() -> Playbook:
                     "their daily-return correlation with the protected "
                     "book (LSR/VCB/VBO) yields pf_lo × (1 - 0.5·|max_corr|) "
                     "<= 1.0 — gate output stashed on "
-                    "metrics_snapshot.portfolio_corr."
+                    "metrics_snapshot.portfolio_corr. "
+                    "Pass track ('trading'|'hedging') to scope this to one "
+                    "research loop; omit for the legacy global queue."
                 ),
                 idempotent=False,
             ),
@@ -598,7 +602,9 @@ async def playbook() -> Playbook:
                     "semantics (FOR UPDATE SKIP LOCKED); concurrent "
                     "drains never collide on the same row. "
                     "Idempotency-Key replays the cached digest envelope "
-                    "without re-driving the queue."
+                    "without re-driving the queue. "
+                    "Pass track ('trading'|'hedging') to scope this to one "
+                    "research loop; omit for the legacy global queue."
                 ),
                 idempotent=False,
             ),

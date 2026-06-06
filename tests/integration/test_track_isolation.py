@@ -229,3 +229,157 @@ async def test_queue_counts_no_track_is_global(db_conn):
     )
     counts = await agent_state._queue_counts(db_conn)
     assert counts["PENDING"] >= 1
+
+
+# ── Task 5: POST /queue track param + per-track re-discovery gate ──────────
+
+_AUTH_HEADERS = {"X-Orch-Token": "test-token", "X-Agent-Name": "quant-researcher"}
+
+
+async def _seed_discard(conn, *, strategy_code, param_names, track):
+    """Plant a DISCARD audit row whose originating queue row carries ``track``.
+
+    Mirrors the tick lifecycle: insert the research_queue row (track-stamped),
+    insert the hypothesis_audit row pointing at it, then backfill the DISCARD
+    verdict (the gate keys on decision_verdict='DISCARD')."""
+    from orchestrator.repo import hypothesis_audit as audit_repo
+    from orchestrator.repo import queue_write
+
+    params_snapshot = {n: 14 for n in param_names}
+    qrow = await queue_write.insert_queue(
+        conn,
+        strategy_code=strategy_code,
+        interval_name="1h",
+        instrument="BTCUSDT",
+        sweep_config={"strategy": "grid",
+                      "params": [{"name": n, "values": [14]} for n in param_names]},
+        hypothesis="seed",
+        priority=100,
+        iter_budget=1,
+        early_stop_on_no_edge=True,
+        require_walk_forward=True,
+        created_by="trk-test",
+        track=track,
+    )
+    audit_id = await audit_repo.insert_audit(
+        conn,
+        strategy_code=strategy_code,
+        symbol="BTCUSDT",
+        interval_name="1h",
+        params_snapshot=params_snapshot,
+        queue_id=qrow["queue_id"],
+        created_by="trk-test",
+    )
+    # iteration_id must be non-NULL-shaped; the gate doesn't require an
+    # iteration_log row to exist (it SELECTs the audit row directly).
+    from uuid import uuid4
+
+    await audit_repo.update_audit_verdict(
+        conn,
+        audit_id=audit_id,
+        iteration_id=uuid4(),
+        statistical_verdict="NO_EDGE",
+        decision_verdict="DISCARD",
+    )
+
+
+def _enqueue_body(strategy_code, param_names, track):
+    return {
+        "strategy_code": strategy_code,
+        "interval_name": "1h",
+        "instrument": "BTCUSDT",
+        "sweep_config": {
+            "strategy": "grid",
+            "params": [{"name": n, "values": [14]} for n in param_names],
+        },
+        "hypothesis": "post-gate test",
+        # Bypass the paired-review gate (orthogonal to this task); the
+        # re-discovery gate is NOT bypassed.
+        "override_review_gate": True,
+        "track": track,
+    }
+
+
+@pytest.mark.asyncio
+async def test_rediscovery_gate_is_per_track(db_conn, integration_client):
+    strategy_code = "TRK_GATE"
+    param_names = ["rsi_period"]
+
+    # account_strategy row so POST /queue's pre-insert existence check passes
+    # (else 412 account_strategy_missing fires before the gate).
+    await db_conn.execute(
+        "INSERT INTO account_strategy (strategy_code, is_deleted) VALUES ($1, false)",
+        strategy_code,
+    )
+    # Seed a DISCARD on the HEDGING track for this axis-set.
+    await _seed_discard(
+        db_conn, strategy_code=strategy_code, param_names=param_names,
+        track="hedging",
+    )
+
+    # SAME axis-set on the TRADING track must NOT be blocked.
+    r_trading = integration_client.post(
+        "/queue", json=_enqueue_body(strategy_code, param_names, "trading"),
+        headers=_AUTH_HEADERS,
+    )
+    assert r_trading.status_code == 201, r_trading.text
+
+    # A repeat on the HEDGING track SHOULD 409 (same track's prior discard).
+    r_hedging = integration_client.post(
+        "/queue", json=_enqueue_body(strategy_code, param_names, "hedging"),
+        headers=_AUTH_HEADERS,
+    )
+    assert r_hedging.status_code == 409, r_hedging.text
+    assert r_hedging.json()["error_code"] == "axis_previously_discarded"
+
+
+@pytest.mark.asyncio
+async def test_rediscovery_gate_global_discard_blocks_any_track(db_conn,
+                                                                integration_client):
+    """A legacy un-tracked (NULL-track) discard must still block a tracked
+    enqueue — never weaken the existing gate."""
+    strategy_code = "TRK_GATE_GLOBAL"
+    param_names = ["ema_fast"]
+
+    await db_conn.execute(
+        "INSERT INTO account_strategy (strategy_code, is_deleted) VALUES ($1, false)",
+        strategy_code,
+    )
+    await _seed_discard(
+        db_conn, strategy_code=strategy_code, param_names=param_names,
+        track=None,  # global / legacy discard
+    )
+
+    r = integration_client.post(
+        "/queue", json=_enqueue_body(strategy_code, param_names, "trading"),
+        headers=_AUTH_HEADERS,
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["error_code"] == "axis_previously_discarded"
+
+
+@pytest.mark.asyncio
+async def test_drain_only_drains_its_track(db_conn, integration_client):
+    """POST /tick/drain {track:'trading'} must leave hedging-tagged PENDING
+    rows untouched."""
+    # One hedging PENDING row, seeded directly.
+    hedge = await _insert_queue(
+        db_conn,
+        strategy_code="TRK_DRAIN_H",
+        sweep_config={"strategy": "grid", "params": []},
+        track="hedging",
+    )
+
+    resp = integration_client.post(
+        "/tick/drain", json={"track": "trading", "max_iters": 3},
+        headers=_AUTH_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    # No trading row exists → drain hits EMPTY_QUEUE without claiming anything.
+    assert resp.json()["terminal_action"] == "EMPTY_QUEUE"
+
+    # The hedging row is still PENDING (never claimed by the trading drain).
+    status = await db_conn.fetchval(
+        "SELECT status FROM research_queue WHERE queue_id = $1", hedge["queue_id"],
+    )
+    assert status == "PENDING"

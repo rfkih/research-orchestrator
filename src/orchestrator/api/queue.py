@@ -141,6 +141,12 @@ class EnqueueRequest(BaseModel):
     # justification (paste the journal entry id in the request).
     hypothesis_id: str | None = Field(None, max_length=80)
     override_review_gate: bool = False
+    # Dual-track (Phase 1): scope this sweep to one research loop. None ⇒
+    # the legacy global queue (claimed by un-tracked /tick, blocked by any
+    # prior discard regardless of track). When set, the value is stamped into
+    # sweep_config['track'] so the claim query + re-discovery gate can filter
+    # per-track — a hedging discard won't block a trading axis-set.
+    track: Literal["trading", "hedging"] | None = None
 
 
 class CancelRequest(BaseModel):
@@ -354,7 +360,9 @@ async def enqueue(
     param_names = [p["name"] for p in sweep_dict.get("params", [])]
     if param_names and not body.override_discard_gate:
         a_hash = audit_repo.axis_set_hash(param_names)
-        prior = await audit_repo.axis_has_discard(conn, body.strategy_code, a_hash)
+        prior = await audit_repo.axis_has_discard(
+            conn, body.strategy_code, a_hash, track=body.track
+        )
         if prior:
             raise OrchestratorError(
                 status_code=409,
@@ -431,6 +439,7 @@ async def enqueue(
         early_stop_on_no_edge=body.early_stop_on_no_edge,
         require_walk_forward=body.require_walk_forward,
         created_by=agent,
+        track=body.track,
     )
 
     # Activity log: SWEEP_QUEUED. log_activity is itself fire-and-forget —

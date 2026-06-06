@@ -39,6 +39,35 @@ CREATE TABLE IF NOT EXISTS research_queue (
     CONSTRAINT pk_research_queue PRIMARY KEY (queue_id)
 );
 
+-- Re-discovery gate reads hypothesis_audit (and joins research_queue for the
+-- per-track scope). Trimmed copy of the V1 baseline (FK-free for the harness).
+CREATE TABLE IF NOT EXISTS hypothesis_audit (
+    audit_id            UUID        NOT NULL DEFAULT gen_random_uuid(),
+    strategy_code       VARCHAR(60) NOT NULL,
+    symbol              VARCHAR(30),
+    interval_name       VARCHAR(20),
+    axis_set_hash       CHAR(64)    NOT NULL,
+    param_combo_hash    CHAR(64)    NOT NULL,
+    params_snapshot     JSONB       NOT NULL,
+    queue_id            UUID,
+    iteration_id        UUID,
+    statistical_verdict VARCHAR(40),
+    decision_verdict    VARCHAR(40),
+    created_by          VARCHAR(80) NOT NULL,
+    created_time        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_time        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT pk_hypothesis_audit PRIMARY KEY (audit_id)
+);
+
+-- POST /queue's pre-insert existence check (find_account_strategy_id). FK-free
+-- trimmed copy of the V1 baseline — only the columns the lookup reads.
+CREATE TABLE IF NOT EXISTS account_strategy (
+    account_strategy_id      UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_id               UUID,
+    strategy_code            VARCHAR(100) NOT NULL,
+    is_deleted               BOOLEAN      NOT NULL DEFAULT FALSE
+);
+
 CREATE TABLE IF NOT EXISTS research_iteration_log (
     iteration_id        UUID        NOT NULL DEFAULT gen_random_uuid(),
     strategy_code       VARCHAR(60) NOT NULL,
