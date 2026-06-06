@@ -41,3 +41,35 @@ async def test_last_run_summary_is_scoped_to_track(db_conn):
 
     assert trading["title"] == "SESSION_CHECKPOINT_TRADING"
     assert hedging["title"] == "SESSION_CHECKPOINT_HEDGING"
+
+
+@pytest.mark.asyncio
+async def test_get_state_digest_threads_track(db_conn):
+    # Active hypotheses are per-track.
+    await db_conn.execute(
+        """
+        INSERT INTO research_journal
+            (entry_type, strategy_code, title, content, structured_data, status, created_time)
+        VALUES ('HYPOTHESIS', 'TRK_TEST', 'h-trading', 'x', '{"track":"trading"}', 'ACTIVE', NOW()),
+               ('HYPOTHESIS', 'TRK_TEST', 'h-hedging', 'x', '{"track":"hedging"}', 'ACTIVE', NOW())
+        """
+    )
+    digest = await agent_state.get_state_digest(db_conn, track="trading")
+    titles = {h["title"] for h in digest["active_hypotheses"]}
+    assert "h-trading" in titles
+    assert "h-hedging" not in titles
+
+
+@pytest.mark.asyncio
+async def test_digest_no_track_is_global(db_conn):
+    await db_conn.execute(
+        """
+        INSERT INTO research_journal
+            (entry_type, strategy_code, title, content, structured_data, status, created_time)
+        VALUES ('HYPOTHESIS', 'TRK_TEST', 'h-untagged', 'x', '{}', 'ACTIVE', NOW()),
+               ('HYPOTHESIS', 'TRK_TEST', 'h-tagged',   'x', '{"track":"trading"}', 'ACTIVE', NOW())
+        """
+    )
+    digest = await agent_state.get_state_digest(db_conn)  # no track → global
+    titles = {h["title"] for h in digest["active_hypotheses"]}
+    assert {"h-untagged", "h-tagged"} <= titles

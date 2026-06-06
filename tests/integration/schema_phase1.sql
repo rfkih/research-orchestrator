@@ -4,6 +4,8 @@ CREATE TABLE IF NOT EXISTS research_journal (
     journal_id      UUID         NOT NULL DEFAULT gen_random_uuid(),
     entry_type      VARCHAR(40)  NOT NULL,
     strategy_code   VARCHAR(60),
+    interval_name   VARCHAR(20),
+    instrument      VARCHAR(30),
     title           VARCHAR(300) NOT NULL,
     content         TEXT         NOT NULL,
     structured_data JSONB        NOT NULL DEFAULT '{}',
