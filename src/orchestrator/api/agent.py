@@ -169,6 +169,9 @@ async def playbook() -> Playbook:
                     "latest NULL_SCREEN_RESULT). Replaces the legacy "
                     "5-query cold-boot chain — call once on session start "
                     "before designing the next iteration."
+                    " Pass ?track=trading|hedging to scope lockout/run-summary/"
+                    "hypotheses/null-screen/specialist rows to one research "
+                    "track (omit for global)."
                 ),
                 idempotent=True,
             ),
@@ -1419,7 +1422,7 @@ class AgentState(BaseModel):
 
 
 @router.get("/state", response_model=AgentState)
-async def agent_state(request: Request) -> AgentState:
+async def agent_state(request: Request, track: str | None = None) -> AgentState:
     db_ok = await request.app.state.db.health_probe()
     jvm_ok = await request.app.state.jvm.health_probe()
     notes: list[str] = []
@@ -1439,6 +1442,7 @@ async def agent_state(request: Request) -> AgentState:
                 digest = await agent_state_repo.get_state_digest(
                     conn,
                     agent_name=request.state.agent_name,
+                    track=track,
                     ml_training_cap=_settings.ml_training_daily_cap,
                     ml_training_window_hours=_settings.ml_training_daily_window_hours,
                 )
