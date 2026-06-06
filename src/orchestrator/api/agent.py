@@ -297,7 +297,16 @@ async def playbook() -> Playbook:
                     "<= 1.0 — gate output stashed on "
                     "metrics_snapshot.portfolio_corr. "
                     "Pass track ('trading'|'hedging') to scope this to one "
-                    "research loop; omit for the legacy global queue."
+                    "research loop; omit for the legacy global queue. "
+                    "Gate selection by track (Phase 2, 2026-06-07): "
+                    "track in (null,'trading') graduate on V11 + V60 "
+                    "(>=10%/yr) as before; track='hedging' rows graduate on "
+                    "the equity-level beats-buy-hold gate instead (risk-adj "
+                    "improvement vs holding the underlying — bootstrap "
+                    "significance replaces V11, beats_buy_hold_risk_adj "
+                    "replaces the V60 economic check), with the full verdict "
+                    "stashed on metrics_snapshot.hedging_gate. Walk-forward "
+                    "ROBUST is still required for both tracks."
                 ),
                 idempotent=False,
             ),
@@ -604,7 +613,9 @@ async def playbook() -> Playbook:
                     "Idempotency-Key replays the cached digest envelope "
                     "without re-driving the queue. "
                     "Pass track ('trading'|'hedging') to scope this to one "
-                    "research loop; omit for the legacy global queue."
+                    "research loop; omit for the legacy global queue. "
+                    "track='hedging' rows graduate on the equity-level "
+                    "beats-buy-hold gate (not V11/V60) — see run_tick."
                 ),
                 idempotent=False,
             ),

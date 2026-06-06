@@ -137,3 +137,123 @@ async def test_evaluate_buyhold_equivalent_fails(db_conn):
         start=start, end=end,
     )
     assert out["passed"] is False
+
+
+# ── Task 6: tick.py gate selection by track ─────────────────────────────────
+#
+# Driving a full run_tick requires a JVM mock + account_strategy/hypothesis_audit
+# seeding, which is far heavier than the decision under test. Per the plan, the
+# track-selection decision is extracted into tick._select_track_gate and tested
+# directly. The trading path's UNCHANGED behavior is additionally proven by the
+# default (non-integration) tick suite staying green.
+
+from contextlib import asynccontextmanager
+
+
+class _DbShim:
+    """Minimal Database stand-in: .acquire() yields the test connection so
+    tick._select_track_gate's `async with db.acquire() as conn` works against
+    the live integration DB."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    @asynccontextmanager
+    async def acquire(self):
+        yield self._conn
+
+
+@pytest.mark.asyncio
+async def test_select_track_gate_hedging_passes_via_equity_gate(db_conn):
+    """track=hedging + a backtest that beats buy-hold risk-adjusted → PASS via
+    the hedging path, NOT the V11/V60 path. Mirrors test_evaluate_superior."""
+    from orchestrator.services import tick
+
+    symbol = "ETHUSDT"
+    start = datetime(2024, 3, 1)
+    n = 120
+    await _seed_volatile_buyhold(db_conn, symbol=symbol, start=start, n_days=n)
+    run_id = uuid.uuid4()
+    pnls = [0.6 + (0.05 if d % 2 == 0 else -0.05) for d in range(n)]
+    await _seed_trades(db_conn, run_id, start=start, daily_pnls=pnls)
+    end = start + timedelta(days=n)
+
+    # Trading-path verdicts that would FAIL V60 (ITERATE) — proving the hedging
+    # branch overrides them rather than deferring to V11/V60.
+    stat_v, dec_v, payload = await tick._select_track_gate(
+        db=_DbShim(db_conn),
+        track="hedging",
+        stat_v="INSUFFICIENT_EVIDENCE",
+        dec_v="ITERATE",
+        backtest_run_id=run_id,
+        instrument=symbol,
+        window_start=start,
+        window_end=end,
+    )
+    # Reaches PASS through the hedging equity-level gate.
+    assert stat_v == "SIGNIFICANT_EDGE"
+    assert dec_v == "PASS"
+    # Full hedging verdict is stashed for audit (the caller writes it to
+    # metrics_snapshot.hedging_gate).
+    assert payload is not None
+    assert payload["passed"] is True
+    assert set(payload.keys()) == {
+        "passed", "decision", "significance", "benchmark", "strategy"
+    }
+
+
+@pytest.mark.asyncio
+async def test_select_track_gate_hedging_fails_routes_iterate(db_conn):
+    """track=hedging + a buy-hold-equivalent backtest → non-PASS (ITERATE), the
+    same control-flow signal the V60-miss case uses."""
+    from orchestrator.services import tick
+
+    symbol = "SOLUSDT"
+    start = datetime(2024, 6, 1)
+    n = 120
+    await _seed_volatile_buyhold(db_conn, symbol=symbol, start=start, n_days=n)
+    closes = _volatile_closes(n)
+    pnls = [closes[d + 1] - closes[d] for d in range(n - 1)] + [0.0]
+    run_id = uuid.uuid4()
+    await _seed_trades(db_conn, run_id, start=start, daily_pnls=pnls)
+    end = start + timedelta(days=n)
+
+    stat_v, dec_v, payload = await tick._select_track_gate(
+        db=_DbShim(db_conn),
+        track="hedging",
+        stat_v="NO_EDGE",
+        dec_v="DISCARD",
+        backtest_run_id=run_id,
+        instrument=symbol,
+        window_start=start,
+        window_end=end,
+    )
+    assert dec_v == "ITERATE"
+    assert payload is not None and payload["passed"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("track", [None, "trading"])
+async def test_select_track_gate_trading_path_unchanged(db_conn, track):
+    """track in (None, 'trading') is a pure pass-through: V11/V60 verdicts are
+    returned verbatim and NO hedging payload is produced. (No DB work either —
+    proven by passing a closed-shim that would error if .acquire() were used.)"""
+    from orchestrator.services import tick
+
+    class _ExplodingDb:
+        @asynccontextmanager
+        async def acquire(self):
+            raise AssertionError("trading path must not touch the DB / hedging gate")
+            yield  # pragma: no cover
+
+    stat_v, dec_v, payload = await tick._select_track_gate(
+        db=_ExplodingDb(),
+        track=track,
+        stat_v="SIGNIFICANT_EDGE",
+        dec_v="PASS",
+        backtest_run_id=uuid.uuid4(),
+        instrument="BTCUSDT",
+        window_start=datetime(2024, 1, 1),
+        window_end=datetime(2024, 4, 1),
+    )
+    assert (stat_v, dec_v, payload) == ("SIGNIFICANT_EDGE", "PASS", None)

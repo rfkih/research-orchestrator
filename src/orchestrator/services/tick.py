@@ -48,7 +48,7 @@ from ..repo import (
     queue_write,
     trades as trades_repo,
 )
-from . import analyze, paper_generator, portfolio, sweep
+from . import analyze, hedging_gate, paper_generator, portfolio, sweep
 from .activity_logger import log_activity
 from .tick_summary import compute_tick_summary
 
@@ -716,10 +716,31 @@ async def _execute_after_claim(
         analysis.get("annualized_geometric_return_pct_at_alloc_90"),
     )
 
+    # ── Dual-track gate selection (Phase 2, 2026-06-07) ──────────────────
+    # The queue row's track (sweep_config['track']) chooses the graduation
+    # objective. track in (None, "trading") is the DEFAULT and MUST stay
+    # byte-for-byte unchanged — V11 (stat_v) + V60 (dec_v, computed above)
+    # decide the verdict, exactly as before. Only track == "hedging" diverges
+    # (see _select_track_gate). V11/V60 constants and the trading path are
+    # untouched.
+    stat_v, dec_v, hedging_gate_payload = await _select_track_gate(
+        db=db,
+        track=(sweep_config or {}).get("track"),
+        stat_v=stat_v,
+        dec_v=dec_v,
+        backtest_run_id=backtest_run_id,
+        instrument=instrument,
+        window_start=raw_run_dict.get("start_time"),
+        window_end=raw_run_dict.get("end_time"),
+    )
+
     # metrics_snapshot blends run-level metrics with the analyzer payload.
     metrics_snapshot = {**run_metrics, "analysis": analysis}
     if portfolio_corr_payload is not None:
         metrics_snapshot["portfolio_corr"] = portfolio_corr_payload
+    if hedging_gate_payload is not None:
+        # Stash the full hedging verdict for audit (mirrors portfolio_corr).
+        metrics_snapshot["hedging_gate"] = hedging_gate_payload
 
     async with db.acquire() as conn:
         async with conn.transaction():
@@ -876,6 +897,59 @@ async def _execute_after_claim(
         pf=_pf_f,
         n_trades=_n_trades_i,
     )
+
+
+async def _select_track_gate(
+    *,
+    db: Database,
+    track: str | None,
+    stat_v: str,
+    dec_v: str,
+    backtest_run_id: Any,
+    instrument: str,
+    window_start: Any,
+    window_end: Any,
+) -> tuple[str, str, dict[str, Any] | None]:
+    """Choose the graduation gate by the queue row's track (Phase 2, 2026-06-07).
+
+    Returns ``(statistical_verdict, decision_verdict, hedging_gate_payload)``.
+
+    track in (None, "trading") — the DEFAULT — returns the V11/V60-derived
+    ``(stat_v, dec_v)`` UNCHANGED and ``None`` for the payload. The trading
+    path is therefore byte-for-byte identical: when track is not "hedging" this
+    helper is a pass-through and does NO database work.
+
+    track == "hedging" is an operator-authorized, ADDITIVE objective — beats
+    buy-hold on a risk-adjusted, equity-level basis — that REPLACES the
+    trade-level V11 PASS requirement and the V60 >=10%/yr economic check for
+    hedging rows ONLY. The hedging gate computes its own pass/fail, which we map
+    onto the SAME (stat_v, dec_v) control-flow signals the trading path already
+    feeds to ``_decide_next_state`` so downstream routing is reused verbatim:
+        gate PASS → ("SIGNIFICANT_EDGE", "PASS")    → routes to /walk-forward
+        gate FAIL → ("SIGNIFICANT_EDGE", "ITERATE") → the exact "edge not
+                    sufficient" ITERATE/continue path the V60-miss case uses.
+    Walk-forward ROBUST remains a hard downstream requirement either way.
+    V11/V60 constants and the trading path's logic are NOT touched here.
+    """
+    if track != "hedging":
+        return stat_v, dec_v, None
+
+    # Benchmark the underlying on DAILY closes regardless of the strategy's bar
+    # interval (buy-hold is an equity-level, daily-frequency baseline).
+    async with db.acquire() as conn:
+        payload = await hedging_gate.evaluate(
+            conn,
+            backtest_run_id=backtest_run_id,
+            symbol=instrument,
+            interval="1d",
+            start=window_start,
+            end=window_end,
+        )
+    # Drive existing control flow off the equity-level verdict. V11/V60 are
+    # intentionally bypassed for hedging rows.
+    new_stat_v = "SIGNIFICANT_EDGE"
+    new_dec_v = "PASS" if payload["passed"] else "ITERATE"
+    return new_stat_v, new_dec_v, payload
 
 
 async def _decide_next_state(
