@@ -25,7 +25,17 @@ CREATE TABLE IF NOT EXISTS research_queue (
     status          VARCHAR(20) NOT NULL DEFAULT 'PENDING',
     iteration_number INTEGER    NOT NULL DEFAULT 0,
     iter_budget     INTEGER     NOT NULL DEFAULT 5,
+    early_stop_on_no_edge BOOLEAN NOT NULL DEFAULT TRUE,
+    require_walk_forward  BOOLEAN NOT NULL DEFAULT TRUE,
+    last_iteration_id     UUID,
+    last_run_id           UUID,
+    final_verdict         VARCHAR(40),
+    walk_forward_id       UUID,
     created_time    TIMESTAMP   NOT NULL DEFAULT NOW(),
+    created_by      VARCHAR(150),
+    started_at      TIMESTAMP,
+    completed_at    TIMESTAMP,
+    notes           TEXT,
     CONSTRAINT pk_research_queue PRIMARY KEY (queue_id)
 );
 

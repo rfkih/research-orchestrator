@@ -121,3 +121,111 @@ def test_agent_state_endpoint_forwards_track(integration_client, monkeypatch):
     assert body["db_ok"] is True, "real pool should answer SELECT 1"
     assert "queue_counts" in body
     assert recorded["track"] == "trading", "?track= must reach get_state_digest"
+
+
+async def _insert_queue(conn, *, strategy_code, sweep_config, track=None):
+    """Enqueue via the real repo writer (exercises track stamping)."""
+    from orchestrator.repo import queue_write
+
+    return await queue_write.insert_queue(
+        conn,
+        strategy_code=strategy_code,
+        interval_name="1h",
+        instrument="BTCUSDT",
+        sweep_config=sweep_config,
+        hypothesis="h",
+        priority=100,
+        iter_budget=1,
+        early_stop_on_no_edge=True,
+        require_walk_forward=True,
+        created_by="trk-test",
+        track=track,
+    )
+
+
+@pytest.mark.asyncio
+async def test_insert_queue_stamps_track_without_mutating_caller(db_conn):
+    from orchestrator.repo import queue_write
+
+    caller_cfg = {"strategy": "grid", "params": []}
+    row = await queue_write.insert_queue(
+        db_conn,
+        strategy_code="TRK_STAMP",
+        interval_name="1h",
+        instrument="BTCUSDT",
+        sweep_config=caller_cfg,
+        hypothesis="h",
+        priority=100,
+        iter_budget=1,
+        early_stop_on_no_edge=True,
+        require_walk_forward=True,
+        created_by="trk-test",
+        track="hedging",
+    )
+    # The persisted sweep_config carries the track tag...
+    assert row["sweep_config"]["track"] == "hedging"
+    stored = await db_conn.fetchval(
+        "SELECT sweep_config->>'track' FROM research_queue WHERE queue_id = $1",
+        row["queue_id"],
+    )
+    assert stored == "hedging"
+    # ...but the caller's dict was NOT mutated.
+    assert "track" not in caller_cfg
+
+
+@pytest.mark.asyncio
+async def test_claim_only_picks_matching_track(db_conn):
+    from orchestrator.repo import queue_write
+
+    await _insert_queue(
+        db_conn,
+        strategy_code="TRK_A",
+        sweep_config={"strategy": "grid", "params": [], "track": "hedging"},
+        track="hedging",
+    )
+    claimed = await queue_write.claim_next(db_conn, track="trading")
+    assert claimed is None, "trading claim must skip a hedging-tagged row"
+
+    claimed_h = await queue_write.claim_next(db_conn, track="hedging")
+    assert claimed_h is not None and claimed_h["strategy_code"] == "TRK_A"
+
+
+@pytest.mark.asyncio
+async def test_claim_no_track_is_global(db_conn):
+    from orchestrator.repo import queue_write
+
+    await _insert_queue(
+        db_conn,
+        strategy_code="TRK_B",
+        sweep_config={"strategy": "grid", "params": []},
+        track="hedging",
+    )
+    # No track on the claim → backward-compatible, picks any PENDING row.
+    claimed = await queue_write.claim_next(db_conn)
+    assert claimed is not None and claimed["strategy_code"] == "TRK_B"
+
+
+@pytest.mark.asyncio
+async def test_queue_counts_scoped_to_track(db_conn):
+    await _insert_queue(
+        db_conn,
+        strategy_code="TRK_C",
+        sweep_config={"strategy": "grid", "params": []},
+        track="hedging",
+    )
+    counts = await agent_state._queue_counts(db_conn, track="trading")
+    assert counts["PENDING"] == 0
+    counts_h = await agent_state._queue_counts(db_conn, track="hedging")
+    assert counts_h["PENDING"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_queue_counts_no_track_is_global(db_conn):
+    await _insert_queue(
+        db_conn,
+        strategy_code="TRK_D",
+        sweep_config={"strategy": "grid", "params": []},
+        track="hedging",
+    )
+    counts = await agent_state._queue_counts(db_conn)
+    assert counts["PENDING"] >= 1

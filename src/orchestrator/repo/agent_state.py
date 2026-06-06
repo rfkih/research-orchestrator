@@ -19,13 +19,17 @@ from typing import Any
 import asyncpg
 
 
-async def _queue_counts(conn: asyncpg.Connection) -> dict[str, int]:
+async def _queue_counts(
+    conn: asyncpg.Connection, *, track: str | None = None
+) -> dict[str, int]:
     rows = await conn.fetch(
         """
         SELECT status, COUNT(*)::int AS n
         FROM research_queue
+        WHERE ($1::text IS NULL OR sweep_config->>'track' = $1)
         GROUP BY status
-        """
+        """,
+        track,
     )
     counts = {r["status"]: int(r["n"]) for r in rows}
     # Always include the four states the researcher branches on, even when
@@ -423,7 +427,7 @@ async def get_state_digest(
     branch 4 (ML-pending) and avoids a mid-session 429 — all from this one
     call.
     """
-    queue_counts = await _queue_counts(conn)
+    queue_counts = await _queue_counts(conn, track=track)
     # global by design: iteration_log has no track linkage (see Phase 1 plan Task 4)
     last_iters = await _last_iterations(conn, last_n_iterations)
     # global by design: iteration_log has no track linkage (see Phase 1 plan Task 4)
