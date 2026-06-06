@@ -128,6 +128,51 @@ def test_neutralize_insufficient_obs():
     assert res["n_obs"] == 40
 
 
+def test_neutralize_rank_deficient_factors_does_not_false_flag_alpha():
+    # Two perfectly-collinear factors → XᵀX is singular/rank-deficient, so the
+    # alpha t-stat cannot be computed reliably. A candidate with GENUINE
+    # idiosyncratic alpha must NOT be wrongly flagged disguised_beta in that
+    # un-judgeable case — we return reason='rank_deficient' and keep it.
+    import random
+    from datetime import timedelta
+    rng = random.Random(11)
+    base = date(2024, 1, 1)
+    mkt = {base + timedelta(days=i): 0.01 * ((-1) ** i) for i in range(120)}
+    # DUP is an exact copy of MARKET → the two factor columns are collinear.
+    dup = dict(mkt)
+    drift = 0.003
+    cand = {d: 1.0 * r + drift + rng.gauss(0.0, 0.0005) for d, r in mkt.items()}
+    res = fm.neutralize(cand, {"MARKET": mkt, "DUP": dup})
+    assert res["reason"] == "rank_deficient"
+    assert res["disguised_beta"] is False   # un-judgeable → never false-flag
+    assert res["alpha_tstat"] is None
+    assert res["n_obs"] >= 60
+
+
+def test_neutralize_high_r2_with_alpha_is_kept():
+    # High factor exposure (R² well above the 0.90 floor) WITH a real,
+    # significant idiosyncratic alpha must be KEPT (not flagged disguised_beta).
+    # candidate = 3x MARKET (→ very high R²) + significant drift + tiny noise.
+    import random
+    from datetime import timedelta
+    rng = random.Random(3)
+    base = date(2024, 1, 1)
+    mkt = {base + timedelta(days=i): 0.02 * ((-1) ** i) for i in range(120)}
+    factors = {"MARKET": mkt}
+    drift = 0.004
+    cand = {d: 3.0 * r + drift + rng.gauss(0.0, 0.0003) for d, r in mkt.items()}
+    res = fm.neutralize(cand, factors)
+    # high factor exposure → R² above the floor
+    sst = sum((v - sum(cand.values()) / len(cand)) ** 2 for v in cand.values())
+    ssr = sum(v ** 2 for v in res["residuals"].values())
+    r2 = 1.0 - ssr / sst
+    assert r2 >= fm._DISGUISED_R2_FLOOR, f"expected high R², got {r2}"
+    # but a real significant alpha → KEEP
+    assert res["alpha_tstat"] is not None
+    assert abs(res["alpha_tstat"]) >= fm.ALPHA_TSTAT_MIN
+    assert res["disguised_beta"] is False
+
+
 # ── Pin tests (Step 3 / Task 3 Step 5) ──────────────────────────────────────
 def test_momentum_constants_are_pinned():
     assert fm.MOM_LOOKBACK == 20
@@ -137,6 +182,14 @@ def test_momentum_constants_are_pinned():
 def test_neutralize_constants_are_pinned():
     assert fm.ALPHA_TSTAT_MIN == 2.0
     assert fm.MIN_FACTOR_OBS == 60
+
+
+def test_disguised_beta_floors_are_pinned():
+    # These two floors are load-bearing for the DISGUISED_BETA decision —
+    # pin their exact values so accidental drift surfaces (mirrors the
+    # ALPHA_TSTAT_MIN / MIN_FACTOR_OBS pin-test above).
+    assert fm._DISGUISED_R2_FLOOR == 0.90
+    assert fm._DISGUISED_SHARPE_FLOOR == 1.0
 
 
 def test_factor_symbols_constant_is_pinned():

@@ -123,6 +123,38 @@ def test_agent_state_endpoint_forwards_track(integration_client, monkeypatch):
     assert recorded["track"] == "trading", "?track= must reach get_state_digest"
 
 
+def test_agent_state_track_param_is_validated(integration_client, monkeypatch):
+    """GET /agent/state validates ?track= against the same Literal the POST
+    bodies use: a valid value → 200, a bogus value → 422 (not a silently
+    global-shaped digest)."""
+    async def _fake_get_state_digest(conn, **kwargs):
+        return {
+            "queue_counts": {"PENDING": 0, "RUNNING": 0, "PARKED": 0,
+                             "COMPLETED": 0, "FAILED": 0},
+            "last_iterations": [],
+            "recent_sig_edge_iteration_ids": [],
+            "active_hypotheses": [],
+            "last_run_summary": None,
+            "last_null_screen_per_surface": [],
+            "pending_specialist_reviews": [],
+            "recent_specialist_verdicts": [],
+            "lockout_state": {"in_lockout": False, "terminal_title": None,
+                              "lockout_expires_at": None, "bypass_available": False},
+            "ml_training_budget": None,
+            "pending_ml_training_runs": None,
+        }
+
+    monkeypatch.setattr(
+        agent_api.agent_state_repo, "get_state_digest", _fake_get_state_digest,
+    )
+
+    ok = integration_client.get("/agent/state?track=trading", headers=_AUTH_HEADERS)
+    assert ok.status_code == 200, ok.text
+
+    bad = integration_client.get("/agent/state?track=bogus", headers=_AUTH_HEADERS)
+    assert bad.status_code == 422, bad.text
+
+
 async def _insert_queue(conn, *, strategy_code, sweep_config, track=None):
     """Enqueue via the real repo writer (exercises track stamping)."""
     from orchestrator.repo import queue_write

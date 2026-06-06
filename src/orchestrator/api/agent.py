@@ -13,7 +13,7 @@ prior session memory. These endpoints exist so the agent can:
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
@@ -1469,7 +1469,9 @@ class AgentState(BaseModel):
 
 
 @router.get("/state", response_model=AgentState)
-async def agent_state(request: Request, track: str | None = None) -> AgentState:
+async def agent_state(
+    request: Request, track: Literal["trading", "hedging"] | None = None
+) -> AgentState:
     db_ok = await request.app.state.db.health_probe()
     jvm_ok = await request.app.state.jvm.health_probe()
     notes: list[str] = []

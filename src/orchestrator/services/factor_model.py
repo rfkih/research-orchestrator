@@ -266,6 +266,26 @@ def neutralize(
     resid = y - fitted
     residuals = {d: float(resid[i]) for i, d in enumerate(dates)}
 
+    # Rank-deficient guard: if XᵀX is singular (e.g. collinear/duplicated
+    # factors) we CANNOT compute a reliable alpha standard error → alpha
+    # significance is un-judgeable. Returning var_alpha=0 here would silently
+    # treat alpha as insignificant and could FALSE-FLAG a candidate with
+    # genuine idiosyncratic alpha as disguised_beta. Conservative direction:
+    # when we cannot assess alpha, we must NOT reject — surface a sentinel and
+    # keep the candidate (disguised_beta=False). (Real prod uses 4 distinct
+    # factors, so this is an edge; the safe direction is what matters.)
+    XtX = X.T @ X
+    if np.linalg.matrix_rank(XtX) < XtX.shape[0]:
+        return {
+            "alpha": alpha,
+            "alpha_tstat": None,
+            "betas": betas,
+            "residuals": residuals,
+            "disguised_beta": False,
+            "reason": "rank_deficient",
+            "n_obs": n_obs,
+        }
+
     # OLS standard error of the intercept.
     alpha_tstat: float | None = None
     # ``alpha_significant`` is True only when a finite t-stat clears the floor.
