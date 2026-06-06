@@ -68,6 +68,26 @@ CREATE TABLE IF NOT EXISTS account_strategy (
     is_deleted               BOOLEAN      NOT NULL DEFAULT FALSE
 );
 
+-- Buy-hold benchmark reads market_data closes (hedging gate). Trimmed copy of
+-- the V1 baseline; column types match the Flyway baseline CREATE TABLE.
+CREATE TABLE IF NOT EXISTS market_data (
+    id                     BIGSERIAL      PRIMARY KEY,
+    symbol                 VARCHAR(10)    NOT NULL,
+    interval               VARCHAR(5)     NOT NULL,
+    start_time             TIMESTAMP      NOT NULL,
+    end_time               TIMESTAMP      NOT NULL,
+    open_price             NUMERIC(24,12) NOT NULL,
+    close_price            NUMERIC(24,12) NOT NULL,
+    high_price             NUMERIC(24,12) NOT NULL,
+    low_price              NUMERIC(24,12) NOT NULL,
+    volume                 NUMERIC(24,12) NOT NULL,
+    trade_count            BIGINT         NOT NULL,
+    quote_asset_volume     NUMERIC(24,12) NOT NULL,
+    taker_buy_base_volume  NUMERIC(24,12) NOT NULL,
+    taker_buy_quote_volume NUMERIC(24,12) NOT NULL,
+    created_time           TIMESTAMP      NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS research_iteration_log (
     iteration_id        UUID        NOT NULL DEFAULT gen_random_uuid(),
     strategy_code       VARCHAR(60) NOT NULL,
