@@ -110,16 +110,20 @@ async def _active_hypotheses(conn: asyncpg.Connection) -> list[dict[str, Any]]:
     ]
 
 
-async def _last_run_summary(conn: asyncpg.Connection) -> dict[str, Any] | None:
+async def _last_run_summary(
+    conn: asyncpg.Connection, *, track: str | None = None
+) -> dict[str, Any] | None:
     row = await conn.fetchrow(
         """
         SELECT journal_id, strategy_code, title, content,
                structured_data, created_time
         FROM research_journal
         WHERE entry_type = 'RUN_SUMMARY'
+          AND ($1::text IS NULL OR structured_data->>'track' = $1)
         ORDER BY created_time DESC
         LIMIT 1
-        """
+        """,
+        track,
     )
     if row is None:
         return None
@@ -133,7 +137,9 @@ async def _last_run_summary(conn: asyncpg.Connection) -> dict[str, Any] | None:
     }
 
 
-async def _lockout_state(conn: asyncpg.Connection) -> dict[str, Any]:
+async def _lockout_state(
+    conn: asyncpg.Connection, *, track: str | None = None
+) -> dict[str, Any]:
     """Resolve the resume lockout server-side (rank 10).
 
     Finds the most-recent terminal-fire RUN_SUMMARY (ARCHETYPE_EXHAUSTION_*
@@ -162,6 +168,7 @@ async def _lockout_state(conn: asyncpg.Connection) -> dict[str, Any]:
             WHERE entry_type = 'RUN_SUMMARY'
               AND (title LIKE 'ARCHETYPE_EXHAUSTION_%'
                    OR title LIKE 'OPERATOR_ESCALATION_%')
+              AND ($1::text IS NULL OR structured_data->>'track' = $1)
             ORDER BY created_time DESC
             LIMIT 1
         )
@@ -172,10 +179,12 @@ async def _lockout_state(conn: asyncpg.Connection) -> dict[str, Any]:
                    SELECT 1 FROM research_journal h
                    WHERE h.entry_type = 'HYPOTHESIS' AND h.status = 'ACTIVE'
                      AND h.created_time > t.created_time
+                     AND ($1::text IS NULL OR h.structured_data->>'track' = $1)
                ) AS bypass_available
         FROM terminal t
         WHERE t.window_iv IS NOT NULL
-        """
+        """,
+        track,
     )
     if row is None:
         return {"in_lockout": False, "terminal_title": None,
