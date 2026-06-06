@@ -60,3 +60,32 @@ def buy_hold_metrics(closes: list[tuple[date, float]]) -> dict[str, Any]:
         "sharpe": _sharpe(rets),
         "max_drawdown_pct": _max_drawdown_pct(px),
     }
+
+
+def beats_buy_hold_risk_adj(*, strat: dict[str, Any], bench: dict[str, Any]) -> dict[str, Any]:
+    """Deterministic: PASS iff CAGR floor holds AND a material risk improvement.
+    floor:  strat.cagr >= bench.cagr - TOL_CAGR_PCT
+    edge:   (strat.sharpe - bench.sharpe) >= THETA_SHARPE
+            OR (bench.maxDD - strat.maxDD) >= THETA_DD_PCT
+    """
+    def _n(x): return None if x is None else float(x)
+    s_cagr, b_cagr = _n(strat.get("cagr_pct")), _n(bench.get("cagr_pct"))
+    s_sh, b_sh = _n(strat.get("sharpe")), _n(bench.get("sharpe"))
+    s_dd, b_dd = _n(strat.get("max_drawdown_pct")), _n(bench.get("max_drawdown_pct"))
+    if None in (s_cagr, b_cagr, s_sh, b_sh, s_dd, b_dd):
+        return {"passed": False, "reason": "insufficient metrics for hedging gate"}
+    floor_ok = s_cagr >= b_cagr - TOL_CAGR_PCT
+    sharpe_gain = s_sh - b_sh
+    dd_cut = b_dd - s_dd
+    material = (sharpe_gain >= THETA_SHARPE) or (dd_cut >= THETA_DD_PCT)
+    passed = bool(floor_ok and material)
+    return {
+        "passed": passed,
+        "floor_ok": floor_ok,
+        "sharpe_gain": round(sharpe_gain, 4),
+        "dd_cut_pct": round(dd_cut, 4),
+        "reason": (
+            "beats buy-hold risk-adjusted" if passed
+            else ("CAGR floor breached" if not floor_ok else "no material risk improvement")
+        ),
+    }
