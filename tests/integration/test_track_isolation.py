@@ -383,3 +383,17 @@ async def test_drain_only_drains_its_track(db_conn, integration_client):
         "SELECT status FROM research_queue WHERE queue_id = $1", hedge["queue_id"],
     )
     assert status == "PENDING"
+
+
+# ── Task 6: end-to-end per-track isolation guarantee ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_hedging_exhaustion_invisible_to_trading_digest(db_conn):
+    # The headline guarantee: a hedging ARCHETYPE_EXHAUSTION never appears
+    # in the trading digest, and vice-versa.
+    await _insert_run_summary(db_conn, title="ARCHETYPE_EXHAUSTION_X", track="hedging")
+    trading = await agent_state.get_state_digest(db_conn, track="trading")
+    hedging = await agent_state.get_state_digest(db_conn, track="hedging")
+    assert trading["lockout_state"]["in_lockout"] is False
+    assert hedging["lockout_state"]["in_lockout"] is True
