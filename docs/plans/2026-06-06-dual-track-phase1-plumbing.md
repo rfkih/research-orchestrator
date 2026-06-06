@@ -33,6 +33,156 @@
 
 ---
 
+## Task 0: pytest-postgresql integration harness (real DB)
+
+The repo declares `pytest-postgresql>=6.1` + `pytest-asyncio` (`asyncio_mode="auto"`) and CLAUDE.md says "DB-touching tests use pytest-postgresql behind `@pytest.mark.integration`" — but no test actually does. The operator chose **real** integration tests, so this task stands up the live-Postgres fixture + a minimal schema bootstrap for the three tables Phase 1 touches. All later `*_track` tests are `@pytest.mark.integration` and depend on the `db_conn` fixture created here.
+
+**Files:**
+- Create: `tests/integration/conftest.py`
+- Create: `tests/integration/schema_phase1.sql`
+- Create: `tests/integration/test_harness_smoke.py`
+
+- [ ] **Step 1: Write the minimal schema bootstrap**
+
+Create `tests/integration/schema_phase1.sql` with the EXACT column subset Phase 1 queries read, copied from the Flyway V1 baseline (`blackheart-trading-engine/.../V1__baseline.sql`). Deliberately minimal, test-local (documented drift risk: keep the used columns in sync with V1):
+
+```sql
+-- Minimal subset of the Flyway V1 baseline for Phase 1 track-isolation tests.
+-- Source of truth: blackheart-trading-engine/src/main/resources/db/flyway/V1__baseline.sql
+CREATE TABLE IF NOT EXISTS research_journal (
+    journal_id      UUID         NOT NULL DEFAULT gen_random_uuid(),
+    entry_type      VARCHAR(40)  NOT NULL,
+    strategy_code   VARCHAR(60),
+    title           VARCHAR(300) NOT NULL,
+    content         TEXT         NOT NULL,
+    structured_data JSONB        NOT NULL DEFAULT '{}',
+    status          VARCHAR(20)  NOT NULL DEFAULT 'ACTIVE',
+    created_time    TIMESTAMP    NOT NULL DEFAULT NOW(),
+    CONSTRAINT pk_research_journal PRIMARY KEY (journal_id)
+);
+
+CREATE TABLE IF NOT EXISTS research_queue (
+    queue_id        UUID        NOT NULL DEFAULT gen_random_uuid(),
+    priority        INTEGER     NOT NULL DEFAULT 100,
+    strategy_code   VARCHAR(60) NOT NULL,
+    interval_name   VARCHAR(20) NOT NULL,
+    instrument      VARCHAR(30) NOT NULL DEFAULT 'BTCUSDT',
+    sweep_config    JSONB       NOT NULL,
+    hypothesis      TEXT,
+    status          VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+    iteration_number INTEGER    NOT NULL DEFAULT 0,
+    iter_budget     INTEGER     NOT NULL DEFAULT 5,
+    created_time    TIMESTAMP   NOT NULL DEFAULT NOW(),
+    CONSTRAINT pk_research_queue PRIMARY KEY (queue_id)
+);
+
+CREATE TABLE IF NOT EXISTS research_iteration_log (
+    iteration_id        UUID        NOT NULL DEFAULT gen_random_uuid(),
+    strategy_code       VARCHAR(60) NOT NULL,
+    iteration_number    INTEGER     NOT NULL,
+    params_snapshot     JSONB       NOT NULL DEFAULT '{}',
+    metrics_snapshot    JSONB       NOT NULL DEFAULT '{}',
+    verdict             VARCHAR(20) NOT NULL,
+    statistical_verdict VARCHAR(40),
+    created_time        TIMESTAMP   NOT NULL DEFAULT NOW(),
+    CONSTRAINT pk_research_iteration_log PRIMARY KEY (iteration_id),
+    CONSTRAINT uq_research_iteration_strategy_n UNIQUE (strategy_code, iteration_number)
+);
+```
+
+> `gen_random_uuid()` needs `pgcrypto` on older PG; on PG13+ it is built-in. If the smoke test errors on it, prepend `CREATE EXTENSION IF NOT EXISTS pgcrypto;` to this file.
+
+- [ ] **Step 2: Write the integration conftest with a live asyncpg `db_conn` fixture**
+
+Create `tests/integration/conftest.py`. pytest-postgresql provides the server + applies nothing; we open a parallel `asyncpg` connection (repo code is all asyncpg) and register the project's JSONB codec (mirror `orchestrator/infra/db.py:_init_connection` so dicts round-trip).
+
+```python
+"""Live-Postgres fixtures for Phase 1 track-isolation integration tests.
+
+Default: pytest-postgresql spawns an isolated server (postgresql_proc) — needs
+initdb/pg_ctl on PATH. If unavailable on this host, switch the marked line to
+postgresql_noproc against the dev server on 127.0.0.1:5432 (empty dev DB).
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import asyncpg
+import pytest_asyncio
+from pytest_postgresql import factories
+
+# NOTE (no pg binaries on PATH): replace with
+#   postgresql_proc = factories.postgresql_noproc(
+#       host="127.0.0.1", port=5432, user="postgres", password="postgres")
+postgresql_proc = factories.postgresql_proc()
+postgresql_db = factories.postgresql("postgresql_proc", dbname="orch_phase1_test")
+
+_SCHEMA = (Path(__file__).parent / "schema_phase1.sql").read_text(encoding="utf-8")
+
+
+@pytest_asyncio.fixture
+async def db_conn(postgresql_db):
+    p = postgresql_db.info  # psycopg ConnectionInfo
+    conn = await asyncpg.connect(
+        host=p.host, port=p.port, user=p.user,
+        password=p.password, database=p.dbname,
+    )
+    await conn.set_type_codec(
+        "jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog",
+    )
+    await conn.execute(_SCHEMA)
+    try:
+        yield conn
+    finally:
+        await conn.close()
+```
+
+- [ ] **Step 3: Write the harness smoke test**
+
+```python
+# tests/integration/test_harness_smoke.py
+import pytest
+
+pytestmark = pytest.mark.integration
+
+
+@pytest.mark.asyncio
+async def test_db_conn_roundtrips_jsonb(db_conn):
+    await db_conn.execute(
+        """
+        INSERT INTO research_journal (entry_type, title, content, structured_data)
+        VALUES ('HYPOTHESIS', 't', 'c', $1)
+        """,
+        {"track": "trading"},  # dict → jsonb via the registered codec
+    )
+    row = await db_conn.fetchrow(
+        "SELECT structured_data FROM research_journal WHERE title = 't'"
+    )
+    assert row["structured_data"] == {"track": "trading"}
+```
+
+- [ ] **Step 4: Run the smoke test**
+
+Run: `PYTHONPATH=src pytest tests/integration/test_harness_smoke.py -v -m integration`
+Expected: PASS. If it errors "no initdb/pg_ctl", apply the `postgresql_noproc` NOTE in Step 2 and re-run. If `gen_random_uuid` is missing, apply the `pgcrypto` note in Step 1.
+
+- [ ] **Step 5: Confirm the default suite still excludes integration**
+
+Run: `PYTHONPATH=src pytest -q -m "not integration"`
+Expected: the full existing suite passes; the new integration test is deselected (default/CI runs don't require Postgres).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add tests/integration/conftest.py tests/integration/schema_phase1.sql tests/integration/test_harness_smoke.py
+git commit -m "test(track): pytest-postgresql integration harness + Phase1 schema bootstrap"
+```
+
+> **For all subsequent tasks:** put the `*_track` tests in `tests/integration/test_track_isolation.py` (NOT `tests/test_track_isolation.py`), mark the module `pytestmark = pytest.mark.integration`, and use the `db_conn` fixture from this task. The `INSERT`/`SELECT` test bodies in Tasks 1–6 are correct against this real `db_conn`. For the API tests in Tasks 3 & 5, add an `integration_client` fixture to this conftest — a `TestClient` whose `app.state.db` wraps a real asyncpg pool to this test DB (follow `tests/conftest.py:client` but do NOT override `get_db_conn` to None). Run each task's tests with `-m integration`.
+
+---
+
 ## Task 1: Track-scoped helpers in `agent_state.py` (lockout + run-summary)
 
 The two most dangerous cross-contaminations: a hedging `ARCHETYPE_EXHAUSTION` must not lock out the trading loop (`_lockout_state`), and each track must resume its own checkpoint (`_last_run_summary`). Both read `research_journal`; we add an optional `track` filter on `structured_data->>'track'`. `track=None` keeps the global query (backward compatible).
@@ -300,8 +450,8 @@ async def get_state_digest(
     ml_training_window_hours: int = 24,
 ) -> dict[str, Any]:
     queue_counts = await _queue_counts(conn, track=track)            # Task 4 adds the param
-    last_iters = await _last_iterations(conn, last_n_iterations, track=track)  # Task 4
-    sig_edge_ids = await _recent_sig_edge_ids(conn, sig_edge_window_days)
+    last_iters = await _last_iterations(conn, last_n_iterations)     # NOT track-scoped — see note
+    sig_edge_ids = await _recent_sig_edge_ids(conn, sig_edge_window_days)  # NOT track-scoped
     hypotheses = await _active_hypotheses(conn, track=track)
     run_summary = await _last_run_summary(conn, track=track)
     null_screens = await _last_null_screen_per_surface(conn, track=track)
@@ -311,7 +461,7 @@ async def get_state_digest(
     # ... ml_budget / pending_ml_runs unchanged (keyed by agent_name) ...
 ```
 
-> **Sequencing note:** `_queue_counts(conn, track=...)` and `_last_iterations(conn, n, track=...)` do not yet accept `track` — they get it in Task 4. To keep this task's tests green now, temporarily call them WITHOUT `track` here and add it in Task 4. Mark this with a `# TODO(Task 4): thread track` comment on those two lines ONLY (this is the one allowed transient marker; Task 4 removes it).
+> **Sequencing + design note:** `_queue_counts` gains a `track` param in Task 4 (it reads `research_queue.sweep_config`, which carries the tag). For THIS task call it without `track` and add the kwarg in Task 4 — no TODO marker needed since the call site is updated in the very next task. `_last_iterations` and `_recent_sig_edge_ids` are **intentionally left global**: `research_iteration_log` has **no `queue_id`/track column** (confirmed against Flyway V1), so an iteration cannot be linked to a track. These two fields are informational digest content; cross-track bleed there is cosmetic and cannot cause a wrong lockout, mis-resume, or double-claim. Document this with a one-line code comment above each call: `# global by design: iteration_log has no track linkage (see Phase 1 plan Task 4)`.
 
 - [ ] **Step 7: Run test to verify it passes**
 
@@ -484,21 +634,28 @@ where `$N` is a new `track` param. NULL track = claim any row (backward compatib
 Run: `PYTHONPATH=src pytest tests/test_track_isolation.py::test_claim_only_picks_matching_track -v`
 Expected: PASS
 
-- [ ] **Step 6: Scope `_queue_counts` and `_last_iterations`, remove the TODO markers**
+- [ ] **Step 6: Scope `_queue_counts` by track; wire it into `get_state_digest`**
 
-In `repo/agent_state.py`, give both helpers `track: str | None = None`:
-- `_queue_counts`: add `WHERE ($1::text IS NULL OR sweep_config->>'track' = $1)` and `GROUP BY status` (pass `track`).
-- `_last_iterations`: join/filter iterations to their queue row's track. The iteration log carries `queue_id`; filter with a subquery:
+In `repo/agent_state.py`, give `_queue_counts` a `track: str | None = None` param and filter on the queue's JSONB tag:
 
-```sql
-        WHERE ($1::text IS NULL OR EXISTS (
-            SELECT 1 FROM research_queue q
-            WHERE q.queue_id = research_iteration_log.queue_id
-              AND q.sweep_config->>'track' = $1))
-        ORDER BY created_time DESC, iteration_id::text DESC
-        LIMIT $2
+```python
+async def _queue_counts(conn: asyncpg.Connection, *, track: str | None = None) -> dict[str, int]:
+    rows = await conn.fetch(
+        """
+        SELECT status, COUNT(*)::int AS n
+        FROM research_queue
+        WHERE ($1::text IS NULL OR sweep_config->>'track' = $1)
+        GROUP BY status
+        """,
+        track,
+    )
+    counts = {r["status"]: int(r["n"]) for r in rows}
+    for k in ("PENDING", "RUNNING", "PARKED", "COMPLETED", "FAILED"):
+        counts.setdefault(k, 0)
+    return counts
 ```
-(pass `track` then `n`). Then remove the `# TODO(Task 4)` comments from `get_state_digest` and pass `track=track` to both.
+
+Then in `get_state_digest`, change the queue-counts call to `await _queue_counts(conn, track=track)`. Leave `_last_iterations` and `_recent_sig_edge_ids` calls global (per the Task 2 design note — no track linkage on `research_iteration_log`).
 
 - [ ] **Step 7: Write + run the queue-counts isolation test**
 
