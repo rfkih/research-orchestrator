@@ -263,7 +263,7 @@ async def _active_members_returns(
     its weight."""
     members = await conn.fetch(
         "SELECT strategy_code, symbol, interval_name, iteration_id "
-        "FROM signal_pool WHERE status = 'active'"
+        "FROM signal_pool WHERE status = 'active' AND kind = 'signal_pool'"
     )
     out: dict[str, dict[date, float]] = {}
     for m in members:
@@ -415,7 +415,7 @@ async def evaluate_members_for_eviction(
     Pure of writes — the API layer applies + journals."""
     members = await conn.fetch(
         "SELECT pool_id, strategy_code, symbol, interval_name "
-        "FROM signal_pool WHERE status = 'active'"
+        "FROM signal_pool WHERE status = 'active' AND kind = 'signal_pool'"
     )
     series = await _active_members_returns(conn)
     pool_id_by_key = {

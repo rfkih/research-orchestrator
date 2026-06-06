@@ -95,7 +95,7 @@ async def _active_members(conn: asyncpg.Connection) -> list[dict[str, Any]]:
         """
         SELECT strategy_code, symbol, interval_name, pool_weight
           FROM signal_pool
-         WHERE status = 'active'
+         WHERE status = 'active' AND kind = 'signal_pool'
         """
     )
     return [
