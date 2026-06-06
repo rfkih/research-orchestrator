@@ -6,7 +6,11 @@
 
 **Architecture:** Carry a `track` string in existing JSONB (`research_queue.sweep_config->>'track'`, `research_journal.structured_data->>'track'`). Thread an optional `track` arg through the collision-prone reads (`get_state_digest` + helpers) and the queue claim (`/tick`, `/tick/drain`). Absent `track` ⇒ today's global behavior (backward compatible). A `/research-track <trading|hedging>` slash command boots the scoped researcher; decision points write a track-tagged `SESSION_CHECKPOINT` and return to the CLI for operator input.
 
-**Tech Stack:** Python 3.11, FastAPI, asyncpg, pytest + pytest-postgresql. Tests run `PYTHONPATH=src pytest -q` from `blackheart-research-orchestrator/`. DB-touching tests use `@pytest.mark.integration`.
+**Tech Stack:** Python 3.11, FastAPI, asyncpg, pytest + pytest-postgresql. Tests run `PYTHONPATH=src pytest -q` from the worktree root. DB-touching tests use `@pytest.mark.integration`.
+
+**⚠️ Test-run env (confirmed Task 0):** `src/orchestrator/main.py` builds the app at import time, so `Settings()` requires env vars or collection fails. Prefix EVERY pytest command with:
+`ORCH_AUTH_TOKEN=dev-sentinel-not-for-prod ORCH_DB_DSN="postgresql://x:y@127.0.0.1:5432/none" PYTHONPATH=src pytest ...`
+Integration tests connect via `postgresql_noproc` to the dev server on `127.0.0.1:5432` (creds `postgres`/`admin`; no pg binaries on PATH so `postgresql_proc` is NOT available on this host).
 
 **Repo:** All code paths below are relative to `blackheart-research-orchestrator/`. This repo is a DML-only client — **no Flyway migrations** (schema is owned by `blackheart-trading-engine`). The `track` discriminator lives in JSONB precisely to avoid a migration.
 
