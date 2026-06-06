@@ -112,6 +112,23 @@ CREATE TABLE IF NOT EXISTS backtest_trade (
     entry_trend_regime             VARCHAR(50)
 );
 
+-- macro_raw series repo (funding rates + Deribit DVOL) reads this. Minimal copy
+-- of the prod table (blackheart-trading-engine V66__add_ml_sentiment_schema.sql):
+-- a simple id BIGSERIAL PK replaces prod's partitioning + composite PK
+-- (irrelevant to reads). NOT NULL cols carried by prod (source_uri/content_hash/
+-- ingestion_time) get defaults so the read tests stay decoupled from ingest shape.
+CREATE TABLE IF NOT EXISTS macro_raw (
+    id             BIGSERIAL       PRIMARY KEY,
+    source         VARCHAR(80)     NOT NULL,
+    source_uri     VARCHAR(500)    NOT NULL DEFAULT '',
+    symbol         VARCHAR(20),
+    series_id      VARCHAR(120)    NOT NULL,
+    event_time     TIMESTAMPTZ     NOT NULL,
+    ingestion_time TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    value          NUMERIC(28,10),
+    content_hash   VARCHAR(64)     NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS research_iteration_log (
     iteration_id        UUID        NOT NULL DEFAULT gen_random_uuid(),
     strategy_code       VARCHAR(60) NOT NULL,
