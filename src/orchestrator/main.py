@@ -13,6 +13,7 @@ from fastapi import FastAPI
 
 from .api.activity import router as activity_router
 from .api.agent import router as agent_router
+from .api.combination import router as combination_router
 from .api.cross_window import router as cross_window_router
 from .api.experiments import router as experiments_router
 from .api.features import router as features_router
@@ -80,6 +81,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(tick_router)
     app.include_router(walk_forward_router)
     app.include_router(cross_window_router)
+    app.include_router(combination_router)
     app.include_router(verdict_drift_router)
     app.include_router(null_screen_router)
     app.include_router(reviews_router)

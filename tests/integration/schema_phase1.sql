@@ -133,6 +133,7 @@ CREATE TABLE IF NOT EXISTS research_iteration_log (
     iteration_id        UUID        NOT NULL DEFAULT gen_random_uuid(),
     strategy_code       VARCHAR(60) NOT NULL,
     iteration_number    INTEGER     NOT NULL,
+    backtest_run_id     UUID,
     params_snapshot     JSONB       NOT NULL DEFAULT '{}',
     metrics_snapshot    JSONB       NOT NULL DEFAULT '{}',
     verdict             VARCHAR(20) NOT NULL,

@@ -996,6 +996,36 @@ async def playbook() -> Playbook:
                 ),
                 idempotent=True,
             ),
+            PlaybookCapability(
+                name="combination_evaluate",
+                method="POST",
+                path="/combination/evaluate",
+                purpose=(
+                    "Phase 3 factor-neutral combination-book admission "
+                    "(EVALUATION only — does NOT auto-promote). Body: "
+                    "{iteration_id | backtest_run_id, strategy_code?, symbol, "
+                    "interval, start, end, expected_sign('+'/'-'/'0'), track?, "
+                    "signal?, fwd_returns?, persist?}. Builds the candidate's "
+                    "calendar-daily equity returns from backtest_trade, regresses "
+                    "them on the 4 factors (MARKET/MOMENTUM/CARRY/VOL via "
+                    "build_factors over [start,end)), and returns "
+                    "{neutralization:{alpha, alpha_tstat, betas, disguised_beta, "
+                    "n_obs}, ic, admission:{admitted, reasons, marginal, ic}}. "
+                    "DISGUISED_BETA (raw edge is pure factor exposure) or thin "
+                    "data short-circuits to admitted=false WITHOUT running IC / "
+                    "admit. Otherwise the residual-fed admit path runs: "
+                    "alpha-tstat>=2 AND IC significant+signed AND positive "
+                    "marginal-Sharpe vs existing members' residuals AND low corr "
+                    "(<0.80). IC source: explicit signal/fwd_returns arrays if "
+                    "supplied, else the pragmatic proxy = candidate residuals vs "
+                    "NEXT-day MARKET factor return. Set persist=true (requires "
+                    "iteration_id) to write a signal_combination member ONLY when "
+                    "it admits — default false keeps it pure evaluation. "
+                    "Idempotency-Key honoured. Additive to V11/V60 — never "
+                    "loosens the frozen trading gates."
+                ),
+                idempotent=False,
+            ),
         ],
         recipes=[
             PlaybookRecipe(
