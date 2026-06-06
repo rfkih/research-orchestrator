@@ -4,10 +4,17 @@ Separate, additive objective for track=hedging. Does NOT touch V11/V60, which
 stay frozen for track=trading. Operator-authorized 2026-06-07.
 """
 from __future__ import annotations
-from datetime import date
+from datetime import date, datetime
 from typing import Any
+from uuid import UUID
 import math
 import random
+
+import asyncpg
+
+from ..repo import market_data
+from ..repo import trades as trades_repo
+from . import portfolio, pool
 
 # ── Pinned gate constants (operator-tunable; pin-tested below) ──────────
 TOL_CAGR_PCT: float = 5.0       # hedge may give up at most this much CAGR vs buy-hold
@@ -183,4 +190,95 @@ def improvement_significant(
         "ci_low": round(ci_low, 6),
         "ci_high": round(ci_high, 6),
         "n_obs": n,
+    }
+
+
+def _equity_curve(returns: list[float]) -> list[float]:
+    """Cumulative-compounded equity curve from a daily-return series, starting
+    at 1.0. ``[r0, r1, ...]`` → ``[1.0, 1+r0, (1+r0)(1+r1), ...]``."""
+    equity = [1.0]
+    for r in returns:
+        equity.append(equity[-1] * (1.0 + r))
+    return equity
+
+
+def _strat_metrics(daily_returns: list[float]) -> dict[str, Any]:
+    """CAGR%, annualised Sharpe, maxDD% from a calendar-daily strat return
+    series. Sharpe is computed on the daily returns; maxDD on the compounded
+    equity curve; CAGR from first/last equity over the window length (in
+    calendar days, 365-day year — matching ``buy_hold_metrics``)."""
+    if len(daily_returns) < 2:
+        return {"cagr_pct": None, "sharpe": None, "max_drawdown_pct": None}
+    equity = _equity_curve(daily_returns)
+    years = max(len(daily_returns) / 365.0, 1e-9)
+    e0, e1 = equity[0], equity[-1]
+    cagr_pct: float | None
+    if e0 > 0 and e1 > 0:
+        cagr_pct = ((e1 / e0) ** (1.0 / years) - 1.0) * 100.0
+    else:
+        cagr_pct = None
+    return {
+        "cagr_pct": cagr_pct,
+        "sharpe": _sharpe(daily_returns),
+        "max_drawdown_pct": _max_drawdown_pct(equity),
+    }
+
+
+async def evaluate(
+    conn: asyncpg.Connection,
+    *,
+    backtest_run_id: UUID,
+    symbol: str,
+    interval: str,
+    start: datetime,
+    end: datetime,
+) -> dict[str, Any]:
+    """Assemble the full hedging verdict for a backtest run.
+
+    Equity-level beats-buy-hold gate for ``track=hedging`` (replaces the
+    trade-level V11 + V60-economic gates for hedging ONLY). Composes:
+
+    1. Buy-hold benchmark metrics from the underlying's daily closes.
+    2. The strategy's calendar-daily equity-return series from its
+       ``backtest_trade`` rows (binned by exit-day, calendar-filled).
+    3. The deterministic ``beats_buy_hold_risk_adj`` decision gate AND the
+       bootstrap ``improvement_significant`` significance test.
+
+    PASS iff the decision gate passes AND the Sharpe improvement is
+    significant. Walk-forward ROBUST is still required downstream (unchanged).
+
+    Returns ``{passed, decision, significance, benchmark, strategy}``.
+    """
+    # 1. Buy-hold benchmark from the underlying's daily closes.
+    closes = await market_data.fetch_daily_closes(
+        conn, symbol=symbol, interval=interval, start=start, end=end
+    )
+    bench = buy_hold_metrics(closes)
+
+    # 2. Strategy daily equity-return series from its trades.
+    trades = await trades_repo.fetch_trades(conn, backtest_run_id)
+    sparse = portfolio.daily_returns_from_trades(trades)
+    strat_returns = pool._calendar_fill(sparse, start.date(), end.date())
+    strat = _strat_metrics(strat_returns)
+
+    # 3. Benchmark daily returns from the close prices, aligned to the strat
+    #    series over the common window length before bootstrapping.
+    bench_returns = _returns([c for _, c in closes])
+    common = min(len(strat_returns), len(bench_returns))
+    strat_aligned = strat_returns[:common]
+    bench_aligned = bench_returns[:common]
+
+    # 4-5. Decision gate + significance.
+    decision = beats_buy_hold_risk_adj(strat=strat, bench=bench)
+    sig = improvement_significant(
+        strat_returns=strat_aligned, bench_returns=bench_aligned
+    )
+
+    passed = bool(decision.get("passed") and sig["sharpe_improvement_significant"])
+    return {
+        "passed": passed,
+        "decision": decision,
+        "significance": sig,
+        "benchmark": bench,
+        "strategy": strat,
     }

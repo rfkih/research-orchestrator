@@ -88,6 +88,30 @@ CREATE TABLE IF NOT EXISTS market_data (
     created_time           TIMESTAMP      NOT NULL DEFAULT NOW()
 );
 
+-- Strategy daily-return series for the hedging gate reads backtest_trade. FK-free
+-- trimmed copy of the V1 baseline — only the columns repo/trades.py:fetch_trades
+-- SELECTs (plus the backtest_run_id filter key). Types match the Flyway baseline.
+CREATE TABLE IF NOT EXISTS backtest_trade (
+    backtest_trade_id              UUID          PRIMARY KEY,
+    backtest_run_id                UUID          NOT NULL,
+    side                           VARCHAR(10)   NOT NULL,
+    status                         VARCHAR(30)   NOT NULL,
+    exit_reason                    VARCHAR(100),
+    realized_pnl_amount            NUMERIC(24,8),
+    realized_r_multiple            NUMERIC(24,8),
+    notional_size                  NUMERIC(24,8),
+    max_favorable_excursion_r      NUMERIC(24,8),
+    max_adverse_excursion_r        NUMERIC(24,8),
+    bars_held                      INTEGER,
+    entry_time                     TIMESTAMP     NOT NULL,
+    exit_time                      TIMESTAMP,
+    entry_adx                      NUMERIC(24,8),
+    entry_rsi                      NUMERIC(24,8),
+    entry_close_location_value     NUMERIC(24,8),
+    entry_relative_volume20        NUMERIC(24,8),
+    entry_trend_regime             VARCHAR(50)
+);
+
 CREATE TABLE IF NOT EXISTS research_iteration_log (
     iteration_id        UUID        NOT NULL DEFAULT gen_random_uuid(),
     strategy_code       VARCHAR(60) NOT NULL,

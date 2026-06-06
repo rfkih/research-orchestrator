@@ -48,6 +48,10 @@ def test_hedging_constants_pinned():
     assert hedging_gate.TOL_CAGR_PCT == 5.0
     assert hedging_gate.THETA_SHARPE == 0.25
     assert hedging_gate.THETA_DD_PCT == 5.0
+    assert hedging_gate.BOOTSTRAP_REPS == 1000
+    assert hedging_gate.CI_LEVEL == 0.95
+    assert hedging_gate.RNG_SEED == 42
+    assert hedging_gate.TRADING_DAYS == 252
 
 
 def test_improvement_significant_when_strat_dominates():
