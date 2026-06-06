@@ -19,17 +19,30 @@ price move only.
 from __future__ import annotations
 
 import logging
+import math
 from datetime import date, datetime, timezone
 
 import asyncpg
+import numpy as np
 
 from ..repo import macro_raw, market_data
+from . import hedging_gate
 
 logger = logging.getLogger(__name__)
 
 # ── Pinned constants (operator-tunable; pin-tested) ─────────────────────────
 MOM_LOOKBACK: int = 20          # trailing days used to rank momentum
 MOM_TOP_K: int = 1              # legs long the top-k / short the bottom-k
+
+# OLS neutralization (Task 3).
+ALPHA_TSTAT_MIN: float = 2.0    # |idiosyncratic alpha t-stat| floor for "real"
+MIN_FACTOR_OBS: int = 60        # never neutralize on thinner overlap than this
+# Raw-Sharpe floor above which a candidate has a "meaningful" edge → if that
+# edge is NOT backed by a significant alpha t-stat, it is disguised beta.
+_DISGUISED_SHARPE_FLOOR: float = 1.0
+# R² above which a non-trivial-variance candidate is deemed factor-explained
+# (catches pure beta that nets to ~zero standalone Sharpe).
+_DISGUISED_R2_FLOOR: float = 0.90
 
 # The plumbed universe (matches the trading-side LIVE_SYMBOLS set).
 FACTOR_SYMBOLS: list[str] = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
@@ -185,6 +198,130 @@ def vol_factor(dvol_series: dict[date, float]) -> dict[date, float]:
     Single series → BTC DVOL as the market-vol proxy.
     """
     return _simple_returns(dvol_series)
+
+
+# ── OLS neutralization + DISGUISED_BETA (pure) ───────────────────────────────
+def neutralize(
+    candidate_returns: dict[date, float],
+    factors: dict[str, dict[date, float]],
+) -> dict:
+    """Regress a candidate's daily returns on the factor series → idiosyncratic
+    alpha, per-factor betas, residual series, alpha t-stat, DISGUISED_BETA flag.
+
+    The candidate and every factor series are aligned on their COMMON dates
+    (sorted). The design matrix ``X`` is ``[1 | f1 | f2 | …]`` (intercept first),
+    ``y`` the candidate returns on those dates; OLS via ``numpy.linalg.lstsq``.
+
+      - ``alpha``       = intercept coefficient.
+      - ``betas``       = ``{factor_name: coefficient}``.
+      - ``residuals``   = ``{date: y - X·coef}`` over the common dates.
+      - ``alpha_tstat`` = ``alpha / se_alpha`` where
+        ``se_alpha = sqrt(resid_var · (XᵀX)⁻¹[0,0])`` and
+        ``resid_var = SSR / (n − k)`` (k = number of coefs incl. intercept).
+        Guarded → ``None`` when ``se_alpha == 0`` or ``n <= k``.
+      - ``disguised_beta`` = True iff the RAW candidate has a meaningful edge
+        BUT ``|alpha_tstat| < ALPHA_TSTAT_MIN`` — i.e. the standalone edge is
+        explained away by factor exposure. "Meaningful edge" = the candidate has
+        a meaningful annualised Sharpe (``|sharpe| > _DISGUISED_SHARPE_FLOOR``
+        via ``hedging_gate._sharpe``) OR its return variance is non-trivial and
+        almost entirely tracked by the factors (``R² >= _DISGUISED_R2_FLOOR``).
+        The R² leg catches pure-beta candidates whose factor-mirrored returns
+        net to a ~zero standalone Sharpe yet are wholly factor-driven.
+
+    Thin data (``n_obs < MIN_FACTOR_OBS``) is NEVER neutralized: returns a
+    sentinel ``{disguised_beta: False, reason: "insufficient_obs", residuals:{},
+    alpha: None, betas: {}, alpha_tstat: None, n_obs}``.
+    """
+    factor_names = sorted(factors)
+    # Common dates across candidate + every factor.
+    common: set[date] = set(candidate_returns)
+    for name in factor_names:
+        common &= set(factors[name])
+    dates = sorted(common)
+    n_obs = len(dates)
+
+    if n_obs < MIN_FACTOR_OBS:
+        return {
+            "alpha": None,
+            "alpha_tstat": None,
+            "betas": {},
+            "residuals": {},
+            "disguised_beta": False,
+            "reason": "insufficient_obs",
+            "n_obs": n_obs,
+        }
+
+    y = np.array([candidate_returns[d] for d in dates], dtype=float)
+    cols = [np.ones(n_obs)]
+    for name in factor_names:
+        cols.append(np.array([factors[name][d] for d in dates], dtype=float))
+    X = np.column_stack(cols)
+    k = X.shape[1]
+
+    coef, _resid_ss, _rank, _sv = np.linalg.lstsq(X, y, rcond=None)
+    alpha = float(coef[0])
+    betas = {name: float(coef[1 + i]) for i, name in enumerate(factor_names)}
+
+    fitted = X @ coef
+    resid = y - fitted
+    residuals = {d: float(resid[i]) for i, d in enumerate(dates)}
+
+    # OLS standard error of the intercept.
+    alpha_tstat: float | None = None
+    # ``alpha_significant`` is True only when a finite t-stat clears the floor.
+    # ``alpha_judgeable`` is True whenever we CAN rule on significance — which
+    # includes the perfect-fit (se==0) case: zero residual variance with a
+    # ~zero alpha means the candidate is wholly factor-explained and carries no
+    # significant idiosyncratic edge. Only the degenerate ``n<=k`` case (no real
+    # fit) leaves significance unjudgeable.
+    alpha_significant = False
+    alpha_judgeable = n_obs > k
+    if n_obs > k:
+        ssr = float(resid @ resid)
+        resid_var = ssr / (n_obs - k)
+        # Treat an effectively-zero residual variance as a PERFECT fit: a tiny
+        # SSR is floating-point dust (a candidate that is an exact linear combo
+        # of the factors), not real idiosyncratic variation. Otherwise alpha ≈
+        # 1e-18 divided by se ≈ 1e-18 yields a meaningless ~2 t-stat. Tolerance
+        # is scaled to the candidate's own variance so it is unit-agnostic.
+        y_scale = float(y @ y) / n_obs
+        perfect_fit = resid_var <= 1e-20 * max(y_scale, 1.0)
+        try:
+            xtx_inv = np.linalg.inv(X.T @ X)
+            var_alpha = resid_var * float(xtx_inv[0, 0])
+        except np.linalg.LinAlgError:
+            var_alpha = 0.0
+        if not perfect_fit and var_alpha > 0:
+            se_alpha = math.sqrt(var_alpha)
+            alpha_tstat = alpha / se_alpha
+            alpha_significant = abs(alpha_tstat) >= ALPHA_TSTAT_MIN
+        # else: se==0 → perfect fit → alpha not significant (alpha_tstat stays
+        #       None) but significance IS judged (alpha_significant=False).
+
+    # Raw candidate Sharpe (annualised) over the same common dates.
+    raw_rets = [candidate_returns[d] for d in dates]
+    raw_sharpe = hedging_gate._sharpe(raw_rets)
+    meaningful_sharpe = (
+        raw_sharpe is not None and abs(raw_sharpe) > _DISGUISED_SHARPE_FLOOR
+    )
+    # R² of the factor fit (1 − SSR/SST); a pure-beta candidate nets to ~0
+    # Sharpe but is wholly factor-explained → still disguised beta.
+    sst = float(((y - y.mean()) ** 2).sum())
+    r2 = 1.0 - (float(resid @ resid) / sst) if sst > 0 else 0.0
+    factor_explained = sst > 0 and r2 >= _DISGUISED_R2_FLOOR
+    has_meaningful_edge = meaningful_sharpe or factor_explained
+    disguised_beta = bool(
+        has_meaningful_edge and alpha_judgeable and not alpha_significant
+    )
+
+    return {
+        "alpha": alpha,
+        "alpha_tstat": alpha_tstat,
+        "betas": betas,
+        "residuals": residuals,
+        "disguised_beta": disguised_beta,
+        "n_obs": n_obs,
+    }
 
 
 # ── Thin async assembler ─────────────────────────────────────────────────────

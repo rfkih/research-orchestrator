@@ -77,10 +77,66 @@ def test_empty_inputs_degrade_to_empty_dicts():
     assert fm.vol_factor({}) == {}
 
 
-# ── Pin tests (Step 3) ──────────────────────────────────────────────────────
+# ── Task 3: OLS neutralization + DISGUISED_BETA ─────────────────────────────
+def test_neutralize_recovers_pure_market_beta():
+    # candidate == 2x market exactly → beta_mkt≈2, residual≈0, alpha≈0.
+    # Use >= 60 obs so it clears MIN_FACTOR_OBS.
+    mkt = {date(2024, 1, 1) + __import__("datetime").timedelta(days=i):
+           0.01 * ((-1) ** i) for i in range(70)}
+    factors = {"MARKET": mkt}
+    cand = {d: 2.0 * r for d, r in mkt.items()}
+    res = fm.neutralize(cand, factors)
+    assert abs(res["betas"]["MARKET"] - 2.0) < 1e-6
+    assert abs(res["alpha"]) < 1e-6
+    assert max(abs(x) for x in res["residuals"].values()) < 1e-6
+    assert res["disguised_beta"] is True   # raw edge is pure beta
+    assert res["n_obs"] >= 60
+
+
+def test_neutralize_keeps_real_alpha():
+    # candidate = market + positive idiosyncratic drift + small noise →
+    # alpha>0, alpha_tstat>=2, residuals nonzero, disguised_beta False.
+    import random
+    from datetime import timedelta
+    rng = random.Random(7)
+    base = date(2024, 1, 1)
+    mkt = {base + timedelta(days=i): 0.01 * ((-1) ** i) for i in range(120)}
+    factors = {"MARKET": mkt}
+    drift = 0.003
+    cand = {d: 1.0 * r + drift + rng.gauss(0.0, 0.0005)
+            for d, r in mkt.items()}
+    res = fm.neutralize(cand, factors)
+    assert res["alpha"] > 0
+    assert res["alpha_tstat"] is not None and res["alpha_tstat"] >= 2.0
+    assert max(abs(x) for x in res["residuals"].values()) > 0
+    assert res["disguised_beta"] is False
+
+
+def test_neutralize_insufficient_obs():
+    from datetime import timedelta
+    base = date(2024, 1, 1)
+    mkt = {base + timedelta(days=i): 0.01 for i in range(40)}
+    factors = {"MARKET": mkt}
+    cand = {d: 2.0 * r for d, r in mkt.items()}
+    res = fm.neutralize(cand, factors)
+    assert res["reason"] == "insufficient_obs"
+    assert res["disguised_beta"] is False
+    assert res["residuals"] == {}
+    assert res["alpha"] is None
+    assert res["betas"] == {}
+    assert res["alpha_tstat"] is None
+    assert res["n_obs"] == 40
+
+
+# ── Pin tests (Step 3 / Task 3 Step 5) ──────────────────────────────────────
 def test_momentum_constants_are_pinned():
     assert fm.MOM_LOOKBACK == 20
     assert fm.MOM_TOP_K == 1
+
+
+def test_neutralize_constants_are_pinned():
+    assert fm.ALPHA_TSTAT_MIN == 2.0
+    assert fm.MIN_FACTOR_OBS == 60
 
 
 def test_factor_symbols_constant_is_pinned():
