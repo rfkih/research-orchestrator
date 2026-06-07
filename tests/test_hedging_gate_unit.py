@@ -1,5 +1,7 @@
 from datetime import date, datetime
 
+import pytest
+
 from orchestrator.services import hedging_gate
 
 
@@ -227,3 +229,104 @@ def test_improvement_deterministic_same_seed():
     b = hedging_gate.improvement_significant(strat_returns=strat, bench_returns=bench)
     assert a["ci_low"] == b["ci_low"]
     assert a["ci_high"] == b["ci_high"]
+
+
+# ── BTC-denominated ("stack sats") lens ─────────────────────────────────────
+#
+# ADDITIVE/informational lens: does the strategy grow the user's BITCOIN stack
+# (total_equity / price) vs simply holding (flat 1.0)? Absolute growth only —
+# NO "beats buy-hold in BTC" criterion (price cancels → redundant with USDT
+# outperformance), and the maxDD is the ABSOLUTE stack DD (not vs the flat hold).
+
+
+def test_btc_stack_series_aligns_and_normalizes():
+    from datetime import date as _date
+    eq = {_date(2024, 1, 1): 200.0, _date(2024, 1, 2): 300.0, _date(2024, 1, 3): 250.0}
+    # price doubles day 2 then back: stack = eq/price, normalized so first=1.0.
+    px = {_date(2024, 1, 1): 100.0, _date(2024, 1, 2): 100.0, _date(2024, 1, 3): 50.0}
+    curve = hedging_gate.btc_stack_series(eq, px)
+    assert [d for d, _ in curve] == [_date(2024, 1, 1), _date(2024, 1, 2), _date(2024, 1, 3)]
+    # raw stacks: 2.0, 3.0, 5.0 → normalized: 1.0, 1.5, 2.5
+    assert [round(v, 6) for _, v in curve] == [1.0, 1.5, 2.5]
+
+
+def test_btc_stack_series_skips_bad_prices_and_unaligned_dates():
+    from datetime import date as _date
+    eq = {_date(2024, 1, 1): 100.0, _date(2024, 1, 2): 100.0,
+          _date(2024, 1, 3): 100.0, _date(2024, 1, 9): 100.0}
+    px = {_date(2024, 1, 1): 100.0, _date(2024, 1, 2): 0.0,        # ≤0 → skip
+          _date(2024, 1, 3): -5.0, _date(2024, 1, 4): 100.0}       # negative → skip; 1/4 not in eq
+    curve = hedging_gate.btc_stack_series(eq, px)
+    # only 2024-01-01 is a valid aligned day with a positive price → <2 points → []
+    assert curve == []
+
+
+def test_btc_stack_series_returns_empty_under_two_points():
+    from datetime import date as _date
+    eq = {_date(2024, 1, 1): 100.0}
+    px = {_date(2024, 1, 1): 100.0}
+    assert hedging_gate.btc_stack_series(eq, px) == []
+
+
+def test_btc_stack_metrics_growing_stack():
+    from datetime import date as _date, timedelta as _td
+    # stack doubles over 365 calendar days, with a dip in the middle → real DD.
+    base = _date(2024, 1, 1)
+    curve = [
+        (base, 1.0),
+        (base + _td(days=120), 1.5),
+        (base + _td(days=180), 0.9),   # trough below an earlier peak of 1.5 → DD
+        (base + _td(days=365), 2.0),
+    ]
+    m = hedging_gate.btc_stack_metrics(curve)
+    assert m["final_stack_x"] == pytest.approx(2.0)
+    assert m["stack_cagr_pct"] == pytest.approx(100.0, abs=1e-6)  # doubled in 1 yr
+    # peak 1.5 → trough 0.9 = 40% drawdown.
+    assert m["stack_maxdd_pct"] == pytest.approx(40.0, abs=1e-6)
+    assert m["n_obs"] == 4
+
+
+def test_btc_stack_metrics_flat_stack():
+    from datetime import date as _date, timedelta as _td
+    base = _date(2024, 1, 1)
+    curve = [(base + _td(days=i), 1.0) for i in range(0, 366, 30)]
+    m = hedging_gate.btc_stack_metrics(curve)
+    assert m["final_stack_x"] == pytest.approx(1.0)
+    assert m["stack_cagr_pct"] == pytest.approx(0.0, abs=1e-9)
+    assert m["stack_maxdd_pct"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_stack_growth_significant_for_growing_lownoise_series():
+    # steady positive stack returns with tiny noise → cumulative growth CI > 0.
+    rets = [0.004 + (0.0005 if i % 2 == 0 else -0.0005) for i in range(120)]
+    v = hedging_gate.stack_growth_significant(rets)
+    assert v["stack_growth_significant"] is True
+    assert v["ci_low"] > 0
+    assert v["n_obs"] == 120
+
+
+def test_stack_growth_not_significant_for_flat_noisy_series():
+    # zero-mean noisy series → cumulative growth straddles 0.
+    rets = [0.02 if i % 2 == 0 else -0.02 for i in range(120)]
+    v = hedging_gate.stack_growth_significant(rets)
+    assert v["stack_growth_significant"] is False
+    assert v["ci_low"] <= 0
+
+
+def test_stack_growth_insufficient_obs():
+    v = hedging_gate.stack_growth_significant([0.01] * 10)
+    assert v["stack_growth_significant"] is False
+    assert v["reason"] == "insufficient_obs"
+    assert v["n_obs"] == 10
+
+
+def test_stack_growth_deterministic_same_seed():
+    rets = [0.003, 0.005, -0.001] * 40
+    a = hedging_gate.stack_growth_significant(rets)
+    b = hedging_gate.stack_growth_significant(rets)
+    assert a["ci_low"] == b["ci_low"]
+    assert a["ci_high"] == b["ci_high"]
+
+
+def test_min_stack_obs_pinned():
+    assert hedging_gate.MIN_STACK_OBS == 30

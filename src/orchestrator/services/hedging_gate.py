@@ -25,6 +25,7 @@ BOOTSTRAP_REPS: int = 1000
 CI_LEVEL: float = 0.95
 RNG_SEED: int = 42
 TRADING_DAYS: int = 252
+MIN_STACK_OBS: int = 30      # min daily stack-return obs for the BTC-stack significance test
 
 
 def _returns(values: list[float]) -> list[float]:
@@ -348,6 +349,130 @@ def _align_strat_dict_to_bench(
     return strat_aligned, bench_aligned
 
 
+# ── BTC-denominated ("stack sats") lens ─────────────────────────────────────
+#
+# ADDITIVE/informational only. Measures whether the strategy grows the user's
+# BITCOIN stack (total_equity / price) vs simply HOLDING the same BTC (a flat
+# 1.0 baseline). It does NOT alter the gate's `passed` value, which stays the
+# USDT-denominated beats_buy_hold_risk_adj + improvement_significant decision.
+#
+# Methodology guards (deliberate, do NOT "fix"):
+#   * NO "beats buy-hold in BTC" return criterion. The terminal stack ratio vs
+#     hold equals the USDT outperformance (price cancels) → redundant. The lens
+#     reports ABSOLUTE stack growth vs the flat 1.0 baseline only.
+#   * stack_maxdd is the ABSOLUTE peak-to-trough of the stack curve, NOT a
+#     comparison to buy-hold (whose stack DD is 0 by construction).
+#   * Significance is ONE-SAMPLE (the stack grew > 0), NOT a paired-vs-bench test.
+
+
+def btc_stack_series(
+    equity_by_date: dict[date, float], close_by_date: dict[date, float]
+) -> list[tuple[date, float]]:
+    """Aligned, normalized-to-1.0 BTC-stack curve, ascending by date.
+
+    The strategy's BTC stack on day t = ``total_equity(t) / price(t)`` (how much
+    BTC the equity could hold). We intersect the equity and close series BY DATE,
+    skip any day with a missing or ≤0 price, then normalize so the first stack
+    value = 1.0. Returns [] if fewer than 2 aligned points survive."""
+    common = sorted(set(equity_by_date) & set(close_by_date))
+    raw: list[tuple[date, float]] = []
+    for d in common:
+        px = close_by_date[d]
+        if px is None or px <= 0:
+            continue
+        raw.append((d, equity_by_date[d] / px))
+    if len(raw) < 2:
+        return []
+    base = raw[0][1]
+    if base <= 0:
+        return []
+    return [(d, s / base) for d, s in raw]
+
+
+def btc_stack_metrics(stack_curve: list[tuple[date, float]]) -> dict[str, Any]:
+    """Absolute growth metrics of the normalized BTC-stack curve.
+
+    ``final_stack_x`` = terminal stack multiple (last value; first is 1.0 by
+    normalization). ``stack_cagr_pct`` annualises last/first over the CALENDAR
+    window (first→last date, 365-day year — matching the V60 fix). ``stack_maxdd_pct``
+    is the ABSOLUTE peak-to-trough drawdown of the stack curve (NOT vs buy-hold)."""
+    if len(stack_curve) < 2:
+        return {
+            "final_stack_x": None,
+            "stack_cagr_pct": None,
+            "stack_maxdd_pct": None,
+            "n_obs": len(stack_curve),
+        }
+    dates = [d for d, _ in stack_curve]
+    stacks = [s for _, s in stack_curve]
+    first, last = stacks[0], stacks[-1]
+    span_days = max((dates[-1] - dates[0]).days, 1)
+    years = max(span_days / 365.0, 1e-9)
+    cagr_pct: float | None
+    if first > 0 and last > 0:
+        cagr_pct = ((last / first) ** (1.0 / years) - 1.0) * 100.0
+    else:
+        cagr_pct = None
+    return {
+        "final_stack_x": last / first if first else None,
+        "stack_cagr_pct": cagr_pct,
+        "stack_maxdd_pct": _max_drawdown_pct(stacks),
+        "n_obs": len(stack_curve),
+    }
+
+
+def stack_growth_significant(stack_returns: list[float]) -> dict[str, Any]:
+    """ONE-SAMPLE seeded block bootstrap of ABSOLUTE BTC-stack growth.
+
+    The stack daily-return series is heavily autocorrelated (long ~zero runs
+    while fully in BTC, inverse-price clusters while in cash), so we use the SAME
+    block-bootstrap style as ``improvement_significant``: block length
+    ``max(1, round(n**(1/3)))``, ``random.Random(RNG_SEED)``. Each resample's
+    terminal cumulative growth is ``∏(1+r) − 1``; we take the ``CI_LEVEL``
+    percentile CI. ``stack_growth_significant`` is True iff ``ci_low > 0`` (the
+    stack genuinely grew, not noise). Fails closed below ``MIN_STACK_OBS``."""
+    n = len(stack_returns)
+    if n < MIN_STACK_OBS:
+        return {
+            "stack_growth_significant": False,
+            "ci_low": 0.0,
+            "ci_high": 0.0,
+            "n_obs": n,
+            "reason": "insufficient_obs",
+        }
+
+    series = list(stack_returns[:n])
+    block = max(1, round(n ** (1.0 / 3.0)))
+    rng = random.Random(RNG_SEED)
+
+    growths: list[float] = []
+    for _ in range(BOOTSTRAP_REPS):
+        sample: list[float] = []
+        while len(sample) < n:
+            start = rng.randrange(n)
+            for k in range(block):
+                if len(sample) >= n:
+                    break
+                sample.append(series[(start + k) % n])
+        cum = 1.0
+        for r in sample:
+            cum *= 1.0 + r
+        growths.append(cum - 1.0)
+
+    growths.sort()
+    alpha = (1.0 - CI_LEVEL) / 2.0
+    lo_idx = int(alpha * len(growths))
+    hi_idx = max(int((1.0 - alpha) * len(growths)) - 1, 0)
+    ci_low = growths[lo_idx]
+    ci_high = growths[hi_idx]
+    return {
+        "stack_growth_significant": bool(ci_low > 0.0),
+        "ci_low": round(ci_low, 6),
+        "ci_high": round(ci_high, 6),
+        "n_obs": n,
+    }
+
+
 async def evaluate(
     conn: asyncpg.Connection,
     *,
@@ -376,8 +501,15 @@ async def evaluate(
     PASS iff the decision gate passes AND the Sharpe improvement is
     significant. Walk-forward ROBUST is still required downstream (unchanged).
 
+    Additionally attaches an ADDITIVE/informational ``btc_lens`` (BTC-stack
+    "stack sats" view: absolute stack growth, CAGR, absolute maxDD, and a
+    one-sample significance test) that does NOT influence ``passed``. On the
+    trade-fallback path or with <2 date-aligned stack points it is
+    ``{"available": False, "reason": ...}``.
+
     Returns
-    ``{passed, decision, significance, benchmark, strategy, strat_equity_source}``.
+    ``{passed, decision, significance, benchmark, strategy, strat_equity_source,
+    btc_lens}``.
     """
     # 1. Buy-hold benchmark from the underlying's daily closes. The benchmark is
     #    ALWAYS daily — buy_hold_metrics annualises with sqrt(252)/365-day-year,
@@ -395,6 +527,15 @@ async def evaluate(
     #    from sparse trade-exit P&L misses daily MTM and produces garbage). Only
     #    when that series is absent (legacy runs without equity points, <2 rows)
     #    do we fall back to the trade-reconstruction path so nothing regresses.
+    # Close prices keyed by calendar date — reused for the buy-hold alignment
+    # AND the BTC-stack lens below. Built once here from the closes already
+    # fetched (no extra DB round-trip).
+    close_by_date: dict[date, float] = {}
+    for cd, px in closes:
+        d = cd.date() if isinstance(cd, datetime) else cd
+        close_by_date[d] = px
+
+    btc_lens: dict[str, Any]
     points = await backtest_equity.fetch_equity_points(conn, backtest_run_id)
     if len(points) >= 2:
         strat_equity_source = "equity_points"
@@ -413,8 +554,42 @@ async def evaluate(
             strat_by_date=strat_by_date,
             closes=[(d, px) for d, px in closes],
         )
+
+        # ── BTC-stack ("stack sats") lens — ADDITIVE/informational only. ──────
+        # Stack(t) = total_equity(t) / price(t), aligned by date & normalized to
+        # 1.0. We report ABSOLUTE growth vs the flat 1.0 hold baseline (final_x,
+        # CAGR, absolute maxDD) + a ONE-SAMPLE significance test that the stack
+        # grew > 0. This does NOT influence `passed` (the USDT gate above).
+        equity_by_date: dict[date, float] = dict(zip(eq_dates, eq_values))
+        stack_curve = btc_stack_series(equity_by_date, close_by_date)
+        if len(stack_curve) >= 2:
+            stack_metrics = btc_stack_metrics(stack_curve)
+            stack_rets = _returns([s for _, s in stack_curve])
+            stack_sig = stack_growth_significant(stack_rets)
+            btc_lens = {
+                "final_stack_x": stack_metrics["final_stack_x"],
+                "stack_cagr_pct": stack_metrics["stack_cagr_pct"],
+                "stack_maxdd_pct": stack_metrics["stack_maxdd_pct"],
+                "stack_growth_significant": stack_sig["stack_growth_significant"],
+                "ci_low": stack_sig["ci_low"],
+                "ci_high": stack_sig["ci_high"],
+                "n_obs": stack_metrics["n_obs"],
+                "buy_hold_stack_is_flat": True,
+            }
+        else:
+            btc_lens = {
+                "available": False,
+                "reason": "fewer than 2 date-aligned stack points",
+            }
     else:
         strat_equity_source = "trades"
+        # The trade-fallback path reconstructs a normalized return curve, not a
+        # real per-day total_equity series, so there is no meaningful BTC stack
+        # to denominate by price. The lens is unavailable here by design.
+        btc_lens = {
+            "available": False,
+            "reason": "no equity points (trade-reconstruction path)",
+        }
         trades = await trades_repo.fetch_trades(conn, backtest_run_id)
         sparse = portfolio.daily_returns_from_trades(trades)
         strat_returns = pool._calendar_fill(sparse, start.date(), end.date())
@@ -446,4 +621,5 @@ async def evaluate(
         "benchmark": bench,
         "strategy": strat,
         "strat_equity_source": strat_equity_source,
+        "btc_lens": btc_lens,
     }
