@@ -226,7 +226,11 @@ async def count_axis_trials(
 
 
 async def axis_has_discard(
-    conn: asyncpg.Connection, strategy_code: str, axis_set_hash_value: str
+    conn: asyncpg.Connection,
+    strategy_code: str,
+    axis_set_hash_value: str,
+    *,
+    track: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the most recent DISCARD audit row for this strategy+axis,
     or None. The re-discovery gate uses this to 409 fresh sweeps that
@@ -234,19 +238,41 @@ async def axis_has_discard(
 
     Why most-recent: lets the response carry the iteration_id +
     created_time so the caller can journal-cite the prior outcome.
+
+    Dual-track scoping (Phase 1): the DISCARD's track lives on the
+    originating ``research_queue`` row's ``sweep_config->>'track'`` (the
+    audit table has no track column). We LEFT JOIN to it on ``queue_id``
+    so the gate can filter per-track:
+
+      * ``track=None`` (legacy global enqueue) ⇒ no track predicate; ANY
+        prior discard blocks, exactly as before this change.
+      * ``track`` set ⇒ a discard blocks only when its queue row's track
+        equals ``track`` OR is NULL (an un-tracked/global discard still
+        blocks every track — never weaken the gate). A discard tagged to a
+        DIFFERENT track does not block, so a hedging discard won't reject a
+        trading axis-set.
+
+    Audit rows whose ``queue_id`` is NULL (e.g. null-screen trials) keep
+    their pre-track behaviour: the LEFT JOIN leaves ``rq.sweep_config``
+    NULL, which the COALESCE treats as a global discard.
     """
     row = await conn.fetchrow(
         """
-        SELECT audit_id, iteration_id, params_snapshot, created_time, created_by
-          FROM hypothesis_audit
-         WHERE strategy_code = $1
-           AND axis_set_hash = $2
-           AND decision_verdict = 'DISCARD'
-         ORDER BY created_time DESC
+        SELECT ha.audit_id, ha.iteration_id, ha.params_snapshot,
+               ha.created_time, ha.created_by
+          FROM hypothesis_audit ha
+          LEFT JOIN research_queue rq ON rq.queue_id = ha.queue_id
+         WHERE ha.strategy_code = $1
+           AND ha.axis_set_hash = $2
+           AND ha.decision_verdict = 'DISCARD'
+           AND ($3::text IS NULL OR rq.sweep_config->>'track' IS NULL
+                OR rq.sweep_config->>'track' = $3)
+         ORDER BY ha.created_time DESC
          LIMIT 1
         """,
         strategy_code,
         axis_set_hash_value,
+        track,
     )
     return dict(row) if row else None
 

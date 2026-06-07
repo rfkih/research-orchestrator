@@ -19,13 +19,17 @@ from typing import Any
 import asyncpg
 
 
-async def _queue_counts(conn: asyncpg.Connection) -> dict[str, int]:
+async def _queue_counts(
+    conn: asyncpg.Connection, *, track: str | None = None
+) -> dict[str, int]:
     rows = await conn.fetch(
         """
         SELECT status, COUNT(*)::int AS n
         FROM research_queue
+        WHERE ($1::text IS NULL OR sweep_config->>'track' = $1)
         GROUP BY status
-        """
+        """,
+        track,
     )
     counts = {r["status"]: int(r["n"]) for r in rows}
     # Always include the four states the researcher branches on, even when
@@ -90,14 +94,18 @@ async def _recent_sig_edge_ids(
     return [str(r["iteration_id"]) for r in rows]
 
 
-async def _active_hypotheses(conn: asyncpg.Connection) -> list[dict[str, Any]]:
+async def _active_hypotheses(
+    conn: asyncpg.Connection, *, track: str | None = None
+) -> list[dict[str, Any]]:
     rows = await conn.fetch(
         """
         SELECT journal_id, strategy_code, title, created_time
         FROM research_journal
         WHERE entry_type = 'HYPOTHESIS' AND status = 'ACTIVE'
+          AND ($1::text IS NULL OR structured_data->>'track' = $1)
         ORDER BY created_time DESC
-        """
+        """,
+        track,
     )
     return [
         {
@@ -110,16 +118,20 @@ async def _active_hypotheses(conn: asyncpg.Connection) -> list[dict[str, Any]]:
     ]
 
 
-async def _last_run_summary(conn: asyncpg.Connection) -> dict[str, Any] | None:
+async def _last_run_summary(
+    conn: asyncpg.Connection, *, track: str | None = None
+) -> dict[str, Any] | None:
     row = await conn.fetchrow(
         """
         SELECT journal_id, strategy_code, title, content,
                structured_data, created_time
         FROM research_journal
         WHERE entry_type = 'RUN_SUMMARY'
+          AND ($1::text IS NULL OR structured_data->>'track' = $1)
         ORDER BY created_time DESC
         LIMIT 1
-        """
+        """,
+        track,
     )
     if row is None:
         return None
@@ -133,7 +145,9 @@ async def _last_run_summary(conn: asyncpg.Connection) -> dict[str, Any] | None:
     }
 
 
-async def _lockout_state(conn: asyncpg.Connection) -> dict[str, Any]:
+async def _lockout_state(
+    conn: asyncpg.Connection, *, track: str | None = None
+) -> dict[str, Any]:
     """Resolve the resume lockout server-side (rank 10).
 
     Finds the most-recent terminal-fire RUN_SUMMARY (ARCHETYPE_EXHAUSTION_*
@@ -162,6 +176,7 @@ async def _lockout_state(conn: asyncpg.Connection) -> dict[str, Any]:
             WHERE entry_type = 'RUN_SUMMARY'
               AND (title LIKE 'ARCHETYPE_EXHAUSTION_%'
                    OR title LIKE 'OPERATOR_ESCALATION_%')
+              AND ($1::text IS NULL OR structured_data->>'track' = $1)
             ORDER BY created_time DESC
             LIMIT 1
         )
@@ -172,10 +187,12 @@ async def _lockout_state(conn: asyncpg.Connection) -> dict[str, Any]:
                    SELECT 1 FROM research_journal h
                    WHERE h.entry_type = 'HYPOTHESIS' AND h.status = 'ACTIVE'
                      AND h.created_time > t.created_time
+                     AND ($1::text IS NULL OR h.structured_data->>'track' = $1)
                ) AS bypass_available
         FROM terminal t
         WHERE t.window_iv IS NOT NULL
-        """
+        """,
+        track,
     )
     if row is None:
         return {"in_lockout": False, "terminal_title": None,
@@ -193,7 +210,7 @@ async def _lockout_state(conn: asyncpg.Connection) -> dict[str, Any]:
 
 
 async def _pending_specialist_reviews(
-    conn: asyncpg.Connection, *, hard_cap: int = 50
+    conn: asyncpg.Connection, *, hard_cap: int = 50, track: str | None = None
 ) -> list[dict[str, Any]]:
     """Open ``specialist_review_request`` rows (Path C async checkpoint).
 
@@ -213,10 +230,12 @@ async def _pending_specialist_reviews(
          WHERE entry_type = 'IDEA_BACKLOG'
            AND status = 'ACTIVE'
            AND structured_data->>'kind' = 'specialist_review_request'
+           AND ($2::text IS NULL OR structured_data->>'track' = $2)
          ORDER BY created_time ASC
          LIMIT $1
         """,
         hard_cap,
+        track,
     )
     return [
         {
@@ -232,7 +251,8 @@ async def _pending_specialist_reviews(
 
 
 async def _recent_specialist_verdicts(
-    conn: asyncpg.Connection, *, window_hours: int = 168, hard_cap: int = 50
+    conn: asyncpg.Connection, *, window_hours: int = 168, hard_cap: int = 50,
+    track: str | None = None,
 ) -> list[dict[str, Any]]:
     """Recent specialist verdicts (Path C). Researcher reads these on
     resume to decide whether the candidate iteration's adversarial
@@ -259,11 +279,13 @@ async def _recent_specialist_verdicts(
            AND status = 'ACTIVE'
            AND structured_data->>'kind' = 'specialist_review_verdict'
            AND created_time > NOW() - ($1::int * INTERVAL '1 hour')
+           AND ($3::text IS NULL OR structured_data->>'track' = $3)
          ORDER BY created_time DESC
          LIMIT $2
         """,
         window_hours,
         hard_cap,
+        track,
     )
     return [
         {
@@ -281,7 +303,7 @@ async def _recent_specialist_verdicts(
 
 
 async def _last_null_screen_per_surface(
-    conn: asyncpg.Connection,
+    conn: asyncpg.Connection, *, track: str | None = None
 ) -> list[dict[str, Any]]:
     """Latest NULL_SCREEN_RESULT per (strategy_code, instrument, interval_name).
 
@@ -297,8 +319,10 @@ async def _last_null_screen_per_surface(
                title, structured_data, created_time
         FROM research_journal
         WHERE entry_type = 'NULL_SCREEN_RESULT'
+          AND ($1::text IS NULL OR structured_data->>'track' = $1)
         ORDER BY strategy_code, instrument, interval_name, created_time DESC
-        """
+        """,
+        track,
     )
     out: list[dict[str, Any]] = []
     for r in rows:
@@ -388,6 +412,7 @@ async def get_state_digest(
     sig_edge_window_days: int = 7,
     last_n_iterations: int = 5,
     agent_name: str | None = None,
+    track: str | None = None,
     ml_training_cap: int = 4,
     ml_training_window_hours: int = 24,
 ) -> dict[str, Any]:
@@ -402,15 +427,17 @@ async def get_state_digest(
     branch 4 (ML-pending) and avoids a mid-session 429 — all from this one
     call.
     """
-    queue_counts = await _queue_counts(conn)
+    queue_counts = await _queue_counts(conn, track=track)
+    # global by design: iteration_log has no track linkage (see Phase 1 plan Task 4)
     last_iters = await _last_iterations(conn, last_n_iterations)
+    # global by design: iteration_log has no track linkage (see Phase 1 plan Task 4)
     sig_edge_ids = await _recent_sig_edge_ids(conn, sig_edge_window_days)
-    hypotheses = await _active_hypotheses(conn)
-    run_summary = await _last_run_summary(conn)
-    null_screens = await _last_null_screen_per_surface(conn)
-    pending_specialist_reviews = await _pending_specialist_reviews(conn)
-    recent_specialist_verdicts = await _recent_specialist_verdicts(conn)
-    lockout_state = await _lockout_state(conn)
+    hypotheses = await _active_hypotheses(conn, track=track)
+    run_summary = await _last_run_summary(conn, track=track)
+    null_screens = await _last_null_screen_per_surface(conn, track=track)
+    pending_specialist_reviews = await _pending_specialist_reviews(conn, track=track)
+    recent_specialist_verdicts = await _recent_specialist_verdicts(conn, track=track)
+    lockout_state = await _lockout_state(conn, track=track)
 
     ml_budget: dict[str, Any] | None = None
     pending_ml_runs: list[dict[str, Any]] | None = None

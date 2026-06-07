@@ -13,7 +13,7 @@ prior session memory. These endpoints exist so the agent can:
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
@@ -212,6 +212,9 @@ async def playbook() -> Playbook:
                     "latest NULL_SCREEN_RESULT). Replaces the legacy "
                     "5-query cold-boot chain — call once on session start "
                     "before designing the next iteration."
+                    " Pass ?track=trading|hedging to scope lockout/run-summary/"
+                    "hypotheses/null-screen/specialist rows to one research "
+                    "track (omit for global)."
                 ),
                 idempotent=True,
             ),
@@ -294,7 +297,9 @@ async def playbook() -> Playbook:
                     "axis_previously_discarded if this strategy has already "
                     "produced a DISCARD verdict on the same axis-set; pass "
                     "override_discard_gate=true with a documented "
-                    "justification to bypass."
+                    "justification to bypass. "
+                    "Pass track ('trading'|'hedging') to scope this to one "
+                    "research loop; omit for the legacy global queue."
                 ),
                 idempotent=False,
             ),
@@ -333,7 +338,18 @@ async def playbook() -> Playbook:
                     "their daily-return correlation with the protected "
                     "book (LSR/VCB/VBO) yields pf_lo × (1 - 0.5·|max_corr|) "
                     "<= 1.0 — gate output stashed on "
-                    "metrics_snapshot.portfolio_corr."
+                    "metrics_snapshot.portfolio_corr. "
+                    "Pass track ('trading'|'hedging') to scope this to one "
+                    "research loop; omit for the legacy global queue. "
+                    "Gate selection by track (Phase 2, 2026-06-07): "
+                    "track in (null,'trading') graduate on V11 + V60 "
+                    "(>=10%/yr) as before; track='hedging' rows graduate on "
+                    "the equity-level beats-buy-hold gate instead (risk-adj "
+                    "improvement vs holding the underlying — bootstrap "
+                    "significance replaces V11, beats_buy_hold_risk_adj "
+                    "replaces the V60 economic check), with the full verdict "
+                    "stashed on metrics_snapshot.hedging_gate. Walk-forward "
+                    "ROBUST is still required for both tracks."
                 ),
                 idempotent=False,
             ),
@@ -638,7 +654,11 @@ async def playbook() -> Playbook:
                     "semantics (FOR UPDATE SKIP LOCKED); concurrent "
                     "drains never collide on the same row. "
                     "Idempotency-Key replays the cached digest envelope "
-                    "without re-driving the queue."
+                    "without re-driving the queue. "
+                    "Pass track ('trading'|'hedging') to scope this to one "
+                    "research loop; omit for the legacy global queue. "
+                    "track='hedging' rows graduate on the equity-level "
+                    "beats-buy-hold gate (not V11/V60) — see run_tick."
                 ),
                 idempotent=False,
             ),
@@ -1018,6 +1038,36 @@ async def playbook() -> Playbook:
                     "enforces timing for now."
                 ),
                 idempotent=True,
+            ),
+            PlaybookCapability(
+                name="combination_evaluate",
+                method="POST",
+                path="/combination/evaluate",
+                purpose=(
+                    "Phase 3 factor-neutral combination-book admission "
+                    "(EVALUATION only — does NOT auto-promote). Body: "
+                    "{iteration_id | backtest_run_id, strategy_code?, symbol, "
+                    "interval, start, end, expected_sign('+'/'-'/'0'), track?, "
+                    "signal?, fwd_returns?, persist?}. Builds the candidate's "
+                    "calendar-daily equity returns from backtest_trade, regresses "
+                    "them on the 4 factors (MARKET/MOMENTUM/CARRY/VOL via "
+                    "build_factors over [start,end)), and returns "
+                    "{neutralization:{alpha, alpha_tstat, betas, disguised_beta, "
+                    "n_obs}, ic, admission:{admitted, reasons, marginal, ic}}. "
+                    "DISGUISED_BETA (raw edge is pure factor exposure) or thin "
+                    "data short-circuits to admitted=false WITHOUT running IC / "
+                    "admit. Otherwise the residual-fed admit path runs: "
+                    "alpha-tstat>=2 AND IC significant+signed AND positive "
+                    "marginal-Sharpe vs existing members' residuals AND low corr "
+                    "(<0.80). IC source: explicit signal/fwd_returns arrays if "
+                    "supplied, else the pragmatic proxy = candidate residuals vs "
+                    "NEXT-day MARKET factor return. Set persist=true (requires "
+                    "iteration_id) to write a signal_combination member ONLY when "
+                    "it admits — default false keeps it pure evaluation. "
+                    "Idempotency-Key honoured. Additive to V11/V60 — never "
+                    "loosens the frozen trading gates."
+                ),
+                idempotent=False,
             ),
         ],
         recipes=[
@@ -1488,7 +1538,9 @@ class AgentState(BaseModel):
 
 
 @router.get("/state", response_model=AgentState)
-async def agent_state(request: Request) -> AgentState:
+async def agent_state(
+    request: Request, track: Literal["trading", "hedging"] | None = None
+) -> AgentState:
     db_ok = await request.app.state.db.health_probe()
     jvm_ok = await request.app.state.jvm.health_probe()
     notes: list[str] = []
@@ -1508,6 +1560,7 @@ async def agent_state(request: Request) -> AgentState:
                 digest = await agent_state_repo.get_state_digest(
                     conn,
                     agent_name=request.state.agent_name,
+                    track=track,
                     ml_training_cap=_settings.ml_training_daily_cap,
                     ml_training_window_hours=_settings.ml_training_daily_window_hours,
                 )

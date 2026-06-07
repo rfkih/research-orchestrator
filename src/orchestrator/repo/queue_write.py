@@ -68,10 +68,16 @@ async def insert_queue(
     early_stop_on_no_edge: bool,
     require_walk_forward: bool,
     created_by: str,
+    track: str | None = None,
 ) -> dict[str, Any]:
     # research_queue.queue_id is UUID NOT NULL with no DEFAULT (V13). Generate
     # in-SQL with gen_random_uuid() so we don't have to import uuid up here
     # and round-trip a Python UUID we'd otherwise immediately throw away.
+    if track is not None:
+        # Stamp the dual-track discriminator into the JSONB where the claim
+        # query reads it. Build a NEW dict so the caller's sweep_config is
+        # never mutated.
+        sweep_config = {**sweep_config, "track": track}
     row = await conn.fetchrow(
         """
         INSERT INTO research_queue (
@@ -103,7 +109,9 @@ async def insert_queue(
     return dict(row)
 
 
-async def claim_next(conn: asyncpg.Connection) -> dict[str, Any] | None:
+async def claim_next(
+    conn: asyncpg.Connection, *, track: str | None = None
+) -> dict[str, Any] | None:
     """Atomically claim the next PENDING queue row.
 
     Returns ``started_at`` so callers can fence later writes against
@@ -127,6 +135,9 @@ async def claim_next(conn: asyncpg.Connection) -> dict[str, Any] | None:
                    early_stop_on_no_edge, require_walk_forward
             FROM research_queue
             WHERE status = 'PENDING'
+              AND ($1::text IS NULL
+                   OR sweep_config->>'track' = $1
+                   OR ($1 = 'trading' AND sweep_config->>'track' IS NULL))
             ORDER BY priority ASC, created_time ASC
             LIMIT 1
             FOR UPDATE SKIP LOCKED
@@ -141,7 +152,8 @@ async def claim_next(conn: asyncpg.Connection) -> dict[str, Any] | None:
                   claimed.instrument, claimed.sweep_config, claimed.prior_iter,
                   claimed.iter_budget, claimed.early_stop_on_no_edge,
                   claimed.require_walk_forward, rq.started_at
-        """
+        """,
+        track,
     )
     return dict(row) if row else None
 

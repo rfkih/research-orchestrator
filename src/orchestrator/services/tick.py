@@ -48,7 +48,7 @@ from ..repo import (
     queue_write,
     trades as trades_repo,
 )
-from . import analyze, paper_generator, portfolio, sweep
+from . import analyze, hedging_gate, paper_generator, portfolio, sweep
 from .activity_logger import log_activity
 from .tick_summary import compute_tick_summary
 
@@ -347,9 +347,14 @@ async def run_tick(
     agent_name: str,
     session_id: UUID | None = None,
     redis_client: AsyncRedis | None = None,
+    track: str | None = None,
 ) -> TickResult:
     """One tick. Idempotent at the queue level — re-runs are safe because
-    each tick claims a fresh row and atomically increments iteration_number."""
+    each tick claims a fresh row and atomically increments iteration_number.
+
+    ``track`` (Phase 1): scope the claim to one research loop. None ⇒ the
+    legacy global claim (picks any PENDING row); a value restricts to rows
+    whose ``sweep_config['track']`` matches."""
 
     # ── Step 0: reap any RUNNING rows older than the poll cap ─────────
     # Covers SIGKILL-style crashes whose rollback handler never ran.
@@ -364,7 +369,7 @@ async def run_tick(
     # ── Step 1: claim row ──────────────────────────────────────────────
     async with db.acquire() as conn:
         async with conn.transaction():
-            claim = await queue_write.claim_next(conn)
+            claim = await queue_write.claim_next(conn, track=track)
 
     if claim is None:
         return TickResult(
@@ -711,10 +716,31 @@ async def _execute_after_claim(
         analysis.get("annualized_geometric_return_pct_at_alloc_90"),
     )
 
+    # ── Dual-track gate selection (Phase 2, 2026-06-07) ──────────────────
+    # The queue row's track (sweep_config['track']) chooses the graduation
+    # objective. track in (None, "trading") is the DEFAULT and MUST stay
+    # byte-for-byte unchanged — V11 (stat_v) + V60 (dec_v, computed above)
+    # decide the verdict, exactly as before. Only track == "hedging" diverges
+    # (see _select_track_gate). V11/V60 constants and the trading path are
+    # untouched.
+    stat_v, dec_v, hedging_gate_payload = await _select_track_gate(
+        db=db,
+        track=(sweep_config or {}).get("track"),
+        stat_v=stat_v,
+        dec_v=dec_v,
+        backtest_run_id=backtest_run_id,
+        instrument=instrument,
+        window_start=raw_run_dict.get("start_time"),
+        window_end=raw_run_dict.get("end_time"),
+    )
+
     # metrics_snapshot blends run-level metrics with the analyzer payload.
     metrics_snapshot = {**run_metrics, "analysis": analysis}
     if portfolio_corr_payload is not None:
         metrics_snapshot["portfolio_corr"] = portfolio_corr_payload
+    if hedging_gate_payload is not None:
+        # Stash the full hedging verdict for audit (mirrors portfolio_corr).
+        metrics_snapshot["hedging_gate"] = hedging_gate_payload
 
     async with db.acquire() as conn:
         async with conn.transaction():
@@ -846,6 +872,7 @@ async def _execute_after_claim(
         agent_name=agent_name,
         iteration_id=iteration_id,
         dsr=analysis.get("dsr") if isinstance(analysis, dict) else None,
+        track=(sweep_config or {}).get("track"),
     )
 
     _pf_pt = analysis.get("pf_point_estimate") if isinstance(analysis, dict) else None
@@ -873,6 +900,77 @@ async def _execute_after_claim(
     )
 
 
+async def _select_track_gate(
+    *,
+    db: Database,
+    track: str | None,
+    stat_v: str,
+    dec_v: str,
+    backtest_run_id: Any,
+    instrument: str,
+    window_start: Any,
+    window_end: Any,
+) -> tuple[str, str, dict[str, Any] | None]:
+    """Choose the graduation gate by the queue row's track (Phase 2, 2026-06-07).
+
+    Returns ``(statistical_verdict, decision_verdict, hedging_gate_payload)``.
+
+    track in (None, "trading") — the DEFAULT — returns the V11/V60-derived
+    ``(stat_v, dec_v)`` UNCHANGED and ``None`` for the payload. The trading
+    path is therefore byte-for-byte identical: when track is not "hedging" this
+    helper is a pass-through and does NO database work.
+
+    track == "hedging" is an operator-authorized, ADDITIVE objective — beats
+    buy-hold on a risk-adjusted, equity-level basis — that REPLACES the
+    trade-level V11 PASS requirement and the V60 >=10%/yr economic check for
+    hedging rows ONLY. The hedging gate computes its own pass/fail, which we map
+    onto the SAME (stat_v, dec_v) control-flow signals the trading path already
+    feeds to ``_decide_next_state`` so downstream routing is reused verbatim:
+        gate PASS → ("SIGNIFICANT_EDGE", "PASS")    → routes to /walk-forward
+        gate FAIL → ("SIGNIFICANT_EDGE", "ITERATE") → the exact "edge not
+                    sufficient" ITERATE/continue path the V60-miss case uses.
+    Walk-forward ROBUST remains a hard downstream requirement either way.
+    V11/V60 constants and the trading path's logic are NOT touched here.
+    """
+    if track != "hedging":
+        return stat_v, dec_v, None
+
+    # Benchmark the underlying on DAILY closes regardless of the strategy's bar
+    # interval (buy-hold is an equity-level, daily-frequency baseline).
+    #
+    # Defensive guard (Fix 2, 2026-06-07): any failure inside the hedging gate
+    # (DB read, thin/None metrics, bootstrap edge case) must NOT 500 the tick.
+    # The trading path never reaches here (it short-circuits above), so this
+    # only affects hedging rows. On error we log and map to the SAME non-PASS
+    # ITERATE/continue outcome a hedging FAIL produces — never raise, never
+    # mark PASS — and stash an auditable error marker on the payload so it
+    # surfaces on metrics_snapshot.hedging_gate.
+    try:
+        async with db.acquire() as conn:
+            payload = await hedging_gate.evaluate(
+                conn,
+                backtest_run_id=backtest_run_id,
+                symbol=instrument,
+                interval="1d",
+                start=window_start,
+                end=window_end,
+            )
+    except Exception as exc:  # noqa: BLE001 — must not propagate to the tick
+        log.exception(
+            "tick.hedging_gate_error",
+            instrument=instrument,
+            backtest_run_id=str(backtest_run_id),
+        )
+        error_payload = {"error": f"{type(exc).__name__}: {exc}", "passed": False}
+        # Same control-flow signal as a hedging FAIL: ITERATE/continue.
+        return "SIGNIFICANT_EDGE", "ITERATE", error_payload
+    # Drive existing control flow off the equity-level verdict. V11/V60 are
+    # intentionally bypassed for hedging rows.
+    new_stat_v = "SIGNIFICANT_EDGE"
+    new_dec_v = "PASS" if payload["passed"] else "ITERATE"
+    return new_stat_v, new_dec_v, payload
+
+
 async def _decide_next_state(
     *,
     db: Database,
@@ -885,6 +983,7 @@ async def _decide_next_state(
     agent_name: str,
     iteration_id: Any = None,
     dsr: float | None = None,
+    track: str | None = None,
 ) -> list[dict[str, Any]]:
     """Mirrors research-tick.sh lines 514-572. Returns agent next-action hints.
 
@@ -964,9 +1063,19 @@ async def _decide_next_state(
             # route it to a pool-candidate walk-forward (the only remaining
             # validity check) instead of just enqueuing a fresh hypothesis. The
             # standalone V60 gate is untouched — this is the additive pool path.
+            #
+            # Fix 3 (2026-06-07): this trade-level pool lane gates on the
+            # TRADE-LEVEL DSR, which is the WRONG objective for a hedging
+            # candidate — the hedging gate intentionally bypasses trade-level
+            # stats (it judges equity-level beats-buy-hold). A failing hedging
+            # row arrives here as ("SIGNIFICANT_EDGE", "ITERATE") and could be
+            # mis-routed into the trade-level pool on a coincidental DSR. Restrict
+            # this branch to the trading track (None ⇒ legacy/default). Hedging
+            # FAILs just continue/ITERATE below without touching this pool.
             actions: list[dict[str, Any]] = []
             if (
-                dsr is not None
+                track in (None, "trading")
+                and dsr is not None
                 and dsr >= analyze.DSR_SIGNIFICANCE_THRESHOLD
                 and iteration_id is not None
             ):
