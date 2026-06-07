@@ -92,6 +92,33 @@ async def insert_walk_forward(
     return walk_forward_id
 
 
+async def fetch_fold_daily_returns(
+    conn: asyncpg.Connection, backtest_run_id: UUID
+) -> list[float]:
+    """Return the ordered daily-return series for one backtest run.
+
+    Reads ``backtest_equity_point.daily_return_pct`` (already computed by
+    the JVM) ordered by ``equity_date``. Used by the frequency-aware
+    (low-turnover) walk-forward track, which validates on the out-of-sample
+    daily-equity return series rather than trade-count fold statistics — a
+    1d strategy yields ~1 return/bar (hundreds of obs) even when it trades
+    only a handful of times. NULL returns are skipped (first bar carries a
+    NULL daily_return_pct). Values are kept in percent units, matching how
+    the JVM stores them.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT daily_return_pct
+          FROM backtest_equity_point
+         WHERE backtest_run_id = $1
+           AND daily_return_pct IS NOT NULL
+         ORDER BY equity_date ASC
+        """,
+        backtest_run_id,
+    )
+    return [float(r["daily_return_pct"]) for r in rows]
+
+
 async def fetch_walk_forward_run(
     conn: asyncpg.Connection, walk_forward_id: UUID
 ) -> dict[str, Any] | None:
