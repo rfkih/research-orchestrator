@@ -193,7 +193,7 @@ async def test_evaluate_returns_composite_dict(db_conn):
     )
     assert set(out.keys()) == {
         "passed", "decision", "significance", "benchmark", "strategy",
-        "strat_equity_source",
+        "strat_equity_source", "btc_lens",
     }
     assert isinstance(out["passed"], bool)
     assert "cagr_pct" in out["benchmark"]
@@ -274,6 +274,86 @@ async def test_evaluate_buyhold_equivalent_fails(db_conn):
     assert out["passed"] is False
 
 
+# ── BTC-stack ("stack sats") lens — additive, must not alter `passed` ───────
+
+
+@pytest.mark.asyncio
+async def test_evaluate_attaches_btc_lens_without_changing_passed(db_conn):
+    """With equity points present, evaluate attaches a btc_lens reporting
+    ABSOLUTE BTC-stack growth (final_x>1, the curve's true absolute maxDD), and
+    the lens does NOT alter the USDT gate's `passed`.
+
+    The rising-shallow-DD equity over a choppy (net up-drift) buy-hold means the
+    equity grows FASTER than price → the BTC stack grows (final_x>1). We compute
+    the expected stack curve independently here and assert the lens matches.
+    """
+    from datetime import date as _date
+    from orchestrator.services import hedging_gate
+    symbol = "BTCUSDT"
+    start = datetime(2024, 8, 1)
+    n = 120
+    await _seed_volatile_buyhold(db_conn, symbol=symbol, start=start, n_days=n)
+    run_id = uuid.uuid4()
+    equities = _rising_shallow_dd_equity(n)
+    await _seed_equity_points(db_conn, run_id, start=start, equities=equities)
+    end = start + timedelta(days=n)
+    out = await hedging_gate.evaluate(
+        db_conn, backtest_run_id=run_id, symbol=symbol, interval="1d",
+        start=start, end=end,
+    )
+
+    # The lens is present and available.
+    lens = out["btc_lens"]
+    assert lens.get("available", True) is True
+    assert lens["buy_hold_stack_is_flat"] is True
+
+    # Reconstruct the expected stack curve independently: equity/price aligned by
+    # date, normalized to 1.0. equity_date is .date(); close start_time is naive
+    # datetime → key by date.
+    closes_px = _volatile_closes(n)
+    eq_by_date = {(start + timedelta(days=d)).date(): equities[d] for d in range(n)}
+    px_by_date = {(start + timedelta(days=d)).date(): closes_px[d] for d in range(n)}
+    expected_curve = hedging_gate.btc_stack_series(eq_by_date, px_by_date)
+    expected_metrics = hedging_gate.btc_stack_metrics(expected_curve)
+
+    assert lens["final_stack_x"] == pytest.approx(expected_metrics["final_stack_x"], abs=1e-9)
+    assert lens["final_stack_x"] > 1.0  # strategy grew the BTC stack
+    # Absolute stack maxDD — matches the independently-computed curve, NOT 0.
+    assert lens["stack_maxdd_pct"] == pytest.approx(
+        expected_metrics["stack_maxdd_pct"], abs=1e-9
+    )
+    assert lens["n_obs"] == expected_metrics["n_obs"]
+
+    # CRITICAL: the lens is purely additive — `passed` equals what the USDT gate
+    # alone decides (decision.passed AND significance), independent of the lens.
+    expected_passed = bool(
+        out["decision"].get("passed")
+        and out["significance"]["sharpe_improvement_significant"]
+    )
+    assert out["passed"] is expected_passed
+
+
+@pytest.mark.asyncio
+async def test_evaluate_btc_lens_unavailable_on_trade_fallback(db_conn):
+    """On the trade-reconstruction path (no equity points) the lens is reported
+    unavailable — there is no real total_equity to denominate by price."""
+    from orchestrator.services import hedging_gate
+    symbol = "ETHUSDT"
+    start = datetime(2024, 9, 1)
+    n = 120
+    await _seed_volatile_buyhold(db_conn, symbol=symbol, start=start, n_days=n)
+    run_id = uuid.uuid4()
+    pnls = [0.6 + (0.05 if d % 2 == 0 else -0.05) for d in range(n)]
+    await _seed_trades(db_conn, run_id, start=start, daily_pnls=pnls)
+    end = start + timedelta(days=n)
+    out = await hedging_gate.evaluate(
+        db_conn, backtest_run_id=run_id, symbol=symbol, interval="1d",
+        start=start, end=end,
+    )
+    assert out["strat_equity_source"] == "trades"
+    assert out["btc_lens"]["available"] is False
+
+
 # ── Task 6: tick.py gate selection by track ─────────────────────────────────
 #
 # Driving a full run_tick requires a JVM mock + account_strategy/hypothesis_audit
@@ -334,7 +414,7 @@ async def test_select_track_gate_hedging_passes_via_equity_gate(db_conn):
     assert payload["passed"] is True
     assert set(payload.keys()) == {
         "passed", "decision", "significance", "benchmark", "strategy",
-        "strat_equity_source",
+        "strat_equity_source", "btc_lens",
     }
 
 
