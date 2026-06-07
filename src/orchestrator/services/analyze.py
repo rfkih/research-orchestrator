@@ -453,7 +453,14 @@ def regime_stratify(trades: Iterable[dict[str, Any]]) -> dict[str, dict[str, dic
 def annualize_geometric_return(
     geometric_return_pct: float | None, days: int | None
 ) -> float | None:
-    """Annualize a cumulative geometric return over a backtest window.
+    """Annualize a cumulative geometric return over the backtest CALENDAR window.
+
+    ``days`` is the calendar span of the backtest window (end − start), NOT
+    deployed time. Annualizing over the calendar window gives an honest
+    "%/yr over the test period" (idle/cash periods included) and avoids the
+    explosive extrapolation that deployed-time annualization produces when a
+    strategy is deployed only a small fraction of the window. (Operator
+    decision 2026-06-07; see the call site in ``analyze_run``.)
 
     ``geometric_return_pct`` is the persisted
     ``backtest_run.geometric_return_pct_at_alloc_90`` — the compounded equity
@@ -584,20 +591,20 @@ def analyze_run(
     max_dd = _f(run.get("max_drawdown_pct"))
     calmar = (return_pct / max_dd) if (return_pct and max_dd and max_dd > 0) else None
 
-    # V60 — sizing-independent compounding metric. Annualise by deployed
-    # time (sum of trade holding periods) rather than calendar window time.
-    # Calendar annualization conflates idle periods with compounding — a
-    # strategy with 50 4h trades over 500 days has capital working for only
-    # ~8 of those days; annualizing by 500 vastly understates the achieved
-    # per-deployed-capital rate. Deployed-time annualization asks: "at this
-    # compounding rate, what would a full year of deployment produce?"
-    # Falls back to window_days when exit_time data is unavailable (open
-    # positions, legacy rows) to preserve behaviour for those edge cases.
+    # V60 — sizing-independent compounding metric, annualised over the
+    # CALENDAR window (operator decision 2026-06-07). The prior deployed-time
+    # annualization (days = sum of trade holding periods) extrapolated a tiny
+    # deployment to a full year: with deployed_days << window the exponent
+    # 365/days explodes — turning a −19% geom over 15 deployed days into
+    # −99%/yr and, more dangerously, inflating short *winning* deployments into
+    # huge CAGRs that falsely PASS the ≥10%/yr V60 gate. "≥10%/yr" means return
+    # per CALENDAR year over the test period; idle capital is part of that
+    # honest rate. This is a correctness fix (stricter — removes inflated
+    # false-passes), NOT a loosening. capital_utilization_pct (below) still
+    # reports the deployed fraction as a separate diagnostic.
     geom_return_pct = _f(run.get("geometric_return_pct_at_alloc_90"))
     deployed_days = _total_deployed_days(trades)
-    annualized_geom_pct = annualize_geometric_return(
-        geom_return_pct, deployed_days if deployed_days else window_days
-    )
+    annualized_geom_pct = annualize_geometric_return(geom_return_pct, window_days)
     capital_utilization_pct = (
         round(deployed_days / window_days * 100, 1)
         if deployed_days and window_days and window_days > 0
