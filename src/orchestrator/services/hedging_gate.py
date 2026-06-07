@@ -12,6 +12,7 @@ import random
 
 import asyncpg
 
+from ..repo import backtest_equity
 from ..repo import market_data
 from ..repo import trades as trades_repo
 from . import portfolio, pool
@@ -281,6 +282,72 @@ def _strat_metrics(daily_returns: list[float]) -> dict[str, Any]:
     }
 
 
+def _strat_metrics_from_equity(equity: list[float], dates: list[date]) -> dict[str, Any]:
+    """CAGR%, annualised Sharpe, maxDD% from a REAL per-day total_equity series.
+
+    Unlike ``_strat_metrics`` (which compounds a return series off a normalised
+    1.0 base), maxDD here is the TRUE peak-to-trough of the recorded
+    ``total_equity`` and CAGR is first/last equity over the calendar span
+    (first→last date, 365-day year — matching ``buy_hold_metrics``). Sharpe is
+    the annualised mean/sd of the per-day pct-change returns."""
+    if len(equity) < 2:
+        return {"cagr_pct": None, "sharpe": None, "max_drawdown_pct": None}
+    rets = _returns(equity)
+    # Calendar span first→last date inclusive (≥1 day); fall back to obs count
+    # if dates are degenerate. 365-day year, same convention as buy_hold_metrics.
+    span_days = max((dates[-1] - dates[0]).days, 1)
+    years = max(span_days / 365.0, 1e-9)
+    e0, e1 = equity[0], equity[-1]
+    cagr_pct: float | None
+    if e0 > 0 and e1 > 0:
+        cagr_pct = ((e1 / e0) ** (1.0 / years) - 1.0) * 100.0
+    else:
+        cagr_pct = None
+    return {
+        "cagr_pct": cagr_pct,
+        "sharpe": _sharpe(rets),
+        "max_drawdown_pct": _max_drawdown_pct(equity),
+    }
+
+
+def _strat_returns_by_date_from_equity(
+    points: list[tuple[date, float]]
+) -> dict[date, float]:
+    """Pct-change strat returns keyed by the date the return is realised on.
+
+    ``points`` is ascending ``[(equity_date, total_equity), ...]``. The return
+    for the step ending on ``points[k]`` is realised on ``points[k]``'s date —
+    the same day-0-dropping convention the benchmark uses in
+    ``_align_returns_by_date``, so the two series pair on the SAME calendar
+    day."""
+    out: dict[date, float] = {}
+    for (_, prev_eq), (cur_date, cur_eq) in zip(points, points[1:]):
+        if prev_eq:
+            cd = cur_date.date() if isinstance(cur_date, datetime) else cur_date
+            out[cd] = cur_eq / prev_eq - 1.0
+    return out
+
+
+def _align_strat_dict_to_bench(
+    *,
+    strat_by_date: dict[date, float],
+    closes: list[tuple[date, float]],
+) -> tuple[list[float], list[float]]:
+    """Intersect a date-keyed strat-return map with the benchmark daily returns,
+    emitting paired values in sorted-date order. Sibling of
+    ``_align_returns_by_date`` for the equity-point path (where strat returns
+    are already keyed by realised date rather than a contiguous calendar grid)."""
+    bench_by_date: dict[date, float] = {}
+    for (_, prev_px), (cur_date, cur_px) in zip(closes, closes[1:]):
+        if prev_px:
+            cd = cur_date.date() if isinstance(cur_date, datetime) else cur_date
+            bench_by_date[cd] = cur_px / prev_px - 1.0
+    common_dates = sorted(set(strat_by_date) & set(bench_by_date))
+    strat_aligned = [strat_by_date[cd] for cd in common_dates]
+    bench_aligned = [bench_by_date[cd] for cd in common_dates]
+    return strat_aligned, bench_aligned
+
+
 async def evaluate(
     conn: asyncpg.Connection,
     *,
@@ -296,15 +363,21 @@ async def evaluate(
     trade-level V11 + V60-economic gates for hedging ONLY). Composes:
 
     1. Buy-hold benchmark metrics from the underlying's daily closes.
-    2. The strategy's calendar-daily equity-return series from its
-       ``backtest_trade`` rows (binned by exit-day, calendar-filled).
+    2. The strategy's calendar-daily equity-return series. PREFERRED source is
+       the JVM's REAL per-day ``backtest_equity_point.total_equity`` curve
+       (true mark-to-market — correct for buy-and-hold-style allocation
+       strategies that hold a position across many days). Only when that series
+       is absent (legacy runs, <2 rows) does it FALL BACK to reconstructing the
+       curve from sparse ``backtest_trade`` exit-day P&L. The source used is
+       reported in ``strat_equity_source`` ("equity_points" | "trades").
     3. The deterministic ``beats_buy_hold_risk_adj`` decision gate AND the
        bootstrap ``improvement_significant`` significance test.
 
     PASS iff the decision gate passes AND the Sharpe improvement is
     significant. Walk-forward ROBUST is still required downstream (unchanged).
 
-    Returns ``{passed, decision, significance, benchmark, strategy}``.
+    Returns
+    ``{passed, decision, significance, benchmark, strategy, strat_equity_source}``.
     """
     # 1. Buy-hold benchmark from the underlying's daily closes. The benchmark is
     #    ALWAYS daily — buy_hold_metrics annualises with sqrt(252)/365-day-year,
@@ -316,24 +389,48 @@ async def evaluate(
     )
     bench = buy_hold_metrics(closes)
 
-    # 2. Strategy daily equity-return series from its trades.
-    trades = await trades_repo.fetch_trades(conn, backtest_run_id)
-    sparse = portfolio.daily_returns_from_trades(trades)
-    strat_returns = pool._calendar_fill(sparse, start.date(), end.date())
-    strat = _strat_metrics(strat_returns)
-
-    # 3. Benchmark daily returns from the close prices, PHASE-aligned to the
-    #    strat series on calendar date before bootstrapping. The two series use
-    #    different day-0 conventions (strat day-0 = the start date's level entry;
-    #    bench drops day-0), so a plain length-truncation would pair strat day i
-    #    with bench day i+1. _align_returns_by_date keys both by the date each
-    #    return is realised on and intersects, so the SAME calendar day's returns
-    #    are paired. See _align_returns_by_date for the offset derivation.
-    strat_aligned, bench_aligned = _align_returns_by_date(
-        strat_returns=strat_returns,
-        strat_start=start.date(),
-        closes=[(d, px) for d, px in closes],
-    )
+    # 2. Strategy daily equity-return series. PREFER the JVM's real per-day
+    #    total_equity curve (true mark-to-market — correct for allocation
+    #    strategies that hold a position across many days, where reconstructing
+    #    from sparse trade-exit P&L misses daily MTM and produces garbage). Only
+    #    when that series is absent (legacy runs without equity points, <2 rows)
+    #    do we fall back to the trade-reconstruction path so nothing regresses.
+    points = await backtest_equity.fetch_equity_points(conn, backtest_run_id)
+    if len(points) >= 2:
+        strat_equity_source = "equity_points"
+        eq_dates = [
+            (d.date() if isinstance(d, datetime) else d) for d, _ in points
+        ]
+        eq_values = [v for _, v in points]
+        strat = _strat_metrics_from_equity(eq_values, eq_dates)
+        # 3. Benchmark daily returns PHASE-aligned to the strat series on
+        #    calendar date. Strat returns are keyed by realised date (pct-change
+        #    of total_equity); _align_strat_dict_to_bench intersects with the
+        #    same-day-keyed benchmark returns. Both drop day-0, so the SAME
+        #    calendar day's returns are paired.
+        strat_by_date = _strat_returns_by_date_from_equity(points)
+        strat_aligned, bench_aligned = _align_strat_dict_to_bench(
+            strat_by_date=strat_by_date,
+            closes=[(d, px) for d, px in closes],
+        )
+    else:
+        strat_equity_source = "trades"
+        trades = await trades_repo.fetch_trades(conn, backtest_run_id)
+        sparse = portfolio.daily_returns_from_trades(trades)
+        strat_returns = pool._calendar_fill(sparse, start.date(), end.date())
+        strat = _strat_metrics(strat_returns)
+        # Benchmark daily returns PHASE-aligned on calendar date. The two series
+        # use different day-0 conventions (strat day-0 = the start date's level
+        # entry; bench drops day-0), so a plain length-truncation would pair
+        # strat day i with bench day i+1. _align_returns_by_date keys both by the
+        # date each return is realised on and intersects, so the SAME calendar
+        # day's returns are paired. See _align_returns_by_date for the offset
+        # derivation.
+        strat_aligned, bench_aligned = _align_returns_by_date(
+            strat_returns=strat_returns,
+            strat_start=start.date(),
+            closes=[(d, px) for d, px in closes],
+        )
 
     # 4-5. Decision gate + significance.
     decision = beats_buy_hold_risk_adj(strat=strat, bench=bench)
@@ -348,4 +445,5 @@ async def evaluate(
         "significance": sig,
         "benchmark": bench,
         "strategy": strat,
+        "strat_equity_source": strat_equity_source,
     }
