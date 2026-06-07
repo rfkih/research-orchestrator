@@ -12,9 +12,13 @@ is the contract enforcement point; services trust their inputs.
 from __future__ import annotations
 
 # Bar intervals the research JVM ticks at. 5m is the finest granularity
-# the backtest engine emits; sub-5m would silently miss bars. The same
-# four-value set gates /queue, /null-screen, /walk-forward, /cross-window.
-VALID_INTERVAL_NAMES: frozenset[str] = frozenset({"5m", "15m", "1h", "4h"})
+# the backtest engine emits; sub-5m would silently miss bars. 1d is COARSER
+# (the engine still ticks 5m and aggregates the daily decision) and is
+# accepted by the JVM since the V155-era BacktestRunRequest regex change
+# (`^(5m|15m|1h|4h|1d)$`) — required for the 1d trend/allocation HEDGING
+# strategies (EMA_BAND_BTC, VMT_BTC, ENS_TREND_BTC, DYNAMIC_TILT_BTC).
+# This set gates /queue, /null-screen, /walk-forward, /cross-window.
+VALID_INTERVAL_NAMES: frozenset[str] = frozenset({"5m", "15m", "1h", "4h", "1d"})
 
 # Review verdicts that pass the paired-agent gate (i.e. unlock /queue or
 # /walk-forward). Complement of {"REJECTED"} in the full verdict enum.
