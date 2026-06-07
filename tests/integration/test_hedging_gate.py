@@ -71,6 +71,111 @@ async def _seed_trades(db_conn, run_id, *, start, daily_pnls, initial_capital=10
     )
 
 
+async def _seed_equity_points(db_conn, run_id, *, start, equities):
+    """One backtest_equity_point per calendar day with the given total_equity."""
+    rows = []
+    prev = None
+    for d, eq in enumerate(equities):
+        dt = (start + timedelta(days=d)).date()
+        dr = None if prev in (None, 0) else (eq / prev - 1.0) * 100.0
+        rows.append((
+            run_id, uuid.uuid4(), dt, 0.0, float(eq), float(eq), 0.0,
+            None if dr is None else float(dr), 0,
+        ))
+        prev = eq
+    await db_conn.executemany(
+        "INSERT INTO backtest_equity_point (backtest_run_id, account_id, equity_date, "
+        "cash_balance, asset_value, total_equity, drawdown_percent, daily_return_pct, "
+        "open_positions) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+        rows,
+    )
+
+
+def _rising_shallow_dd_equity(n_days, start=1000.0):
+    """Rising equity with only shallow drawdowns: steady up-drift with small
+    periodic dips. Clearly beats a choppy buy-hold risk-adjusted (high Sharpe,
+    low maxDD) so the hedging gate PASSES — and the metrics come straight from
+    the seeded curve."""
+    eq = start
+    out = [eq]
+    for d in range(n_days - 1):
+        r = -0.004 if d % 11 == 5 else 0.006
+        eq *= 1.0 + r
+        out.append(eq)
+    return out
+
+
+@pytest.mark.asyncio
+async def test_evaluate_uses_equity_points_when_present(db_conn):
+    """When backtest_equity_point rows exist, the strat metrics are derived from
+    that REAL total_equity series (not trade reconstruction), and the source is
+    flagged. A rising shallow-DD curve clearly beats the choppy buy-hold."""
+    from orchestrator.services import hedging_gate
+    symbol = "BTCUSDT"
+    start = datetime(2024, 4, 1)
+    n = 120
+    await _seed_volatile_buyhold(db_conn, symbol=symbol, start=start, n_days=n)
+    run_id = uuid.uuid4()
+    equities = _rising_shallow_dd_equity(n)
+    await _seed_equity_points(db_conn, run_id, start=start, equities=equities)
+    # Seed DELIBERATELY-MISLEADING trades that would reconstruct a LOSING curve,
+    # to prove the equity-point path is used (not trades).
+    await _seed_trades(db_conn, run_id, start=start, daily_pnls=[-5.0] * n)
+    end = start + timedelta(days=n)
+    out = await hedging_gate.evaluate(
+        db_conn, backtest_run_id=run_id, symbol=symbol, interval="1d",
+        start=start, end=end,
+    )
+    assert out["strat_equity_source"] == "equity_points"
+    # CAGR is positive (rising equity), NOT the negative the bad trades imply.
+    assert out["strategy"]["cagr_pct"] > 0
+    # maxDD matches the seeded curve's true peak-to-trough (shallow), computed
+    # independently here from total_equity.
+    expected_mdd = hedging_gate._max_drawdown_pct(equities)
+    assert out["strategy"]["max_drawdown_pct"] == pytest.approx(expected_mdd, abs=1e-9)
+    assert expected_mdd < 5.0  # shallow
+    # Genuinely beats buy-hold risk-adjusted → PASS.
+    assert out["decision"]["passed"] is True
+    assert out["significance"]["sharpe_improvement_significant"] is True
+    assert out["passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_evaluate_falls_back_to_trades_without_equity_points(db_conn):
+    """A run with NO backtest_equity_point rows still works via the legacy
+    trade-reconstruction path, flagged as such — nothing regresses."""
+    from orchestrator.services import hedging_gate
+    symbol = "ETHUSDT"
+    start = datetime(2024, 5, 1)
+    n = 120
+    await _seed_volatile_buyhold(db_conn, symbol=symbol, start=start, n_days=n)
+    run_id = uuid.uuid4()
+    # No equity points seeded — only trades.
+    pnls = [0.6 + (0.05 if d % 2 == 0 else -0.05) for d in range(n)]
+    await _seed_trades(db_conn, run_id, start=start, daily_pnls=pnls)
+    end = start + timedelta(days=n)
+    out = await hedging_gate.evaluate(
+        db_conn, backtest_run_id=run_id, symbol=symbol, interval="1d",
+        start=start, end=end,
+    )
+    assert out["strat_equity_source"] == "trades"
+    assert out["strategy"]["cagr_pct"] is not None
+    # Same superior-strategy shape as the legacy path → still PASSes.
+    assert out["passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_fetch_equity_points_ascending(db_conn):
+    from orchestrator.repo import backtest_equity
+    run_id = uuid.uuid4()
+    start = datetime(2024, 7, 1)
+    equities = [1000.0, 1010.0, 1005.0, 1030.0]
+    await _seed_equity_points(db_conn, run_id, start=start, equities=equities)
+    pts = await backtest_equity.fetch_equity_points(db_conn, run_id)
+    assert [eq for _, eq in pts] == equities
+    assert pts == sorted(pts)  # ascending by date
+
+
 @pytest.mark.asyncio
 async def test_evaluate_returns_composite_dict(db_conn):
     from orchestrator.services import hedging_gate
@@ -86,7 +191,10 @@ async def test_evaluate_returns_composite_dict(db_conn):
         db_conn, backtest_run_id=run_id, symbol=symbol, interval="1d",
         start=start, end=end,
     )
-    assert set(out.keys()) == {"passed", "decision", "significance", "benchmark", "strategy"}
+    assert set(out.keys()) == {
+        "passed", "decision", "significance", "benchmark", "strategy",
+        "strat_equity_source",
+    }
     assert isinstance(out["passed"], bool)
     assert "cagr_pct" in out["benchmark"]
     assert "cagr_pct" in out["strategy"]
@@ -225,7 +333,8 @@ async def test_select_track_gate_hedging_passes_via_equity_gate(db_conn):
     assert payload is not None
     assert payload["passed"] is True
     assert set(payload.keys()) == {
-        "passed", "decision", "significance", "benchmark", "strategy"
+        "passed", "decision", "significance", "benchmark", "strategy",
+        "strat_equity_source",
     }
 
 

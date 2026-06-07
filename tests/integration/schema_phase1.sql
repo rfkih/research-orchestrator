@@ -112,6 +112,25 @@ CREATE TABLE IF NOT EXISTS backtest_trade (
     entry_trend_regime             VARCHAR(50)
 );
 
+-- Real per-day strategy equity series the JVM records (one row per
+-- (backtest_run_id, equity_date)). The hedging gate reads total_equity to
+-- measure strat metrics from the TRUE mark-to-market curve instead of
+-- reconstructing from sparse trade-exit P&L. FK-free trimmed copy of the prod
+-- table — only the columns repo/backtest_equity.py:fetch_equity_points SELECTs
+-- (plus the run/date key). Types match the Flyway baseline.
+CREATE TABLE IF NOT EXISTS backtest_equity_point (
+    backtest_run_id   UUID           NOT NULL,
+    account_id        UUID,
+    equity_date       DATE           NOT NULL,
+    cash_balance      NUMERIC(24,8),
+    asset_value       NUMERIC(24,8),
+    total_equity      NUMERIC(24,8)  NOT NULL,
+    drawdown_percent  NUMERIC(24,8),
+    daily_return_pct  NUMERIC(24,8),
+    open_positions    INTEGER,
+    CONSTRAINT uq_backtest_equity_point UNIQUE (backtest_run_id, equity_date)
+);
+
 -- macro_raw series repo (funding rates + Deribit DVOL) reads this. Minimal copy
 -- of the prod table (blackheart-trading-engine V66__add_ml_sentiment_schema.sql):
 -- a simple id BIGSERIAL PK replaces prod's partitioning + composite PK
