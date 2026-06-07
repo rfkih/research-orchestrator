@@ -43,6 +43,7 @@ class Playbook(BaseModel):
     headers: dict[str, str]
     error_envelope: dict[str, str]
     tooling: dict[str, str]
+    methodology: dict[str, str]
     capabilities: list[PlaybookCapability]
     recipes: list[PlaybookRecipe]
 
@@ -51,7 +52,7 @@ class Playbook(BaseModel):
 async def playbook() -> Playbook:
     """Discoverable contract. Public on purpose — no secrets here, only shape."""
     return Playbook(
-        version="2",
+        version="3",
         auth={
             "scheme": "shared-secret",
             "header": "X-Orch-Token",
@@ -136,6 +137,48 @@ async def playbook() -> Playbook:
                 "-H \"Idempotency-Key: $(uuidgen)\" "
                 "-H \"Content-Type: application/json\" "
                 "-d @body.json \"$ORCH_BASE/<path>\")"
+            ),
+        },
+        methodology={
+            "principle": (
+                "Hypothesis-first, NOT parameter-grid. Research a PREMIUM with an "
+                "economic reason to exist; thesis → minimal harvest strategy → lean "
+                "test → escalate. Fewer, well-motivated trials → lower DSR "
+                "multiplicity penalty → real edges can clear. Adopted 2026-06-03 "
+                "(orchestrator docs/RESEARCH_METHODOLOGY.md); supersedes brute-force "
+                "grid search as the default."
+            ),
+            "lean_over_exhaustive": (
+                "Every trial costs DSR multiplicity. A Cartesian param explosion "
+                "RAISES the significance bar it must clear — that is p-hacking, which "
+                "the gate is built to punish. Pre-register a few motivated param "
+                "combos, never a full grid."
+            ),
+            "orthogonality_first": (
+                "Prioritise signals UNCORRELATED with price-action (funding, carry, "
+                "dispersion, flow, implied-vol e.g. btc_dvol_*). These populate the "
+                "Signal Pool; correlated price-action archetypes are near-substitutes "
+                "the pool's marginal-Sharpe test rejects. Endgame is combined Sharpe "
+                "≈ s·√N over many weak orthogonal signals, not one hero strategy."
+            ),
+            "falsify_and_move_on": (
+                "One clean NO_EDGE (or null-screen NO_EDGE_DETECTED) ends a "
+                "hypothesis. Do NOT re-grid a dead hypothesis hoping for a different "
+                "verdict — the re-discovery gate (409 axis_previously_discarded) "
+                "enforces this."
+            ),
+            "cost_aware_confirm": (
+                "Cheap read-only pre-validation (event studies, null-screen) is "
+                "frictionless/daily and OVERSTATES survivors — it ignores turnover "
+                "cost. A signal that looks +46%/yr gross can be −43% net (XS_MOM, "
+                "2026-06-03). NEVER trust a gross-PnL survivor; confirm with a "
+                "cost-aware backtest before claiming SIGNIFICANT_EDGE."
+            ),
+            "do_not_loosen_gates": (
+                "V11 (PF lower-95%-CI > 1.0, DSR ≥ 0.95) + V60 (≥10%/yr on "
+                "annualized_geometric_return_pct_at_alloc_90) are FROZEN. Loosening "
+                "to fit a candidate is fraud and manufactures losers, not alpha. The "
+                "constraint is the SEARCH SPACE, not the gates."
             ),
         },
         capabilities=[
@@ -1068,6 +1111,32 @@ async def playbook() -> Playbook:
                     "GET /journal?entry_type=NULL_SCREEN_RESULT&strategy_code=<code> — skip if recent NO_EDGE_DETECTED",
                     "POST /queue with sweep_config + hypothesis + Idempotency-Key",
                     "POST /tick — first iteration runs immediately",
+                ],
+            ),
+            PlaybookRecipe(
+                name="hypothesis-first-lean",
+                when=(
+                    "Designing ANY new research line. The default method since "
+                    "2026-06-03 — supersedes brute-force grids. See the top-level "
+                    "'methodology' block."
+                ),
+                steps=[
+                    "Pick the top unworked, data-ready hypothesis with a real "
+                    "economic premium (docs/RESEARCH_METHODOLOGY.md backlog H1–H5).",
+                    "POST /journal entry_type=HYPOTHESIS (status=ACTIVE): pre-register "
+                    "WHY the premium exists + the harvest mechanism + a LEAN test "
+                    "(a few motivated param combos, NOT a Cartesian grid).",
+                    "Prefer ORTHOGONAL signals (funding/carry/dispersion/flow/vol — "
+                    "e.g. the new btc_dvol_*/eth_dvol_* implied-vol features) over "
+                    "price-action re-skins the Signal Pool would reject as "
+                    "near-substitutes.",
+                    "POST /null-screen first; enqueue a FOCUSED sweep only on "
+                    "EDGE_PRESENT / INCONCLUSIVE.",
+                    "Treat ANY SIGNIFICANT_EDGE as provisional until a cost-aware "
+                    "backtest confirms it — gross PnL overstates high-turnover "
+                    "survivors.",
+                    "On NO_EDGE: journal the falsification and MOVE ON; do not "
+                    "re-grid the dead hypothesis.",
                 ],
             ),
             PlaybookRecipe(

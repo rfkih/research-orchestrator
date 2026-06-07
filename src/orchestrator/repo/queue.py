@@ -35,6 +35,7 @@ async def list_queue(
     *,
     status: str | None,
     strategy_code: str | None,
+    final_verdict: str | None = None,
     after_created_time: datetime | None,
     after_id: str | None,
     limit: int,
@@ -47,6 +48,11 @@ async def list_queue(
     if strategy_code is not None:
         args.append(strategy_code)
         where.append(f"strategy_code = ${len(args)}")
+    if final_verdict is not None:
+        # Server-side so callers (e.g. the walk-forward-candidate panel) don't
+        # post-filter a truncated page and silently drop qualifying rows.
+        args.append(final_verdict)
+        where.append(f"final_verdict = ${len(args)}")
     if after_created_time is not None and after_id is not None:
         # Strict-greater on (created_time, queue_id) — matches the order-by
         # below so the next page is contiguous and stable under inserts.

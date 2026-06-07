@@ -97,7 +97,7 @@ async def _active_members(conn: asyncpg.Connection) -> list[dict[str, Any]]:
           FROM signal_pool
          WHERE status = 'active'
            AND (admission_metrics->>'kind' IS NULL
-                OR admission_metrics->>'kind' = 'signal_pool')
+                OR admission_metrics->>'kind' IN ('signal_pool', 'stream'))
         """
     )
     return [

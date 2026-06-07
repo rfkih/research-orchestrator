@@ -19,6 +19,7 @@ from uuid import UUID
 import asyncpg
 
 from ..repo import trades as trades_repo
+from .analyze import probabilistic_sharpe_ratio
 from .portfolio import daily_returns_from_trades
 from .specialists.portfolio_math import (
     hrp_weights,
@@ -250,6 +251,55 @@ async def _returns_for_run(conn: asyncpg.Connection, backtest_run_id: UUID) -> d
     return daily_returns_from_trades(trades, float(ic or 100.0))
 
 
+# Archetypes whose return profile is a market-neutral STREAM (not trade-based).
+# Their member returns come from the clean stream computation, never from trades
+# (a carry is ~1 trade → daily_returns_from_trades would give a single point).
+_STREAM_ARCHETYPES = {"funding_carry"}
+
+
+async def _is_stream_strategy(conn: asyncpg.Connection, strategy_code: str) -> bool:
+    arch = await conn.fetchval(
+        "SELECT archetype FROM strategy_definition "
+        "WHERE strategy_code = $1 AND is_deleted = FALSE LIMIT 1",
+        strategy_code,
+    )
+    return arch in _STREAM_ARCHETYPES
+
+
+async def carry_daily_returns(
+    conn: asyncpg.Connection, symbol: str, *, trail_periods: int = 21
+) -> dict[date, float]:
+    """Clean delta-neutral daily-return series for the funding carry — the funding
+    accrued on the held (receiving) side, the spot hedge cancelling price.
+
+    side = sign(trailing funding average): short (receive +funding) when the regime
+    is positive, long (receive -funding) when negative. PIT-safe: the side at event
+    *i* uses only the PRIOR ``trail_periods`` events (a ~7-day, 21×8h window — an
+    approximation of the engine's ``funding_rate_7d_avg``; the side rarely differs for
+    a net-positive-funding symbol). Unit-notional fraction, so the Sharpe is scale-
+    invariant. This is the series a real hedged carry actually earns daily — NOT the
+    price-noisy close-only backtest equity curve.
+    """
+    rows = await conn.fetch(
+        "SELECT funding_time, funding_rate FROM funding_rate_history "
+        "WHERE symbol = $1 ORDER BY funding_time",
+        symbol,
+    )
+    rates = [float(r["funding_rate"]) for r in rows]
+    by_day: dict[date, float] = {}
+    for i, r in enumerate(rows):
+        rate = rates[i]
+        if i > 0:
+            lo = max(0, i - trail_periods)
+            avg = sum(rates[lo:i]) / (i - lo)
+        else:
+            avg = rate
+        side = 1.0 if avg >= 0 else -1.0
+        d = r["funding_time"].date()
+        by_day[d] = by_day.get(d, 0.0) + side * rate
+    return by_day
+
+
 async def _active_members_returns(
     conn: asyncpg.Connection, *, exclude_iteration: UUID | None = None
 ) -> dict[str, dict[date, float]]:
@@ -265,23 +315,120 @@ async def _active_members_returns(
         "SELECT strategy_code, symbol, interval_name, iteration_id "
         "FROM signal_pool WHERE status = 'active' "
         "AND (admission_metrics->>'kind' IS NULL "
-        "OR admission_metrics->>'kind' = 'signal_pool')"
+        "OR admission_metrics->>'kind' IN ('signal_pool', 'stream'))"
     )
     out: dict[str, dict[date, float]] = {}
     for m in members:
         if exclude_iteration is not None and m["iteration_id"] == exclude_iteration:
             continue
-        run_id = await conn.fetchval(
-            "SELECT backtest_run_id FROM research_iteration_log WHERE iteration_id = $1",
-            m["iteration_id"],
-        )
-        if run_id is None:
-            continue
-        series = await _returns_for_run(conn, run_id)
+        # Stream-type members (carry) get the clean funding series, NOT trades — a
+        # ~1-trade carry through daily_returns_from_trades is a single useless point.
+        if await _is_stream_strategy(conn, m["strategy_code"]):
+            series = await carry_daily_returns(conn, m["symbol"])
+        else:
+            run_id = await conn.fetchval(
+                "SELECT backtest_run_id FROM research_iteration_log WHERE iteration_id = $1",
+                m["iteration_id"],
+            )
+            if run_id is None:
+                continue
+            series = await _returns_for_run(conn, run_id)
         if series:
             key = f"{m['strategy_code']}:{m['symbol']}:{m['interval_name']}"
             out[key] = series
     return out
+
+
+# ── Stream-validity admission (market-neutral streams: carry / basis / vol) ──
+#
+# A market-neutral carry is a ~1-trade stream — it can never clear the trade-count
+# V11 bar (n>=100, PF-CI, DSR), so the standard SIGNIFICANT_EDGE gate rejects it
+# even though its RETURN STREAM is exactly what the pool wants. This path validates
+# such a stream on its daily-return SERIES instead of its trade count. Operator-
+# approved methodology extension (2026-06-04); the standard trade-count gate is
+# UNCHANGED — this is an additive lane for strategies flagged stream-type.
+
+STREAM_PSR_THRESHOLD = 0.95  # mirrors the DSR significance bar
+STREAM_MIN_OBS = 252         # ~1 year of daily observations
+
+
+def _skew_kurt(vals: list[float]) -> tuple[float, float]:
+    """Sample skewness + (raw) kurtosis; (0, 3) — Gaussian — for degenerate input."""
+    n = len(vals)
+    if n < 4:
+        return 0.0, 3.0
+    mean = sum(vals) / n
+    m2 = sum((v - mean) ** 2 for v in vals) / n
+    if m2 == 0:
+        return 0.0, 3.0
+    m3 = sum((v - mean) ** 3 for v in vals) / n
+    m4 = sum((v - mean) ** 4 for v in vals) / n
+    return m3 / (m2 ** 1.5), m4 / (m2 ** 2)
+
+
+STREAM_MIN_YEAR_DAYS = 90  # a calendar year needs >= this many obs to be judged
+
+
+def stream_sharpe_validity(
+    daily_returns: dict[date, float],
+    *,
+    psr_threshold: float = STREAM_PSR_THRESHOLD,
+    min_obs: int = STREAM_MIN_OBS,
+    min_year_days: int = STREAM_MIN_YEAR_DAYS,
+) -> dict[str, Any]:
+    """Validity bar for a market-neutral RETURN STREAM that can't be trade-count-
+    graded (carry/basis/vol; n_trades≈1). Validates on the daily-return series:
+
+      1. **Enough history** — >= ``min_obs`` daily observations.
+      2. **Significant positive Sharpe** — PSR (Bailey & López de Prado 2014, accounts
+         for skew/kurtosis) >= ``psr_threshold``. The Sharpe is distinguishable from 0.
+      3. **Stationarity** — positive cumulative return in EVERY calendar year. This is
+         the 'positive every year' hallmark that separates a real stationary premium
+         (funding carry) from a regime-dependent one (FCARRY: 2022 only). It is the
+         robustness guard, since PSR on a daily series is optimistic under the
+         autocorrelation funding regimes exhibit.
+
+    Returns the verdict + diagnostics. Does NOT decide marginal contribution — that
+    stays the existing ``marginal_sharpe_contribution`` step, identical for streams.
+    """
+    days = sorted(daily_returns)
+    n = len(days)
+    if n < min_obs:
+        return {"valid": False, "reason": "insufficient_history", "n_obs": n}
+    vals = [daily_returns[d] for d in days]
+    mean = sum(vals) / n
+    var = sum((v - mean) ** 2 for v in vals) / (n - 1)
+    sd = var ** 0.5
+    if sd == 0:
+        return {"valid": False, "reason": "zero_variance", "n_obs": n}
+    sr = mean / sd  # per-day Sharpe (PSR consumes the per-observation Sharpe)
+    skew, kurt = _skew_kurt(vals)
+    psr = probabilistic_sharpe_ratio(sr, n, skew, kurt)
+
+    # Stationarity over CALENDAR YEARS — but only judge years with enough data.
+    # Thin boundary years (a 1-week first year, a 2-month last year) are statistically
+    # meaningless for "positive every year" and must not gate the verdict.
+    by_year: dict[int, float] = {}
+    by_year_days: dict[int, int] = {}
+    for d in days:
+        by_year[d.year] = by_year.get(d.year, 0.0) + daily_returns[d]
+        by_year_days[d.year] = by_year_days.get(d.year, 0) + 1
+    judged_years = {y: r for y, r in by_year.items() if by_year_days[y] >= min_year_days}
+    years_positive = bool(judged_years) and all(v > 0 for v in judged_years.values())
+
+    psr_ok = psr is not None and psr >= psr_threshold
+    valid = psr_ok and years_positive
+    reason = "valid" if valid else ("psr_below_threshold" if not psr_ok else "not_positive_every_year")
+    return {
+        "valid": valid,
+        "reason": reason,
+        "n_obs": n,
+        "psr": round(psr, 4) if psr is not None else None,
+        "ann_sharpe": round(sr * (_TRADING_DAYS ** 0.5), 3),
+        "years_positive": years_positive,
+        "judged_years": sorted(judged_years),
+        "by_year_return": {str(y): round(v, 6) for y, v in sorted(by_year.items())},
+    }
 
 
 async def evaluate_admission(
@@ -319,6 +466,47 @@ async def evaluate_admission(
         "theta": theta,
         "ctx": ctx,
         "contribution": contribution,
+    }
+
+
+async def evaluate_stream_admission(
+    conn: asyncpg.Connection,
+    strategy_code: str,
+    symbol: str,
+    interval_name: str,
+    iteration_id: UUID,
+    *,
+    theta: float = DEFAULT_THETA,
+) -> dict[str, Any]:
+    """Admission for a market-neutral STREAM (carry/basis/vol) that can't be trade-
+    count-graded. Validates the CLEAN daily-return series via ``stream_sharpe_validity``
+    (PSR significance + positive-every-year stationarity) instead of SIGNIFICANT_EDGE,
+    then the SAME ``marginal_sharpe_contribution`` step. ``iteration_id`` is the
+    reference backtest (e.g. the carry's +4.8% run) used only as the signal_pool FK +
+    audit anchor — its trade-count verdict is intentionally bypassed for stream types.
+    Does NOT write; the API layer inserts on admit (idempotent + audited).
+    """
+    if not await _is_stream_strategy(conn, strategy_code):
+        return {"admit": False, "reason": "not_a_stream_strategy"}
+
+    candidate_returns = await carry_daily_returns(conn, symbol)
+    validity = stream_sharpe_validity(candidate_returns)
+    if not validity["valid"]:
+        return {"admit": False, "reason": validity["reason"], "validity": validity}
+
+    members = await _active_members_returns(conn, exclude_iteration=iteration_id)
+    contribution = marginal_sharpe_contribution(candidate_returns, members)
+    admit = contribution["marginal"] > theta
+    return {
+        "admit": admit,
+        "reason": "admitted" if admit else "marginal_below_theta",
+        "theta": theta,
+        "validity": validity,
+        "contribution": contribution,
+        "strategy_code": strategy_code,
+        "symbol": symbol,
+        "interval_name": interval_name,
+        "iteration_id": str(iteration_id),
     }
 
 
@@ -419,7 +607,7 @@ async def evaluate_members_for_eviction(
         "SELECT pool_id, strategy_code, symbol, interval_name "
         "FROM signal_pool WHERE status = 'active' "
         "AND (admission_metrics->>'kind' IS NULL "
-        "OR admission_metrics->>'kind' = 'signal_pool')"
+        "OR admission_metrics->>'kind' IN ('signal_pool', 'stream'))"
     )
     series = await _active_members_returns(conn)
     pool_id_by_key = {
