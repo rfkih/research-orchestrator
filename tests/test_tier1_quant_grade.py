@@ -514,10 +514,12 @@ def _trades_with_timestamps(n: int, hold_hours: float = 4.0) -> list[dict]:
     return out
 
 
-def test_analyze_run_uses_deployed_days_when_exit_times_present() -> None:
-    # 150 trades × 4h hold over a 365-day window = 25 deployed days.
-    # Deployed annualization should produce a much larger number than
-    # calendar annualization (365 days vs 25 days denominator).
+def test_analyze_run_annualizes_over_calendar_window_not_deployed_time() -> None:
+    # Operator decision 2026-06-07: V60 annualizes the geometric return over the
+    # CALENDAR window, NOT deployed time. A strategy deployed only a small
+    # fraction of the window (150 trades × 4h hold over a ~366-day window →
+    # deployed << window) must NOT have its CAGR inflated by the tiny deployed
+    # denominator (the old behaviour, which manufactured false V60 passes).
     run = {
         "start_time": datetime(2024, 1, 1),
         "end_time": datetime(2025, 1, 1),
@@ -528,18 +530,23 @@ def test_analyze_run_uses_deployed_days_when_exit_times_present() -> None:
     trades = _trades_with_timestamps(150, hold_hours=4)
     out = analyze_run(run, trades)
 
+    # deployed_days + capital_utilization are still surfaced as diagnostics.
     assert out["deployed_days"] is not None
     assert out["deployed_days"] < out["window_days"]
     assert out["capital_utilization_pct"] is not None
     assert out["capital_utilization_pct"] < 100.0
 
-    # Annualized on deployed days > annualized on calendar days
-    # because deployed_days < window_days so the exponent is larger.
+    # The reported annualized geom EQUALS the calendar-window annualization …
     calendar_annualized = annualize_geometric_return(25.0, out["window_days"])
-    deployed_annualized = out["annualized_geometric_return_pct_at_alloc_90"]
+    out_annualized = out["annualized_geometric_return_pct_at_alloc_90"]
+    assert out_annualized is not None and calendar_annualized is not None
+    assert out_annualized == pytest.approx(calendar_annualized, abs=1e-3)
+
+    # … and is NOT the (much larger) deployed-day extrapolation that would have
+    # falsely inflated it. This is the regression guard for the V60 fix.
+    deployed_annualized = annualize_geometric_return(25.0, out["deployed_days"])
     assert deployed_annualized is not None
-    assert calendar_annualized is not None
-    assert deployed_annualized > calendar_annualized
+    assert deployed_annualized > out_annualized * 2
 
 
 def test_analyze_run_falls_back_to_window_days_without_exit_times() -> None:
