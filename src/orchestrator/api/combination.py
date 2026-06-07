@@ -33,7 +33,7 @@ drive a real signal/forward series when it has one).
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -51,6 +51,18 @@ from .deps import get_agent_name, get_db_conn
 router = APIRouter(prefix="/combination", tags=["combination"])
 
 _MARKET_FACTOR = "MARKET"
+
+
+def _naive_utc(dt: datetime) -> datetime:
+    """Normalize a (possibly tz-aware) datetime to naive-UTC.
+
+    market_data.start_time / backtest_trade.entry_time are TIMESTAMP-without-tz
+    columns; binding a tz-aware datetime against them raises an asyncpg DataError
+    (→ unhandled 500). Pydantic parses a trailing ``Z`` into a tz-aware value, so
+    we strip the tz (converting to UTC first) before any DB read."""
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 class EvaluateBody(BaseModel):
@@ -153,6 +165,12 @@ async def evaluate(
     if cached is not None:
         return cached
 
+    # Normalize the window to naive-UTC BEFORE any DB read — body.start/end may be
+    # tz-aware (e.g. a trailing 'Z'), and the underlying TIMESTAMP-without-tz
+    # columns reject tz-aware binds with a 500. See _naive_utc.
+    start = _naive_utc(body.start)
+    end = _naive_utc(body.end)
+
     # 1. Resolve candidate run + strategy_code.
     backtest_run_id = body.backtest_run_id
     strategy_code = body.strategy_code
@@ -187,16 +205,16 @@ async def evaluate(
     # 2. Candidate calendar-daily equity returns (same path as hedging_gate).
     trades = await trades_repo.fetch_trades(conn, backtest_run_id)
     sparse = portfolio.daily_returns_from_trades(trades)
-    filled = pool_svc._calendar_fill(sparse, body.start.date(), body.end.date())
+    filled = pool_svc._calendar_fill(sparse, start.date(), end.date())
     # Re-key the calendar-filled list back onto dates for the date-aligned OLS.
     candidate_returns: dict[date, float] = {}
-    d = body.start.date()
+    d = start.date()
     for r in filled:
         candidate_returns[d] = r
         d = date.fromordinal(d.toordinal() + 1)
 
     # 3. Factors over the window.
-    factors = await factor_model.build_factors(conn, body.start, body.end)
+    factors = await factor_model.build_factors(conn, start, end)
 
     # 4. Neutralize.
     neut = factor_model.neutralize(candidate_returns, factors)

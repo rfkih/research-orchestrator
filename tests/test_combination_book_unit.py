@@ -47,6 +47,31 @@ def test_ic_too_few_points_guarded():
     assert out["sign"] == "0"
 
 
+def test_ic_drops_non_finite_pairs():
+    """A NaN/inf in either series must NOT silently corrupt the IC. The
+    offending pair is dropped; if too few finite pairs remain → sentinel."""
+    nan = float("nan")
+    # Only the (3.0, 3.0) pair is dropped (signal NaN); the rest are perfectly
+    # monotonic → IC stays a clean +1, NOT a silently-wrong value.
+    out = cb.information_coefficient([1.0, 2.0, nan, 4.0, 5.0],
+                                     [1.0, 2.0, 3.0, 4.0, 5.0])
+    assert round(out["ic"], 6) == 1.0
+    assert out["significant"] is True
+    assert out["sign"] == "+"
+
+
+def test_ic_inf_pairs_dropped_to_sentinel_when_too_thin():
+    """If dropping non-finite pairs leaves fewer than the min obs, return the
+    not-judgeable sentinel rather than a finite-but-wrong IC."""
+    inf = float("inf")
+    out = cb.information_coefficient([1.0, inf, inf, inf, 5.0],
+                                    [1.0, 2.0, 3.0, 4.0, 5.0])
+    # Only 2 finite pairs remain (< _IC_MIN_OBS) → sentinel.
+    assert out["significant"] is False
+    assert out["sign"] == "0"
+    assert out["ic"] == 0.0
+
+
 # ── admit ────────────────────────────────────────────────────────────────────
 def _series(base: float, n: int = 40, *, start: date = date(2024, 1, 1)) -> dict:
     """A simple low-variance daily series with a tiny deterministic wiggle."""

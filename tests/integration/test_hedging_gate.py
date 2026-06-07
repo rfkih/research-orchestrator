@@ -95,6 +95,33 @@ async def test_evaluate_returns_composite_dict(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_evaluate_forces_daily_benchmark_interval(db_conn):
+    """The buy-hold benchmark must ALWAYS be fetched at the daily interval,
+    regardless of the strategy ``interval`` the caller passes — otherwise the
+    sqrt(252)/365-day annualisations in buy_hold_metrics are silently wrong.
+
+    Only DAILY bars are seeded; calling evaluate with a NON-daily interval must
+    still produce real benchmark metrics (proving it fetched "1d", not "4h")."""
+    from orchestrator.services import hedging_gate
+    symbol = "BTCUSDT"
+    start = datetime(2024, 2, 1)
+    n = 90
+    await _seed_volatile_buyhold(db_conn, symbol=symbol, start=start, n_days=n)
+    run_id = uuid.uuid4()
+    await _seed_trades(db_conn, run_id, start=start, daily_pnls=[0.5] * n)
+    end = start + timedelta(days=n)
+    out = await hedging_gate.evaluate(
+        db_conn, backtest_run_id=run_id, symbol=symbol,
+        interval="4h",  # NOT daily — must be ignored for the benchmark fetch
+        start=start, end=end,
+    )
+    # Daily bars exist, so the forced "1d" fetch finds them → real metrics.
+    assert out["benchmark"]["cagr_pct"] is not None
+    assert out["benchmark"]["sharpe"] is not None
+    assert out["benchmark"]["max_drawdown_pct"] is not None
+
+
+@pytest.mark.asyncio
 async def test_evaluate_superior_strategy_passes(db_conn):
     from orchestrator.services import hedging_gate
     symbol = "ETHUSDT"

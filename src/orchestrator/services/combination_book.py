@@ -82,8 +82,19 @@ def information_coefficient(
     if n < _IC_MIN_OBS:
         return {"ic": 0.0, "significant": False, "sign": "0"}
 
-    a = np.asarray(signal[:n], dtype=float)
-    b = np.asarray(fwd_returns[:n], dtype=float)
+    # Drop non-finite (NaN/inf) pairs BEFORE ranking — a single NaN/inf in either
+    # series otherwise yields a finite-but-wrong IC (NaN sorts unpredictably; inf
+    # poisons the rank correlation) rather than a not-judgeable sentinel.
+    pairs = [
+        (s, f)
+        for s, f in zip(signal[:n], fwd_returns[:n])
+        if math.isfinite(s) and math.isfinite(f)
+    ]
+    if len(pairs) < _IC_MIN_OBS:
+        return {"ic": 0.0, "significant": False, "sign": "0"}
+    n = len(pairs)
+    a = np.asarray([s for s, _ in pairs], dtype=float)
+    b = np.asarray([f for _, f in pairs], dtype=float)
     ra = _rank(a)
     rb = _rank(b)
     sd_a = ra.std()

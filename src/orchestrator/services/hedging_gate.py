@@ -55,8 +55,21 @@ def _sharpe(rets: list[float]) -> float | None:
     return (mu / sd) * math.sqrt(TRADING_DAYS)
 
 
+# The buy-hold benchmark is ALWAYS evaluated on DAILY bars: _sharpe annualises
+# with sqrt(252) and CAGR divides by len/365, both of which assume one
+# observation per day. Fetching the benchmark at a non-daily interval would make
+# those annualisations silently wrong.
+_BENCHMARK_INTERVAL = "1d"
+
+
 def buy_hold_metrics(closes: list[tuple[date, float]]) -> dict[str, Any]:
-    """CAGR%, annualised Sharpe, maxDD% of holding the underlying."""
+    """CAGR%, annualised Sharpe, maxDD% of holding the underlying.
+
+    Precondition: ``closes`` MUST be a DAILY series (one bar per calendar day).
+    The Sharpe (sqrt(252)) and CAGR (len/365) annualisations assume daily bars;
+    passing intraday closes yields wrong annualised metrics. Callers fetch the
+    benchmark at ``_BENCHMARK_INTERVAL`` ("1d") regardless of the strategy's own
+    interval."""
     px = [c for _, c in closes]
     if len(px) < 2:
         return {"cagr_pct": None, "sharpe": None, "max_drawdown_pct": None}
@@ -293,9 +306,13 @@ async def evaluate(
 
     Returns ``{passed, decision, significance, benchmark, strategy}``.
     """
-    # 1. Buy-hold benchmark from the underlying's daily closes.
+    # 1. Buy-hold benchmark from the underlying's daily closes. The benchmark is
+    #    ALWAYS daily — buy_hold_metrics annualises with sqrt(252)/365-day-year,
+    #    which assume one bar per day — so force "1d" REGARDLESS of the strategy's
+    #    own ``interval`` (the live caller passes "1d" today, but this keeps the
+    #    interval-agnostic signature defensive).
     closes = await market_data.fetch_daily_closes(
-        conn, symbol=symbol, interval=interval, start=start, end=end
+        conn, symbol=symbol, interval=_BENCHMARK_INTERVAL, start=start, end=end
     )
     bench = buy_hold_metrics(closes)
 

@@ -49,7 +49,14 @@ FACTOR_SYMBOLS: list[str] = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSD
 
 # BTC is the MARKET proxy; its DVOL is the VOL proxy.
 _MARKET_SYMBOL = "BTCUSDT"
-_FUNDING_SERIES_ID = "funding_rate"
+# Funding rows are written by ingest under a PER-SYMBOL series_id
+# (``binance_funding_rate_{symbol_lower}``; see blackheart-ingest
+# sources/binance_macro.py). A single literal "funding_rate" matches ZERO prod
+# rows → CARRY silently dropped. Build the id per symbol instead.
+def _funding_series_id(symbol: str) -> str:
+    return f"binance_funding_rate_{symbol.lower()}"
+
+
 _DVOL_SERIES_ID = "deribit_btc_dvol"
 _DAILY_INTERVAL = "1d"
 
@@ -396,7 +403,8 @@ async def build_factors(
     for sym in FACTOR_SYMBOLS:
         try:
             rows = await macro_raw.fetch_series(
-                conn, series_id=_FUNDING_SERIES_ID, symbol=sym, start=start, end=end
+                conn, series_id=_funding_series_id(sym), symbol=sym,
+                start=start, end=end,
             )
         except Exception:  # pragma: no cover - defensive
             logger.exception("factor build: funding fetch failed for %s", sym)

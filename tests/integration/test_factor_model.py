@@ -73,12 +73,14 @@ async def test_build_factors_returns_four_series(db_conn):
     for sym, g in drifts.items():
         await _seed_closes(db_conn, symbol=sym, start=start,
                            prices=[100.0 * (g ** d) for d in range(n)])
-    # Per-symbol funding (CARRY sort key) — A-high through E-low.
+    # Per-symbol funding (CARRY sort key) — A-high through E-low. Seed with the
+    # REAL prod series_id (binance_funding_rate_{symbol_lower}), which is what
+    # the ingest source writes; the factor model must read that exact id.
     fundings = {"BTCUSDT": 0.03, "ETHUSDT": 0.02, "SOLUSDT": 0.01,
                 "BNBUSDT": -0.01, "XRPUSDT": -0.02}
     for sym, f in fundings.items():
-        await _seed_macro(db_conn, series_id="funding_rate", symbol=sym,
-                          start=start, values=[f] * n)
+        await _seed_macro(db_conn, series_id=f"binance_funding_rate_{sym.lower()}",
+                          symbol=sym, start=start, values=[f] * n)
     # BTC DVOL (VOL) — single series, varying so daily change is nonzero.
     await _seed_macro(db_conn, series_id="deribit_btc_dvol", symbol="BTCUSDT",
                       start=start, values=[50.0 + (d % 5) for d in range(n)])
@@ -99,6 +101,56 @@ async def test_build_factors_returns_four_series(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_carry_uses_real_prod_series_id(db_conn):
+    """Regression: funding rows are written by ingest under the per-symbol id
+    ``binance_funding_rate_{symbol_lower}``. The factor model must read THAT id —
+    a hard-coded literal ``funding_rate`` matches zero prod rows and silently
+    drops CARRY. With the real ids seeded, CARRY must be INCLUDED."""
+    from orchestrator.services import factor_model as fm
+
+    start = datetime(2024, 8, 1)  # naive: market_data.start_time is TIMESTAMP
+    n = 40
+    drifts = {"BTCUSDT": 1.03, "ETHUSDT": 1.02, "SOLUSDT": 1.01,
+              "BNBUSDT": 0.99, "XRPUSDT": 0.98}
+    for sym, g in drifts.items():
+        await _seed_closes(db_conn, symbol=sym, start=start,
+                           prices=[100.0 * (g ** d) for d in range(n)])
+    fundings = {"BTCUSDT": 0.03, "ETHUSDT": 0.02, "SOLUSDT": 0.01,
+                "BNBUSDT": -0.01, "XRPUSDT": -0.02}
+    for sym, f in fundings.items():
+        await _seed_macro(db_conn, series_id=f"binance_funding_rate_{sym.lower()}",
+                          symbol=sym, start=start, values=[f] * n)
+
+    end = start + timedelta(days=n)
+    out = await fm.build_factors(db_conn, start, end)
+    assert "CARRY" in out, "CARRY must be built from the real prod funding series_id"
+    assert out["CARRY"], "CARRY series must be non-empty"
+
+
+@pytest.mark.asyncio
+async def test_carry_omitted_when_funding_under_legacy_id_only(db_conn):
+    """Negative control: funding seeded ONLY under the OLD literal ``funding_rate``
+    (not the real per-symbol id) → CARRY is omitted, proving the model no longer
+    reads the wrong id."""
+    from orchestrator.services import factor_model as fm
+
+    start = datetime(2024, 9, 1)
+    n = 40
+    drifts = {"BTCUSDT": 1.03, "ETHUSDT": 1.02, "SOLUSDT": 1.01,
+              "BNBUSDT": 0.99, "XRPUSDT": 0.98}
+    for sym, g in drifts.items():
+        await _seed_closes(db_conn, symbol=sym, start=start,
+                           prices=[100.0 * (g ** d) for d in range(n)])
+    for sym in drifts:
+        await _seed_macro(db_conn, series_id="funding_rate", symbol=sym,
+                          start=start, values=[0.01] * n)
+
+    end = start + timedelta(days=n)
+    out = await fm.build_factors(db_conn, start, end)
+    assert "CARRY" not in out
+
+
+@pytest.mark.asyncio
 async def test_build_factors_omits_vol_when_dvol_absent(db_conn):
     """Degrade gracefully: no DVOL rows → VOL omitted, other factors survive,
     no crash."""
@@ -114,8 +166,8 @@ async def test_build_factors_omits_vol_when_dvol_absent(db_conn):
     fundings = {"BTCUSDT": 0.03, "ETHUSDT": 0.02, "SOLUSDT": 0.01,
                 "BNBUSDT": -0.01, "XRPUSDT": -0.02}
     for sym, f in fundings.items():
-        await _seed_macro(db_conn, series_id="funding_rate", symbol=sym,
-                          start=start, values=[f] * n)
+        await _seed_macro(db_conn, series_id=f"binance_funding_rate_{sym.lower()}",
+                          symbol=sym, start=start, values=[f] * n)
     # NB: no deribit_btc_dvol rows seeded.
 
     end = start + timedelta(days=n)

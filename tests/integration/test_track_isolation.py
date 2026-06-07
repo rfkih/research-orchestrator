@@ -238,6 +238,32 @@ async def test_claim_no_track_is_global(db_conn):
 
 
 @pytest.mark.asyncio
+async def test_claim_trading_picks_up_untagged_legacy_row(db_conn):
+    """A legacy PENDING row with NO 'track' key in sweep_config must be claimable
+    by a track='trading' claim (treated as trading) — and NOT by a hedging claim.
+
+    Without this, legacy untagged rows strand: a trading drain would skip them
+    forever once dual-track claims are scoped."""
+    from orchestrator.repo import queue_write
+
+    # Untagged row: track=None means insert_queue does NOT stamp a 'track' key.
+    await _insert_queue(
+        db_conn,
+        strategy_code="TRK_LEGACY",
+        sweep_config={"strategy": "grid", "params": []},  # no 'track'
+        track=None,
+    )
+
+    # A hedging claim must NOT pick it up.
+    h = await queue_write.claim_next(db_conn, track="hedging")
+    assert h is None, "untagged row must not be claimed as hedging"
+
+    # A trading claim treats the untagged row as trading and claims it.
+    t = await queue_write.claim_next(db_conn, track="trading")
+    assert t is not None and t["strategy_code"] == "TRK_LEGACY"
+
+
+@pytest.mark.asyncio
 async def test_queue_counts_scoped_to_track(db_conn):
     await _insert_queue(
         db_conn,

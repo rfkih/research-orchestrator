@@ -135,7 +135,9 @@ async def claim_next(
                    early_stop_on_no_edge, require_walk_forward
             FROM research_queue
             WHERE status = 'PENDING'
-              AND ($1::text IS NULL OR sweep_config->>'track' = $1)
+              AND ($1::text IS NULL
+                   OR sweep_config->>'track' = $1
+                   OR ($1 = 'trading' AND sweep_config->>'track' IS NULL))
             ORDER BY priority ASC, created_time ASC
             LIMIT 1
             FOR UPDATE SKIP LOCKED

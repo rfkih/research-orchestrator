@@ -233,7 +233,7 @@ async def _seed_macro(db_conn):
     for i in range(_WIN_DAYS):
         et = _WIN_START + timedelta(days=i)
         for j, s in enumerate(syms):
-            rows.append(("binance_macro", "funding_rate", s, et,
+            rows.append(("binance_macro", f"binance_funding_rate_{s.lower()}", s, et,
                          0.0001 * (j + 1) + 0.00001 * math.sin(i / 5.0)))
         rows.append(("deribit", "deribit_btc_dvol", None, et,
                      60.0 + 5.0 * math.sin(i / 6.0)))
@@ -333,6 +333,57 @@ async def test_evaluate_real_alpha_runs_full_admit_path(db_conn, integration_cli
     assert "admission" in out and "reasons" in out["admission"]
     # Idiosyncratic alpha should be significant for this construction.
     assert out["admission"]["reasons"]["alpha_significant"] is True
+
+
+@pytest.mark.asyncio
+async def test_evaluate_tz_aware_window_matches_naive(db_conn, integration_client):
+    """A tz-aware (``...Z``) start/end must be normalized to naive-UTC BEFORE any
+    DB read.
+
+    The underlying columns are TIMESTAMP-without-tz; binding a tz-aware datetime
+    raises asyncpg DataError. In build_factors the per-symbol fetch is wrapped in
+    try/except, so without the fix the error is SWALLOWED — every factor silently
+    drops, neutralization degrades to insufficient_obs, and the verdict is wrong
+    (a masked failure, not an obvious 500). With the fix the tz-aware window must
+    produce the SAME factors_used as the naive window. Asserts both: 200 AND the
+    factor set is non-empty / equal to the naive run."""
+    await _seed_market_data(db_conn)
+    await _seed_macro(db_conn)
+    run_id = uuid4()
+    await _seed_candidate_trades(
+        db_conn, run_id=run_id, daily_return_fn=lambda i: 0.3 * _btc_ret(i) + 0.004
+    )
+
+    def _body(start_s, end_s):
+        return {
+            "backtest_run_id": str(run_id),
+            "strategy_code": "CMB_TZ",
+            "symbol": "BTCUSDT",
+            "interval": "1d",
+            "start": start_s,
+            "end": end_s,
+            "expected_sign": "+",
+            "track": "trading",
+        }
+
+    naive = integration_client.post(
+        "/combination/evaluate",
+        json=_body(_WIN_START.isoformat(), _WIN_END.isoformat()),
+        headers=_AUTH_HEADERS,
+    )
+    assert naive.status_code == 200, naive.text
+    naive_factors = naive.json()["factors_used"]
+    assert naive_factors, "naive window should build factors"
+
+    # Tz-aware (Z) bounds — the regression trigger.
+    tz = integration_client.post(
+        "/combination/evaluate",
+        json=_body(_WIN_START.isoformat() + "Z", _WIN_END.isoformat() + "Z"),
+        headers=_AUTH_HEADERS,
+    )
+    assert tz.status_code == 200, tz.text
+    # The factor set must NOT have silently collapsed under the tz-aware window.
+    assert tz.json()["factors_used"] == naive_factors
 
 
 @pytest.mark.asyncio
