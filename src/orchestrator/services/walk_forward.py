@@ -29,11 +29,93 @@ from ..config import Settings
 from ..errors import OrchestratorError
 from ..infra.db import Database
 from ..logging import get_logger
+from ..repo import hypothesis_audit as audit_repo
 from ..repo import walk_forward as wf_repo
 from . import sweep
+from .analyze import (
+    DAYS_PER_YEAR,
+    deflated_sharpe_ratio,
+    excess_kurtosis,
+    sharpe_ratio,
+    skewness,
+)
 from .tick import _fetch_run_metrics, _poll_backtest_status, _resolve_account_strategy
 
 log = get_logger(__name__)
+
+# ── Frequency-aware validation track (2026-06-07) ─────────────────────────────
+# Low-turnover strategies (e.g. 1d trend hedges) cannot produce the trade
+# counts the trade-level fold statistics require — a daily long/flat hedge
+# trades a handful of times per year by design. Penalising it on trade count
+# is a mis-calibration, not a real failure. The low-frequency track validates
+# such strategies on the OUT-OF-SAMPLE daily-equity return series instead.
+#
+# HONESTY GUARANTEE: every statistical *bar* is identical to the standard
+# (high-frequency) path — the DSR significance bar stays at the V11 0.95, the
+# positive-fold consistency bar stays at 60%. ONLY the unit of observation
+# changes: daily equity returns (n≈bars) instead of trades, and calendar-fold
+# return instead of per-fold profit factor. No threshold is loosened; a
+# high-turnover strategy is routed to the existing path and is unaffected.
+LOW_FREQ_MAX_TRADES_PER_YEAR = 52   # ≥ this annualised trade rate → standard path
+LOW_FREQ_MIN_TOTAL_TRADES = 8       # floor: guards against 1–2 lucky entries
+LOW_FREQ_MIN_DAILY_OBS = 30         # DSR needs ≥30 return observations to be valid
+LOW_FREQ_DSR_BAR = 0.95             # == V11 DSR bar, measured on the equity curve
+LOW_FREQ_FOLD_POSITIVE_PCT = 60.0   # == high-freq pf_positive_pct consistency bar
+LOW_FREQ_RETURN_CV_MAX = 2.5        # fold-return coeff. of variation → INCONSISTENT
+_LOW_FREQ_INTERVALS = {"1d", "3d", "1w"}  # structurally low-turnover bar sizes
+
+
+def annualized_trade_rate(n_trades: int, window_days: float) -> float:
+    """Trades per 365-day year over a window. ``inf`` for a zero-length
+    window so a degenerate window never qualifies as low-frequency by
+    accident."""
+    if window_days <= 0:
+        return float("inf")
+    return n_trades * DAYS_PER_YEAR / window_days
+
+
+def is_low_frequency(interval_name: str, n_trades: int, window_days: float) -> bool:
+    """True when a strategy should be validated on the equity-curve track.
+
+    Qualifies if the bar size is structurally low-turnover (≥ daily) OR the
+    realised annualised trade rate is below ``LOW_FREQ_MAX_TRADES_PER_YEAR``.
+    """
+    if interval_name in _LOW_FREQ_INTERVALS:
+        return True
+    return annualized_trade_rate(n_trades, window_days) < LOW_FREQ_MAX_TRADES_PER_YEAR
+
+
+def _lag1_autocorr(returns: list[float]) -> float:
+    """Lag-1 autocorrelation of a return series. 0.0 for degenerate input."""
+    n = len(returns)
+    if n < 3:
+        return 0.0
+    mean = sum(returns) / n
+    den = sum((r - mean) ** 2 for r in returns)
+    if den <= 0:
+        return 0.0
+    num = sum((returns[i] - mean) * (returns[i - 1] - mean) for i in range(1, n))
+    return num / den
+
+
+def effective_sample_size(returns: list[float]) -> float:
+    """Autocorrelation-adjusted effective sample size (Lo 2002).
+
+    The deflated-Sharpe standard error assumes i.i.d. observations. A 1d
+    long/flat hedge's daily returns are NOT independent — flat stretches are
+    runs of ~zero and held stretches are serially correlated — so the raw
+    day count would overstate the true number of independent bets and inflate
+    significance. We discount by lag-1 autocorrelation ρ via the AR(1)
+    variance-of-the-mean factor ``n_eff = n·(1-ρ)/(1+ρ)``. Negative ρ is not
+    credited (clamped to 0 → no inflation above n); ρ is capped at 0.99 so
+    n_eff can't collapse to zero. This is what keeps the equity-curve DSR
+    honest rather than a rubber stamp.
+    """
+    n = len(returns)
+    if n < 3:
+        return float(n)
+    rho = min(max(_lag1_autocorr(returns), 0.0), 0.99)
+    return n * (1.0 - rho) / (1.0 + rho)
 
 
 def _add_months(d: date, months: int) -> date:
@@ -126,6 +208,87 @@ def stability_verdict(agg: dict[str, Any]) -> str:
     if pf_std > 1.5:
         return "INCONSISTENT"
     return "ROBUST"
+
+
+def low_freq_stability_verdict(
+    *,
+    oos_daily_returns: list[float],
+    fold_returns_pct: list[float],
+    total_trades: int,
+    n_trials: int,
+) -> tuple[str, dict[str, Any]]:
+    """Equity-curve stability verdict for low-turnover strategies.
+
+    Mirrors the *role* of ``stability_verdict`` (a consistency gate) but on
+    the out-of-sample daily-equity return series, and additionally
+    establishes significance via the deflated Sharpe — for a low-frequency
+    strategy the trade-level DSR at iteration time was invalid (n_trades<30),
+    so the equity curve (n≈daily bars) is where significance is honestly
+    measured. Returns ``(verdict, metrics)`` where ``verdict`` is one of the
+    CHECK-constrained set {ROBUST, INCONSISTENT, INSUFFICIENT_EVIDENCE,
+    OVERFIT, NO_EDGE} so it persists into ``walk_forward_run`` unchanged.
+
+    Significance/consistency BARS are identical to the standard path
+    (DSR≥0.95, positive-fold≥60%); only the observation unit differs.
+    """
+    n_obs = len(oos_daily_returns)
+    n_folds = len(fold_returns_pct)
+    fold_pos_pct = (
+        round(100.0 * len([r for r in fold_returns_pct if r > 0]) / n_folds, 2)
+        if n_folds
+        else 0.0
+    )
+    fold_mean = statistics.fmean(fold_returns_pct) if fold_returns_pct else 0.0
+    fold_std = statistics.pstdev(fold_returns_pct) if n_folds > 1 else 0.0
+
+    sr = sharpe_ratio(oos_daily_returns, ann_factor=DAYS_PER_YEAR)
+    skew = skewness(oos_daily_returns)
+    kurt = excess_kurtosis(oos_daily_returns)  # excess — matches analyze_run
+    # Autocorrelation-adjusted effective N (Lo 2002): daily returns of a
+    # low-turnover hedge are serially dependent, so the DSR standard error
+    # must use the effective independent-observation count, not the raw day
+    # count. This is the difference between an honest gate and a rubber stamp.
+    n_eff = effective_sample_size(oos_daily_returns)
+    dsr = (
+        deflated_sharpe_ratio(
+            sr, int(n_eff), skew, kurt, n_trials, pnls=oos_daily_returns
+        )
+        if sr is not None and n_eff >= LOW_FREQ_MIN_DAILY_OBS
+        else None
+    )
+
+    metrics: dict[str, Any] = {
+        "validation_track": "LOW_FREQUENCY",
+        "oos_n_obs": n_obs,
+        "oos_n_eff": round(n_eff, 1),
+        "oos_autocorr_lag1": round(_lag1_autocorr(oos_daily_returns), 4),
+        "oos_sharpe": round(sr, 4) if sr is not None else None,
+        "dsr": round(dsr, 4) if dsr is not None else None,
+        "dsr_n_trials": int(max(1, n_trials)),
+        "fold_return_positive_pct": fold_pos_pct,
+        "fold_return_mean": round(fold_mean, 4),
+        "fold_return_std": round(fold_std, 4),
+        "total_trades": total_trades,
+        "dsr_bar": LOW_FREQ_DSR_BAR,
+    }
+
+    # 1. Not enough evidence to judge — too few trades or too few daily obs.
+    if total_trades < LOW_FREQ_MIN_TOTAL_TRADES or n_obs < LOW_FREQ_MIN_DAILY_OBS:
+        return "INSUFFICIENT_EVIDENCE", metrics
+    # 2. No directional edge across the out-of-sample folds.
+    if fold_mean <= 0:
+        return "NO_EDGE", metrics
+    # 3. Edge concentrated in too few calendar periods → overfit risk.
+    if fold_pos_pct < LOW_FREQ_FOLD_POSITIVE_PCT:
+        return "OVERFIT", metrics
+    # 4. Significance not established on the equity curve (same V11 0.95 bar).
+    if dsr is None or dsr < LOW_FREQ_DSR_BAR:
+        return "INSUFFICIENT_EVIDENCE", metrics
+    # 5. One fold carries the whole result — unstable across the cycle.
+    if fold_mean > 0 and (fold_std / fold_mean) > LOW_FREQ_RETURN_CV_MAX:
+        return "INCONSISTENT", metrics
+    # 6. Significant on the equity curve AND consistent across calendar folds.
+    return "ROBUST", metrics
 
 
 def _build_payload(
@@ -317,7 +480,47 @@ async def run_walk_forward(
         })
 
     agg = aggregate_folds(fold_results)
-    verdict = stability_verdict(agg)
+    total_trades = agg.get("total_trades_across_folds") or 0
+    window_days = (full_end - full_start).days
+
+    # Frequency-aware routing. A low-turnover strategy (e.g. a 1d trend
+    # hedge) is validated on the OOS daily-equity return series rather than
+    # trade-count fold statistics it can't satisfy by design. Same bars,
+    # different observation unit — see low_freq_stability_verdict.
+    low_freq = is_low_frequency(interval_name, total_trades, window_days)
+    if low_freq:
+        oos_daily_returns: list[float] = []
+        fold_returns_pct: list[float] = []
+        async with db.acquire() as conn:
+            for f in fold_results:
+                m = f.get("metrics")
+                if not m or f.get("error"):
+                    continue
+                if m.get("return_pct") is not None:
+                    fold_returns_pct.append(float(m["return_pct"]))
+                run_id = f.get("run_id")
+                if run_id:
+                    oos_daily_returns.extend(
+                        await wf_repo.fetch_fold_daily_returns(conn, run_id)
+                    )
+            n_trials = await audit_repo.count_data_universe_trials(
+                conn, instrument, interval_name
+            )
+        verdict, lf_metrics = low_freq_stability_verdict(
+            oos_daily_returns=oos_daily_returns,
+            fold_returns_pct=fold_returns_pct,
+            total_trades=total_trades,
+            n_trials=n_trials,
+        )
+        agg["validation_track"] = "LOW_FREQUENCY"
+        agg["low_freq"] = lf_metrics
+        # Persist the equity-curve evidence alongside the per-fold rows so
+        # the curator/operator can audit the verdict (fold_results is jsonb).
+        fold_results.append({"validation_summary": lf_metrics})
+    else:
+        verdict = stability_verdict(agg)
+        agg["validation_track"] = "STANDARD"
+
     pf = agg.get("pf") or {}
     ret = agg.get("return_pct") or {}
     sharpe = agg.get("sharpe") or {}
