@@ -133,14 +133,21 @@ async def _classify_from_market_data(
     - Timezone-safe: datetime subtraction wrapped via _tz_diff_s().
     """
     try:
+        # NOTE: real market_data columns are start_time/close_price/high_price/
+        # low_price (Flyway V1 baseline). They are aliased to the names the rest
+        # of this function reads (open_time/close/hl_range). A schema mismatch
+        # here was previously swallowed by the broad except below and surfaced as
+        # a benign "market_data unavailable" log → regime classification silently
+        # no-op'd in prod.
         rows = await conn.fetch(
             """
-            SELECT open_time, close,
-                   high - low AS hl_range
+            SELECT start_time AS open_time,
+                   close_price AS close,
+                   (high_price - low_price) AS hl_range
             FROM market_data
             WHERE symbol   = $1
               AND interval  = $2
-            ORDER BY open_time ASC
+            ORDER BY start_time ASC
             """,
             instrument,
             interval_name,
