@@ -69,6 +69,7 @@ _VALID_SORT_BY = {
     "annualized_return_pct", "profit_factor", "win_rate",
     "n_trades", "sharpe_ratio", "created_time", "updated_time",
 }
+_VALID_KIND = {"TRADING", "HEDGING"}
 _TIMESTAMP_SORTS = {"created_time", "updated_time"}
 
 
@@ -79,6 +80,10 @@ async def list_papers(
         description="Filter by status: WORKING_PAPER | FINALIZED",
     ),
     strategy_code: str | None = Query(None),
+    strategy_kind: str | None = Query(
+        None,
+        description="Filter by kind: TRADING | HEDGING (from strategy_definition.strategy_kind)",
+    ),
     instrument: str | None = Query(None, description="e.g. BTCUSDT"),
     interval_name: str | None = Query(None, description="e.g. 4H, 1H, 15m"),
     sort_by: str = Query(
@@ -101,6 +106,15 @@ async def list_papers(
             message=f"paper_status must be one of {sorted(_VALID_STATUS)}.",
             retryable=False,
         )
+    if strategy_kind is not None:
+        strategy_kind = strategy_kind.upper()
+        if strategy_kind not in _VALID_KIND:
+            raise OrchestratorError(
+                status_code=400,
+                error_code="bad_strategy_kind",
+                message=f"strategy_kind must be one of {sorted(_VALID_KIND)}.",
+                retryable=False,
+            )
     # Non-admins only ever see FINALIZED ("completed") papers — override any
     # requested status (incl. an explicit WORKING_PAPER) so the in-progress
     # drafts are never listed to regular users. Enforced server-side, so it
@@ -148,6 +162,7 @@ async def list_papers(
         conn,
         paper_status=paper_status,
         strategy_code=strategy_code,
+        strategy_kind=strategy_kind,
         instrument=instrument,
         interval_name=interval_name,
         after_created_time=after_created_time,

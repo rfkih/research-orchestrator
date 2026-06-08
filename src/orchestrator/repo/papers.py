@@ -57,6 +57,7 @@ async def list_papers(
     *,
     paper_status: str | None,
     strategy_code: str | None,
+    strategy_kind: str | None,
     instrument: str | None,
     interval_name: str | None,
     # Default (created_time) cursor
@@ -78,6 +79,15 @@ async def list_papers(
     if strategy_code is not None:
         args.append(strategy_code)
         where.append(f"rq.strategy_code = ${len(args)}")
+    if strategy_kind is not None:
+        # Kind is sourced from strategy_definition.strategy_kind (V153), the same
+        # single source the trading JVM's StrategyKindResolver reads. Codes with no
+        # definition row (or a null kind) default to TRADING, so a HEDGING filter
+        # never accidentally captures an unclassified paper.
+        args.append(strategy_kind.upper())
+        where.append(
+            f"COALESCE(UPPER(sd.strategy_kind), 'TRADING') = ${len(args)}"
+        )
     if instrument is not None:
         args.append(instrument)
         where.append(f"rq.instrument = ${len(args)}")
@@ -159,6 +169,7 @@ async def list_papers(
                rp.max_drawdown_pct,
                rp.sharpe_ratio,
                rq.strategy_code,
+               COALESCE(UPPER(sd.strategy_kind), 'TRADING') AS strategy_kind,
                rq.instrument,
                rq.interval_name,
                rq.final_verdict,
@@ -167,6 +178,7 @@ async def list_papers(
                rp.updated_time
         FROM research_paper rp
         JOIN research_queue  rq ON rq.queue_id = rp.queue_id
+        LEFT JOIN strategy_definition sd ON sd.strategy_code = rq.strategy_code
         WHERE {' AND '.join(where)}
         ORDER BY {sort_col} {direction} {nulls}, rp.created_time DESC, rp.paper_id DESC
         LIMIT ${len(args)}

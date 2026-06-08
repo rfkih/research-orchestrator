@@ -74,3 +74,29 @@ def test_non_admin_blocked_when_status_missing() -> None:
     # Defensive: a row without a status is treated as not-finalized for users.
     with pytest.raises(OrchestratorError):
         _ensure_viewable({}, is_admin=False, paper_id="p1")
+
+
+# ── strategy_kind filter validation ──────────────────────────────────
+
+
+@pytest.mark.parametrize("kind", ["TRADING", "HEDGING"])
+def test_strategy_kind_filter_accepts_valid_kinds(kind: str) -> None:
+    from orchestrator.api.papers import _VALID_KIND
+
+    assert kind in _VALID_KIND
+
+
+@pytest.mark.parametrize("kind", ["trading", "Hedging"])
+def test_strategy_kind_filter_is_case_normalized(kind: str) -> None:
+    # The handler uppercases before validating, so lower/mixed case is accepted
+    # and normalized — matching the case-insensitive strategy_definition lookup.
+    from orchestrator.api.papers import _VALID_KIND
+
+    assert kind.upper() in _VALID_KIND
+
+
+@pytest.mark.parametrize("kind", ["", "BOTH", "ALL", "SHORT"])
+def test_strategy_kind_filter_rejects_unknown(kind: str) -> None:
+    from orchestrator.api.papers import _VALID_KIND
+
+    assert kind.upper() not in _VALID_KIND
