@@ -144,34 +144,15 @@ async def update_audit_verdict(
     )
 
 
-async def count_cumulative_trials(
-    conn: asyncpg.Connection, strategy_code: str
-) -> int:
-    """COMPLETED trials for this strategy. Drives the ``n_trials`` argument
-    to ``deflated_sharpe_ratio``.
-
-    DEPRECATED (V93, S3-pending): scoping by strategy_code resets the
-    multiplicity counter every time the autonomous loop pivots to a new
-    archetype, which is exactly when selection-bias compounds. Prefer
-    ``count_data_universe_trials`` which scopes by (symbol, interval) and
-    matches the actual data universe the loop inspects. This function is
-    kept in place because tick.py still calls it; S3 swaps the caller.
-
-    iteration_id IS NOT NULL means the tick reached step 5 and wrote an
-    iteration_log row (see ``update_audit_verdict``). Crashed/aborted
-    audit rows (JVM offline, polling timeout, SIGKILL) are kept for
-    forensics but excluded — an infra failure isn't selection bias.
-
-    Callers must add 1 for the in-flight trial they're about to log;
-    the audit row inserted in step 3.5 has iteration_id=NULL until
-    step 5 backfills it.
-    """
-    val = await conn.fetchval(
-        "SELECT COUNT(*)::int FROM hypothesis_audit "
-        "WHERE strategy_code = $1 AND iteration_id IS NOT NULL",
-        strategy_code,
-    )
-    return int(val or 0)
+# REMOVED 2026-06-09: ``count_cumulative_trials(strategy_code)``. It scoped DSR
+# multiplicity by strategy_code, which RESET the selection-bias counter on every
+# archetype pivot — exactly when multiplicity compounds. The S3 swap to
+# ``count_data_universe_trials`` (scoped by symbol×interval) is fully live in
+# both callers (tick.py:556, walk_forward.py:506), so the per-strategy counter
+# was dead code. Deleted to prevent a future caller from re-introducing the
+# under-deflation bug. The (symbol, interval) data universe is the honest
+# family-wise count — it aggregates trials across ALL archetypes on the same
+# bars, which is the real multiple-comparisons surface.
 
 
 async def count_data_universe_trials(
@@ -190,9 +171,9 @@ async def count_data_universe_trials(
     IS NOT NULL`` so the planner can prove the query predicate implies the
     index predicate when $1 / $2 are non-NULL.
 
-    iteration_id IS NOT NULL semantics match ``count_cumulative_trials``:
-    crashed/aborted ticks are kept for forensics but don't count toward
-    multiplicity (an infra failure isn't selection bias).
+    iteration_id IS NOT NULL semantics: crashed/aborted ticks are kept for
+    forensics but don't count toward multiplicity (an infra failure isn't
+    selection bias).
 
     Callers must add 1 for the in-flight trial they're about to log;
     its audit row has iteration_id=NULL until step 5 backfills it.

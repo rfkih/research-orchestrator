@@ -73,6 +73,55 @@ async def list_queue(
     return [dict(r) for r in rows]
 
 
+async def list_walk_forward_backlog(
+    conn: asyncpg.Connection,
+    *,
+    track: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """PARKED SIGNIFICANT_EDGE candidates still awaiting walk-forward (2026-06-09).
+
+    Walk-forward is the gate's only out-of-sample step but it's a deliberate,
+    ~3h POST — so SIG_EDGE candidates accumulate in PARKED limbo, un-adjudicated
+    (the bottleneck behind Finding 2). This surfaces that backlog as a
+    first-class, drainable list so the loop/operator can drive it deliberately
+    rather than discovering 30 stuck rows by accident.
+
+    A PARKED row is a genuine walk-forward candidate iff it has NOT already been
+    walk-forwarded (``walk_forward_id IS NULL``) AND its terminal iteration was
+    ``SIGNIFICANT_EDGE``. Joining the iteration's statistical_verdict is the
+    STRUCTURAL discriminator — PARKED is also used for archetype/budget
+    exhaustion (INSUFFICIENT_EVIDENCE), which we must NOT surface as candidates.
+    No note-text parsing.
+
+    ``track`` filters on the originating sweep's ``sweep_config->>'track'`` so a
+    hedging drain doesn't pick up trading candidates (and vice-versa); NULL =
+    all tracks.
+    """
+    args: list[Any] = []
+    track_pred = ""
+    if track is not None:
+        args.append(track)
+        track_pred = f"AND (q.sweep_config->>'track' = ${len(args)})"
+    args.append(limit)
+    sql = f"""
+        SELECT q.queue_id, q.strategy_code, q.interval_name, q.instrument,
+               q.last_iteration_id, q.sweep_config->>'track' AS track,
+               q.iteration_number, q.created_time, q.completed_at, q.notes,
+               i.statistical_verdict, i.created_time AS iteration_time
+        FROM research_queue q
+        JOIN research_iteration_log i ON i.iteration_id = q.last_iteration_id
+        WHERE q.status = 'PARKED'
+          AND q.walk_forward_id IS NULL
+          AND i.statistical_verdict = 'SIGNIFICANT_EDGE'
+          {track_pred}
+        ORDER BY q.completed_at DESC NULLS LAST, q.queue_id::text ASC
+        LIMIT ${len(args)}
+    """
+    rows = await conn.fetch(sql, *args)
+    return [dict(r) for r in rows]
+
+
 async def get_queue(conn: asyncpg.Connection, queue_id: UUID) -> dict[str, Any] | None:
     row = await conn.fetchrow(
         f"""

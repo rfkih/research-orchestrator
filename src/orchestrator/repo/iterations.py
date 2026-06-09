@@ -160,6 +160,31 @@ async def get_iteration(
     return dict(row) if row else None
 
 
+async def resolve_track(
+    conn: asyncpg.Connection, iteration_id: UUID
+) -> str | None:
+    """Authoritative research track for an iteration (2026-06-09).
+
+    Sourced from the ORIGINATING queue row's ``sweep_config->>'track'`` via the
+    ``hypothesis_audit.queue_id`` linkage — the same authority the tick gate uses
+    — rather than inferring from metrics shape. Returns ``None`` for an untagged
+    iteration (legacy/global enqueue ⇒ caller treats as the default trading
+    track). Most-recent audit row wins when an iteration spans more than one.
+    """
+    return await conn.fetchval(
+        """
+        SELECT rq.sweep_config->>'track'
+        FROM research_iteration_log ril
+        LEFT JOIN hypothesis_audit ha ON ha.iteration_id = ril.iteration_id
+        LEFT JOIN research_queue rq ON rq.queue_id = ha.queue_id
+        WHERE ril.iteration_id = $1
+        ORDER BY ha.created_time DESC NULLS LAST
+        LIMIT 1
+        """,
+        iteration_id,
+    )
+
+
 async def leaderboard(
     conn: asyncpg.Connection,
     *,

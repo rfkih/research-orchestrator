@@ -48,6 +48,15 @@ class FakeConn:
         self.iteration_row: dict[str, Any] | None = None
         self.history_rows: list[dict[str, Any]] = []
         self.recorded_inserts: list[dict[str, Any]] = []
+        # Track resolved from the queue's sweep_config (repo.resolve_track).
+        # Default None ⇒ untagged/trading; set to "hedging" to exercise escalation.
+        self.iteration_track: str | None = None
+
+    async def fetchval(self, query: str, *args: Any) -> Any:
+        q = query.strip()
+        if "sweep_config->>'track'" in q:
+            return self.iteration_track
+        raise AssertionError(f"Unexpected fetchval query: {q!r}")
 
     async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
         q = query.strip()

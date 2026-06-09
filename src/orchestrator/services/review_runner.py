@@ -311,11 +311,21 @@ async def auto_run_checklist(
             strategy_code=strategy_code or "",
             iteration_id=str(iteration_id),
         )
+        # Track resolution (2026-06-09): AUTHORITATIVE source is the originating
+        # queue's sweep_config track (repo.resolve_track), the same authority the
+        # tick gate uses. Fall back to the ``hedging_gate`` metrics marker only
+        # when the queue linkage is absent (legacy rows), so a hedge scored via
+        # the trade-fallback path is still classified as hedging. Used to escalate
+        # the overfit-signature checks to blockers.
+        track = await iterations_repo.resolve_track(conn, UUID(str(iteration_id)))
+        if track is None and isinstance(metrics, dict) and "hedging_gate" in metrics:
+            track = "hedging"
         checks = graduation_review_checklist(
             iteration_metrics=metrics,
             iteration_ci=ci,
             iteration_params=params,
             sweep_history=sweep_history,
+            track=track,
         )
 
     aggregate = aggregate_verdict(checks)

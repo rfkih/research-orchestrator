@@ -519,18 +519,29 @@ def check_param_robustness(
     sweep_history items: ``(params_dict, pf)`` for completed iterations
     on this strategy + axis. Pass them sorted by created_time if you
     want, but order doesn't affect the check.
+
+    FAIL-CLOSED (2026-06-09): a missing/empty sweep history used to pass
+    "neutral" — that silently graduated single-cell picks whose robustness was
+    never assessed (the exact overfit signature this check exists to catch).
+    "Cannot assess" is now a FAIL: you cannot certify a plateau you never
+    measured. Populate the grid (≥1 Hamming-1 neighbour) or extend the sweep.
     """
     if not sweep_history:
         return _check(
             "param_robustness",
             "warning",
-            True,
-            "No sweep history available to assess robustness; assume neutral.",
+            False,
+            "No sweep history supplied — robustness cannot be assessed. A "
+            "single-cell pick with no neighbourhood is indistinguishable from "
+            "curve-fit. Provide the swept grid before graduating.",
         )
     opt_pf = max((pf for _, pf in sweep_history), default=None)
     if opt_pf is None:
         return _check(
-            "param_robustness", "warning", True, "No PF values in history."
+            "param_robustness",
+            "warning",
+            False,
+            "Sweep history carries no PF values — robustness cannot be assessed.",
         )
     opt_params: dict[str, Any] | None = None
     for params, pf in sweep_history:
@@ -539,7 +550,11 @@ def check_param_robustness(
             break
     if opt_params is None:
         return _check(
-            "param_robustness", "warning", True, "Could not locate optimum params."
+            "param_robustness",
+            "warning",
+            False,
+            "Could not locate optimum params in history — robustness cannot be "
+            "assessed.",
         )
     neighbours: list[tuple[dict[str, Any], float]] = []
     for params, pf in sweep_history:
@@ -582,15 +597,36 @@ def check_param_robustness(
     )
 
 
+# Overfit-signature checks promoted from warning to BLOCKER for track=hedging:
+# a hedge that bleeds in one regime or sits on a param cliff is disqualified
+# outright (not "address-in-follow-up" for a capital-protection strategy).
+#
+# cost_realism is DELIBERATELY excluded: a hedge is low-turnover, the +50bps
+# stress targets high-turnover friction, and the field is frequently un-computed
+# for hedges — escalating it to a blocker would reject legitimate hedges on a
+# test that barely applies (review finding #5, 2026-06-09). It stays a warning.
+_HEDGING_BLOCKER_CHECKS = frozenset(
+    {"regime_concentration", "param_robustness"}
+)
+
+
 def graduation_review_checklist(
     *,
     iteration_metrics: dict[str, Any],
     iteration_ci: dict[str, Any],
     iteration_params: dict[str, Any],
     sweep_history: list[tuple[dict[str, Any], float]],
+    track: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Run all graduation-review checks. Order matters for output legibility."""
-    return [
+    """Run all graduation-review checks. Order matters for output legibility.
+
+    ``track`` (2026-06-09): when ``"hedging"``, regime_concentration and
+    param_robustness are escalated to ``blocker`` severity so a single failure
+    REJECTS rather than merely flagging a CONDITIONAL_APPROVAL. cost_realism is
+    NOT escalated (see ``_HEDGING_BLOCKER_CHECKS``). Escalation only changes the
+    verdict on a FAILING check; passing checks are unaffected.
+    """
+    checks = [
         check_n_trades_ample(iteration_metrics),
         check_pf_ci_lower_bound(iteration_ci),
         check_dsr_threshold(iteration_metrics),
@@ -599,6 +635,11 @@ def graduation_review_checklist(
         check_portfolio_fit(iteration_metrics),
         check_param_robustness(iteration_params, sweep_history),
     ]
+    if track == "hedging":
+        for c in checks:
+            if c["check_name"] in _HEDGING_BLOCKER_CHECKS:
+                c["severity"] = "blocker"
+    return checks
 
 
 def aggregate_verdict(checks: list[dict[str, Any]]) -> dict[str, Any]:

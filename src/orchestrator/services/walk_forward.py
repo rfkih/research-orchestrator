@@ -64,6 +64,49 @@ LOW_FREQ_FOLD_POSITIVE_PCT = 60.0   # == high-freq pf_positive_pct consistency b
 LOW_FREQ_RETURN_CV_MAX = 2.5        # fold-return coeff. of variation → INCONSISTENT
 _LOW_FREQ_INTERVALS = {"1d", "3d", "1w"}  # structurally low-turnover bar sizes
 
+# ── Bear-coverage enforcement (2026-06-09) ────────────────────────────────────
+# The walk-forward verdict is the gate's only OUT-OF-SAMPLE evidence. If the
+# validation window contains no bear regime, a ROBUST verdict only proves the
+# candidate survives a bull — which a long/flat trend hedge cannot fail by
+# design. Every candidate then looks "robust but data-bound to one cycle".
+# BTC market_data is backfilled to 2017-08, so the bears below ARE available;
+# the old default window (2024-01-01) simply excluded them. We require the
+# validation window to overlap a known bear by at least MIN_BEAR_OVERLAP_DAYS,
+# with an operator override for instruments whose history genuinely predates
+# none of them. This is a STRICTER gate — it never loosens an existing bar.
+#
+# Pinned, well-established crypto drawdowns (operator-tunable, pin-tested):
+KNOWN_BEAR_REGIMES: tuple[tuple[date, date], ...] = (
+    (date(2018, 1, 17), date(2018, 12, 15)),   # 2018 post-ICO bear (~ -84%)
+    (date(2020, 2, 19), date(2020, 3, 23)),    # COVID liquidation crash (~ -50%)
+    (date(2021, 11, 10), date(2022, 12, 31)),  # 2021-22 cycle bear (~ -77%)
+)
+MIN_BEAR_OVERLAP_DAYS = 45  # window must include ≥ this much of a single bear
+# Replaces the old 2024-01-01 default. 2018 floor captures all three bears for
+# BTC/ETH; instruments with shorter history still cover the 2020/2022 bears and
+# their pre-history folds error out harmlessly (skipped by aggregate_folds).
+DEFAULT_FULL_START = date(2018, 1, 1)
+
+
+def _overlap_days(a_start: date, a_end: date, b_start: date, b_end: date) -> int:
+    """Inclusive day-count of the intersection of two date ranges (0 if none)."""
+    lo = max(a_start, b_start)
+    hi = min(a_end, b_end)
+    return max(0, (hi - lo).days)
+
+
+def window_covers_bear(
+    full_start: date, full_end: date, *, min_overlap_days: int = MIN_BEAR_OVERLAP_DAYS
+) -> bool:
+    """True iff ``[full_start, full_end]`` overlaps any KNOWN_BEAR_REGIME by at
+    least ``min_overlap_days``. Clipping the final week of a bear does not count
+    — the window must contain a *material* slice of a drawdown for an OOS
+    verdict on it to mean anything."""
+    return any(
+        _overlap_days(full_start, full_end, b_start, b_end) >= min_overlap_days
+        for b_start, b_end in KNOWN_BEAR_REGIMES
+    )
+
 
 def annualized_trade_rate(n_trades: int, window_days: float) -> float:
     """Trades per 365-day year over a window. ``inf`` for a zero-length
@@ -374,7 +417,7 @@ async def run_walk_forward(
     strategy_code: str,
     interval_name: str,
     instrument: str = "BTCUSDT",
-    full_start: date = date(2024, 1, 1),
+    full_start: date = DEFAULT_FULL_START,
     full_end: date | None = None,
     train_months: int = 12,
     test_months: int = 3,
@@ -382,9 +425,43 @@ async def run_walk_forward(
     n_folds: int = 6,
     overrides: dict[str, Any] | None = None,
     motivating_iteration_id: UUID | None = None,
+    require_bear_coverage: bool = True,
 ) -> WalkForwardResult:
     if full_end is None:
         full_end = (datetime.now(timezone.utc) - timedelta(days=1)).date()
+
+    # Bear-coverage gate. A walk-forward is the gate's only OOS evidence; if its
+    # window has no drawdown, ROBUST proves nothing for a trend hedge. Reject
+    # bull-only windows unless the operator explicitly overrides (e.g. an
+    # instrument whose history predates every known bear). STRICTER, never looser.
+    if require_bear_coverage and not window_covers_bear(full_start, full_end):
+        raise OrchestratorError(
+            status_code=422,
+            error_code="validation_window_excludes_bear",
+            message=(
+                f"Walk-forward window [{full_start.isoformat()}, "
+                f"{full_end.isoformat()}] contains no known bear regime "
+                f"(≥{MIN_BEAR_OVERLAP_DAYS}d overlap). A ROBUST verdict on a "
+                f"bull-only window is not out-of-sample evidence — every "
+                f"candidate survives a bull by construction."
+            ),
+            retryable=False,
+            hint=(
+                "Extend full_start to include a drawdown — BTC data goes back "
+                "to 2017-08, so e.g. full_start=2018-01-01 covers the 2018, "
+                "2020 and 2021-22 bears. Pass override_bear_coverage=true only "
+                "for instruments whose history genuinely predates every bear, "
+                "with a documented journal entry."
+            ),
+            details={
+                "full_start": full_start.isoformat(),
+                "full_end": full_end.isoformat(),
+                "known_bears": [
+                    [b0.isoformat(), b1.isoformat()] for b0, b1 in KNOWN_BEAR_REGIMES
+                ],
+                "min_overlap_days": MIN_BEAR_OVERLAP_DAYS,
+            },
+        )
 
     async with db.acquire() as conn:
         as_row = await _resolve_account_strategy(

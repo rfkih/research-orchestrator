@@ -22,11 +22,13 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from ..errors import NextAction, OrchestratorError
+from ..repo import queue as queue_repo
 from ..repo import reviews as reviews_repo
 from ..repo import walk_forward as walk_forward_repo
 from ..services.activity_logger import log_activity
 from ..services.idempotency import cache_response, replay_cached_response
 from ..services.walk_forward import (
+    DEFAULT_FULL_START,
     LOW_FREQ_MIN_TOTAL_TRADES,
     is_low_frequency,
     run_walk_forward,
@@ -66,7 +68,10 @@ class WalkForwardRequest(BaseModel):
     strategy_code: str = Field(..., min_length=1, max_length=60)
     interval_name: str = Field(..., description="5m|15m|1h|4h")
     instrument: str = Field("BTCUSDT", min_length=1, max_length=30)
-    full_start: date = Field(default_factory=lambda: date(2024, 1, 1))
+    # 2018 floor (was 2024-01-01) so the default validation window spans real
+    # bears; the service rejects any window with no drawdown (see
+    # override_bear_coverage). BTC market_data is backfilled to 2017-08.
+    full_start: date = Field(default_factory=lambda: DEFAULT_FULL_START)
     full_end: date | None = None
     train_months: int = Field(12, ge=1, le=60)
     test_months: int = Field(3, ge=1, le=24)
@@ -84,6 +89,11 @@ class WalkForwardRequest(BaseModel):
     # admission has its own gate in POST /pool/evaluate), the trade-frequency
     # guard still applies, and a ROBUST verdict routes to /pool/evaluate.
     pool_candidate: bool = False
+    # Bear-coverage gate (2026-06-09). The service rejects a walk-forward whose
+    # window contains no known bear regime — a bull-only OOS verdict is not
+    # evidence. Set true ONLY for instruments whose history genuinely predates
+    # every known bear, with a documented journal entry.
+    override_bear_coverage: bool = False
 
 
 class WalkForwardResponse(BaseModel):
@@ -279,6 +289,7 @@ async def post_walk_forward(
             n_folds=body.n_folds,
             overrides=body.overrides,
             motivating_iteration_id=body.motivating_iteration_id,
+            require_bear_coverage=not body.override_bear_coverage,
         )
     except Exception as _wf_exc:
         await log_activity(
@@ -350,6 +361,52 @@ async def post_walk_forward(
 
     await cache_response(request, agent, "walk", idempotency_key, payload)
     return payload
+
+
+class WalkForwardBacklogResponse(BaseModel):
+    count: int
+    items: list[dict[str, Any]]
+    next_actions: list[dict[str, Any]] = Field(default_factory=list)
+
+
+@router.get("/walk-forward/backlog", response_model=WalkForwardBacklogResponse)
+async def get_walk_forward_backlog(
+    request: Request,
+    track: str | None = None,
+    limit: int = 100,
+    agent: str = Depends(get_agent_name),
+    conn: asyncpg.Connection = Depends(get_db_conn),
+) -> WalkForwardBacklogResponse:
+    """List PARKED SIGNIFICANT_EDGE candidates still awaiting walk-forward.
+
+    Surfaces the out-of-sample-validation bottleneck (Finding 2): SIG_EDGE
+    candidates park awaiting a deliberate ~3h walk-forward and silently
+    accumulate. This makes that backlog drainable — the loop/operator reads it
+    and drives each candidate through the (review → walk-forward) path instead
+    of discovering the pile-up by accident.
+
+    Deliberately a READ. Walk-forward submits real multi-hour JVM load and
+    requires an APPROVED graduation review first, so auto-spawning runs from a
+    GET would be wrong; the ``next_actions`` tell the caller how to drain it.
+    """
+    items = await queue_repo.list_walk_forward_backlog(
+        conn, track=track, limit=max(1, min(limit, 500))
+    )
+    next_actions: list[dict[str, Any]] = []
+    if items:
+        next_actions.append({
+            "kind": "note",
+            "hint": (
+                f"{len(items)} SIG_EDGE candidate(s) awaiting walk-forward. For "
+                "each: ensure an APPROVED graduation review exists "
+                "(POST /reviews/request target_kind='graduation'), then POST "
+                "/walk-forward {motivating_iteration_id} — now bear-coverage "
+                "enforced. Drain oldest-first to clear the backlog."
+            ),
+        })
+    return WalkForwardBacklogResponse(
+        count=len(items), items=items, next_actions=next_actions
+    )
 
 
 @router.get("/walk-forward/runs/{walk_forward_id}", response_model=WalkForwardRunDetailResponse)

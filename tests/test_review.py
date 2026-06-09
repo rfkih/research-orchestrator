@@ -439,9 +439,12 @@ def test_param_robustness_no_neighbours_warns() -> None:
     assert out["passed"] is False
 
 
-def test_param_robustness_empty_history_passes_neutral() -> None:
+def test_param_robustness_empty_history_fails_closed() -> None:
+    # Fail-closed (2026-06-09): no history → robustness un-assessable → FAIL,
+    # not a silent neutral pass. Closes the single-cell-pick graduation hole.
     out = check_param_robustness({}, [])
-    assert out["passed"] is True
+    assert out["passed"] is False
+    assert out["severity"] == "warning"
 
 
 # ── aggregate_verdict ─────────────────────────────────────────────────
@@ -558,6 +561,140 @@ def test_graduation_review_checklist_full_pass() -> None:
     )
     out = aggregate_verdict(checks)
     assert out["verdict"] == "APPROVED"
+
+
+# ── track-aware escalation (F4, 2026-06-09) ───────────────────────────
+
+
+def _metrics_with_losing_regime() -> dict:
+    """All graduation checks pass EXCEPT regime_concentration (CHOP bleeds)."""
+    return {
+        "analysis": {
+            "n_trades": 250,
+            "dsr": 0.97,
+            "dsr_n_trials": 20,
+            "slippage_haircut_pnl": {"+50bps": 8.0},
+            "regimes": {
+                "by_trend_regime": {
+                    "TRENDING_UP": {"n": 100, "pnl": 15.0},
+                    "CHOP": {"n": 100, "pnl": -6.0},  # losing regime → fail
+                }
+            },
+        },
+        "portfolio_corr": {"applied": True, "max_abs_corr": 0.2, "per_code_corr": {}},
+    }
+
+
+_PASSING_CI = {"pf_95": {"low": 1.15, "high": 1.6}}
+_PASSING_PARAMS = {"ATR": "1.5", "RSI": "25"}
+_PASSING_HISTORY = [
+    ({"ATR": "1.0", "RSI": "25"}, 1.2),
+    ({"ATR": "1.5", "RSI": "25"}, 1.5),
+    ({"ATR": "2.0", "RSI": "25"}, 1.25),
+]
+
+
+def test_trading_track_one_overfit_warning_is_conditional() -> None:
+    # Default/trading track: a single regime-concentration failure is a warning
+    # → CONDITIONAL_APPROVAL (unchanged legacy behaviour).
+    checks = graduation_review_checklist(
+        iteration_metrics=_metrics_with_losing_regime(),
+        iteration_ci=_PASSING_CI,
+        iteration_params=_PASSING_PARAMS,
+        sweep_history=_PASSING_HISTORY,
+    )
+    assert aggregate_verdict(checks)["verdict"] == "CONDITIONAL_APPROVAL"
+
+
+def test_hedging_track_one_overfit_failure_rejects() -> None:
+    # F4: on track=hedging the same single regime-concentration failure is
+    # escalated to a BLOCKER → REJECTED. A hedge that bleeds in CHOP is
+    # disqualified, not flagged-for-follow-up.
+    checks = graduation_review_checklist(
+        iteration_metrics=_metrics_with_losing_regime(),
+        iteration_ci=_PASSING_CI,
+        iteration_params=_PASSING_PARAMS,
+        sweep_history=_PASSING_HISTORY,
+        track="hedging",
+    )
+    regime = next(c for c in checks if c["check_name"] == "regime_concentration")
+    assert regime["severity"] == "blocker"
+    assert aggregate_verdict(checks)["verdict"] == "REJECTED"
+
+
+def test_hedging_track_escalation_only_affects_failing_checks() -> None:
+    # Escalation must not reject a clean hedge: a fully-passing checklist on
+    # track=hedging still APPROVES (severity bump is inert on passing checks).
+    clean = {
+        "analysis": {
+            "n_trades": 250,
+            "dsr": 0.97,
+            "dsr_n_trials": 20,
+            "slippage_haircut_pnl": {"+50bps": 8.0},
+            "regimes": {
+                "by_trend_regime": {
+                    "TRENDING_UP": {"n": 100, "pnl": 15.0},
+                    "CHOP": {"n": 100, "pnl": 5.0},
+                }
+            },
+        },
+        "portfolio_corr": {"applied": True, "max_abs_corr": 0.2, "per_code_corr": {}},
+    }
+    checks = graduation_review_checklist(
+        iteration_metrics=clean,
+        iteration_ci=_PASSING_CI,
+        iteration_params=_PASSING_PARAMS,
+        sweep_history=_PASSING_HISTORY,
+        track="hedging",
+    )
+    assert aggregate_verdict(checks)["verdict"] == "APPROVED"
+
+
+def test_hedging_track_cost_realism_stays_warning() -> None:
+    # #5 fix: cost_realism is NOT escalated for hedges (low-turnover; +50bps
+    # barely applies). A failing cost_realism alone → 1 warning → CONDITIONAL,
+    # not REJECTED. Everything else passes.
+    metrics = {
+        "analysis": {
+            "n_trades": 250,
+            "dsr": 0.97,
+            "dsr_n_trials": 20,
+            "slippage_haircut_pnl": {"+50bps": -4.0},  # cost_realism fails
+            "regimes": {
+                "by_trend_regime": {
+                    "TRENDING_UP": {"n": 100, "pnl": 15.0},
+                    "CHOP": {"n": 100, "pnl": 5.0},
+                }
+            },
+        },
+        "portfolio_corr": {"applied": True, "max_abs_corr": 0.2, "per_code_corr": {}},
+    }
+    checks = graduation_review_checklist(
+        iteration_metrics=metrics,
+        iteration_ci=_PASSING_CI,
+        iteration_params=_PASSING_PARAMS,
+        sweep_history=_PASSING_HISTORY,
+        track="hedging",
+    )
+    cost = next(c for c in checks if c["check_name"] == "cost_realism")
+    assert cost["severity"] == "warning"  # NOT escalated
+    assert aggregate_verdict(checks)["verdict"] == "CONDITIONAL_APPROVAL"
+
+
+def test_hedging_track_empty_history_blocks_graduation() -> None:
+    # F4+F5 together: a hedge graduated with no sweep history → param_robustness
+    # fails-closed → escalated to blocker → REJECTED.
+    checks = graduation_review_checklist(
+        iteration_metrics=_metrics_with_losing_regime() | {},
+        iteration_ci=_PASSING_CI,
+        iteration_params=_PASSING_PARAMS,
+        sweep_history=[],
+        track="hedging",
+    )
+    robustness = next(c for c in checks if c["check_name"] == "param_robustness")
+    assert robustness["severity"] == "blocker"
+    assert robustness["passed"] is False
+    assert aggregate_verdict(checks)["verdict"] == "REJECTED"
 
 
 # ── target_id helpers ────────────────────────────────────────────────
