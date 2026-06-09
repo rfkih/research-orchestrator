@@ -28,6 +28,7 @@ from .api.models import router as models_router
 from .api.papers import router as papers_router
 from .api.regime import router as regime_router
 from .api.rankings import router as rankings_router
+from .api.provisional_roster import router as provisional_roster_router
 from .api.account_strategies import router as account_strategies_router
 from .api.pool import router as pool_router
 from .api.signals import router as signals_router
@@ -100,6 +101,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(papers_router)
     app.include_router(regime_router)
     app.include_router(rankings_router)
+    app.include_router(provisional_roster_router)
     app.include_router(streaming_status_router)
     return app
 
