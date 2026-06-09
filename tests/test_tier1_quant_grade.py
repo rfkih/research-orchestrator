@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import math
+
 import pytest
 
 import inspect
@@ -30,10 +32,15 @@ from orchestrator.services.analyze import (
     ANNUALIZED_RETURN_PASS_THRESHOLD_PCT,
     DAYS_PER_YEAR,
     DSR_SIGNIFICANCE_THRESHOLD,
+    RISK_FREE_RATE_ANNUAL_PCT,
+    _norm_cdf,
+    _norm_inv,
     _total_deployed_days,
     analyze_run,
     annualize_geometric_return,
     deflated_sharpe_ratio,
+    probabilistic_sharpe_ratio,
+    sortino_ratio,
     statistical_verdict,
 )
 
@@ -122,36 +129,42 @@ def test_deflated_sharpe_in_unit_interval() -> None:
 
 
 def test_deflated_sharpe_bootstrap_fallback_fires_when_closed_form_degenerate() -> None:
-    """Reproduces the operator-flagged 2026-05-21 scenario: an ML-gated
-    DCB-ETH-1h candidate with sr≈1.85, skew≈1.66, kurt≈2.29 produces
-    closed-form denom_sq = 1 - 1.66·1.85 + ((2.29-1)/4)·1.85^2 ≈ -0.96.
-    Pre-fix DSR=None blocked graduation; bootstrap fallback must
-    produce a finite, in-unit-interval DSR from the same pnls."""
-    import random
-    # Build a synthetic pnl series that *would* reproduce the same
-    # high-skew high-kurt shape: lots of small losses + a handful of
-    # large wins. 310 trades to match the iteration n_trades.
-    rng = random.Random(42)
-    pnls: list[float] = []
-    for _ in range(232):  # ~75% losers
-        pnls.append(-rng.uniform(0.5, 1.0))
-    for _ in range(78):   # ~25% winners with fat right tail
-        pnls.append(rng.uniform(2.0, 8.0))
+    """Bootstrap fallback fires when the closed-form denom_sq <= 0.
 
-    # Closed-form-only path returns None because the distribution is
-    # heavily skewed.
+    NOTE (2026-06-09): the kurtosis term was corrected to ((κ+2)/4)·SR² (κ =
+    EXCESS kurtosis), matching Bailey-LdP ((γ4-1)/4). A consequence is that for
+    any *physically realizable* distribution (κ ≥ skew²-2) the variance factors
+    to ≥ (1 - skew·SR/2)² ≥ 0 — so the closed form no longer goes degenerate on
+    real data (the 2026-05-21 sr=1.85/skew=1.66/kurt=2.29 case now yields a
+    finite closed-form DSR). The fallback is now a DEFENSIVE path, reachable
+    only with pathological moments that violate the moment inequality. We force
+    exactly that here to keep it covered."""
+    import random
+
+    # Pathological moments: skew=2.0 with EXCESS kurt=0.0 violates κ ≥ skew²-2
+    # (= 2.0), so it can't come from real data — but it drives the corrected
+    # closed form negative: denom_sq = 1 - 2.0·2.0 + ((0+2)/4)·2.0² = -1.0.
+    bad_sr, bad_skew, bad_kurt = 2.0, 2.0, 0.0
+
     closed_only = deflated_sharpe_ratio(
-        sr=1.85, n_obs=310, skew=1.66, kurt=2.29, n_trials=395
+        sr=bad_sr, n_obs=310, skew=bad_skew, kurt=bad_kurt, n_trials=395
     )
     assert closed_only is None, (
-        "Pre-fix: closed-form-only must return None for denom_sq<=0 "
-        "scenarios; if this assertion fires it means the function "
-        "started covering the case via a different path."
+        "Closed-form-only must return None when denom_sq<=0; if this fires the "
+        "corrected variance no longer goes degenerate on these moments."
     )
 
-    # Bootstrap fallback path returns a finite DSR.
+    # A pnl series with ≥30 obs and nonzero variance is enough for the
+    # non-parametric fallback to produce a finite, in-unit-interval DSR.
+    rng = random.Random(42)
+    pnls: list[float] = []
+    for _ in range(232):  # losers
+        pnls.append(-rng.uniform(0.5, 1.0))
+    for _ in range(78):   # winners, fat right tail
+        pnls.append(rng.uniform(2.0, 8.0))
+
     dsr_boot = deflated_sharpe_ratio(
-        sr=1.85, n_obs=310, skew=1.66, kurt=2.29, n_trials=395,
+        sr=bad_sr, n_obs=310, skew=bad_skew, kurt=bad_kurt, n_trials=395,
         pnls=pnls,
     )
     assert dsr_boot is not None
@@ -564,3 +577,73 @@ def test_analyze_run_falls_back_to_window_days_without_exit_times() -> None:
     # annualized should equal the calendar-window result (rounded to 4dp)
     expected = annualize_geometric_return(25.0, out["window_days"])
     assert out["annualized_geometric_return_pct_at_alloc_90"] == pytest.approx(expected, abs=1e-3)
+
+
+# ── Industry-standard metric corrections (2026-06-09) ─────────────────
+
+
+def test_psr_gaussian_matches_lo_2002_variance() -> None:
+    """Pins the corrected Bailey-LdP kurtosis term. For Gaussian moments
+    (skew=0, EXCESS kurt=0) the SR-variance reduces to the Lo (2002) result
+    1 + 0.5·SR². If the coefficient regresses to the old (κ-1)/4 the denom
+    becomes 1 - 0.25·SR² and this exact-recompute assertion fires."""
+    sr, n, n_strats = 0.30, 200, 5
+    denom_sq = 1.0 + 0.5 * sr**2          # corrected ((0+2)/4)·SR²
+    sr_star = _norm_inv(1 - 0.05 / n_strats) / math.sqrt(n)
+    expected = _norm_cdf((sr - sr_star) * math.sqrt((n - 1) / denom_sq))
+    got = probabilistic_sharpe_ratio(sr, n, 0.0, 0.0, n_strats)
+    assert got == pytest.approx(expected, abs=1e-12)
+
+
+def test_corrected_kurtosis_makes_2026_05_21_case_non_degenerate() -> None:
+    """Regression: the operator-flagged sr=1.85/skew=1.66/kurt=2.29 case used
+    to drive the (buggy) closed form negative. Corrected, denom_sq =
+    1 - 1.66·1.85 + ((2.29+2)/4)·1.85² ≈ 1.60 > 0 → finite closed-form DSR."""
+    got = deflated_sharpe_ratio(sr=1.85, n_obs=310, skew=1.66, kurt=2.29, n_trials=395)
+    assert got is not None
+    assert 0.0 <= got <= 1.0
+
+
+def test_corrected_variance_nonnegative_for_realizable_moments() -> None:
+    """For any physically-realizable distribution (excess kurt κ ≥ skew²-2) the
+    corrected denom_sq factors to ≥ (1 - skew·SR/2)² ≥ 0 — so PSR is defined
+    (non-None) across a grid of valid moments. Pins the property that justified
+    treating the bootstrap as defensive-only."""
+    for sr in (0.1, 0.5, 1.0, 2.0):
+        for skew in (-1.5, 0.0, 1.5):
+            kurt = skew**2 - 2.0 + 0.5  # just inside the realizable bound
+            out = probabilistic_sharpe_ratio(sr, 200, skew, kurt, 5)
+            assert out is not None, f"denom_sq went degenerate at sr={sr} skew={skew}"
+
+
+def test_sortino_divides_by_total_n() -> None:
+    """#3: target semi-deviation divides squared downside by TOTAL n, not the
+    downside count. returns=[-1,-1,2,2], target 0: mean=0.5; downside=[-1,-1] →
+    Σd²=2; corrected var=2/4=0.5 → σ=√0.5 → Sortino=0.5/√0.5=√0.5≈0.7071.
+    The OLD (÷len(downside)=2) gave var=1.0 → Sortino=0.5; assert the corrected."""
+    out = sortino_ratio([-1.0, -1.0, 2.0, 2.0], ann_factor=None, target=0.0)
+    assert out == pytest.approx(math.sqrt(0.5), abs=1e-9)  # ≈0.7071, not 0.5
+
+
+def test_calmar_uses_annualized_return() -> None:
+    """#4: Calmar = annualised return / maxDD, so it's window-invariant. A 30%
+    return over a long window annualises down; Calmar must reflect the
+    annualised figure, not the raw 30/maxDD."""
+    long_run = {
+        "start_time": datetime(2020, 1, 1),
+        "end_time": datetime(2024, 1, 1),  # ~4yr → annualised << 30%
+        "return_pct": 30.0,
+        "max_drawdown_pct": 5.0,
+        "geometric_return_pct_at_alloc_90": 25.0,
+    }
+    out = analyze_run(long_run, _trades_with_clear_edge(150))
+    ann_ret = annualize_geometric_return(30.0, out["window_days"])
+    assert out["calmar"] == pytest.approx(round(ann_ret / 5.0, 4), abs=1e-3)
+    # And it must be far below the naive 30/5 = 6.0.
+    assert out["calmar"] < 6.0
+
+
+def test_risk_free_constant_defaults_to_zero_noop() -> None:
+    """#5: rf defaults to 0.0 so all metrics are unchanged until an operator
+    sets a rate. Pin the default so a nonzero value can't land silently."""
+    assert RISK_FREE_RATE_ANNUAL_PCT == 0.0

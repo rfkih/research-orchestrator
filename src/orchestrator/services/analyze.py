@@ -46,6 +46,19 @@ ANNUALIZED_RETURN_PASS_THRESHOLD_PCT = 10.0
 # drift is sub-percent and doesn't move the PASS/ITERATE boundary.
 DAYS_PER_YEAR = 365
 
+# Annualised risk-free / financing rate (percent) for excess-return metrics.
+# Default 0.0 preserves crypto convention (rf≈0) and is a strict no-op. A
+# nonzero value is the operator knob for a SOFR-era Sharpe.
+#
+# LIMITATION (2026-06-09): the trade-level Sharpe/Sortino in THIS module are
+# computed on per-trade dollar PnL (realized_pnl_amount), not time-period
+# returns — subtracting a *rate* from a dollar amount is not well-defined, so
+# rf is NOT applied here. It IS applied in services/hedging_gate.py, whose
+# Sharpe is computed on daily equity RETURNS. Re-basing the trade Sharpe onto a
+# returns series (R-multiple / notional-normalised) before applying rf here is a
+# tracked follow-up, deliberately out of scope of this change.
+RISK_FREE_RATE_ANNUAL_PCT = 0.0
+
 
 def _f(v: Any) -> float | None:
     if v is None:
@@ -151,7 +164,11 @@ def sortino_ratio(
     downside = [r - target for r in returns if r < target]
     if len(downside) < 2:
         return None
-    var = sum(d**2 for d in downside) / len(downside)
+    # Target semi-deviation (industry standard): the sum of squared downside
+    # deviations is divided by the TOTAL observation count, not just the number
+    # of downside obs. Dividing by len(downside) overstates downside σ and
+    # understates Sortino. (Fixed 2026-06-09.)
+    var = sum(d**2 for d in downside) / len(returns)
     if var <= 0:
         return None
     sortino = mean_excess / math.sqrt(var)
@@ -234,7 +251,12 @@ def probabilistic_sharpe_ratio(
         return None
     z_alpha = _norm_inv(1 - 0.05 / n_strategies_tested)
     sr_star = z_alpha / math.sqrt(n_obs)
-    denom_sq = 1 - skew * sr + ((kurt - 1) / 4) * (sr**2)
+    # Bailey-LdP variance of the Sharpe estimator. The published term is
+    # ((γ4 - 1)/4)·SR² with γ4 the NON-excess kurtosis (γ4=3 for Gaussian →
+    # 0.5, matching Lo 2002). ``kurt`` here is EXCESS kurtosis (κ = γ4 - 3),
+    # so the correct coefficient is ((κ + 2)/4), NOT (κ - 1)/4. (Fixed
+    # 2026-06-09 — the prior (κ-1)/4 understated SE and inflated PSR/DSR.)
+    denom_sq = 1 - skew * sr + ((kurt + 2) / 4) * (sr**2)
     if denom_sq <= 0:
         return None
     z = (sr - sr_star) * math.sqrt((n_obs - 1) / denom_sq)
@@ -257,7 +279,8 @@ def deflated_sharpe_ratio(
     Closed-form (default): the Bailey-LdP Gaussian-asymptotic standard
     error of the sample Sharpe is
 
-        SE^2 = (1 - skew·SR + ((kurt-1)/4)·SR^2) / (n_obs - 1)
+        SE^2 = (1 - skew·SR + ((kurt+2)/4)·SR^2) / (n_obs - 1)
+        (``kurt`` = EXCESS kurtosis κ; ((κ+2)/4) == Bailey-LdP ((γ4-1)/4))
 
     DSR = Phi((SR - SR*) / SE), where SR* = Phi^-1(1 - 0.05/n_trials) /
     sqrt(n_obs) is the selection-bias-adjusted threshold. The
@@ -291,7 +314,9 @@ def deflated_sharpe_ratio(
     n_trials = max(1, int(n_trials))
     z_alpha = _norm_inv(1 - 0.05 / n_trials)
     sr_star = z_alpha / math.sqrt(n_obs)
-    denom_sq = 1 - skew * sr + ((kurt - 1) / 4) * (sr**2)
+    # See probabilistic_sharpe_ratio: ``kurt`` is EXCESS kurtosis, so the
+    # Bailey-LdP ((γ4-1)/4) term is ((kurt + 2)/4), not (kurt - 1)/4.
+    denom_sq = 1 - skew * sr + ((kurt + 2) / 4) * (sr**2)
     if denom_sq > 0:
         z = (sr - sr_star) * math.sqrt((n_obs - 1) / denom_sq)
         return _norm_cdf(z)
@@ -319,13 +344,13 @@ def _bootstrap_dsr(
 ) -> float | None:
     """Non-parametric DSR via bootstrap (Bailey & LdP 2014 §5).
 
-    Both ``sr_observed`` and ``sr_star`` are passed in on the
-    *annualised* basis (matching closed-form). The bootstrap is run on
-    the per-sample SR (unannualised — ``ann_factor=None``); we recover
-    the annualisation factor from the observed pair (annualised SR vs
-    the per-sample SR of the original ``pnls``) and apply it to the
-    bootstrap SE so the z-statistic lives on the same basis as the
-    closed-form would.
+    As of 2026-06-09 ``sr_observed`` and ``sr_star`` are passed on the
+    PER-OBSERVATION basis (matching the corrected closed-form, where SR* =
+    z_α/√n is per-observation). The bootstrap SR is likewise per-sample
+    (``ann_factor=None``), so the recovered ``sqrt_ann_factor`` is ≈ 1.0 and
+    the projection below is a self-consistent no-op. (The factor machinery is
+    retained so the function stays correct even if a caller passes an
+    annualised pair — it derives the basis from the SR ratio itself.)
 
     Returns ``None`` (gate fails closed) on:
       * ``pnls`` shorter than 30 (insufficient resampling base)
@@ -573,10 +598,16 @@ def analyze_run(
             ann_factor = (DAYS_PER_YEAR / window_days) * n
 
     sr = sharpe_ratio(pnls, ann_factor)
+    # PSR/DSR (Bailey-LdP) are defined on the PER-OBSERVATION Sharpe — the
+    # variance formula and SR* (= z_α/√n) both live at observation frequency.
+    # Passing the annualised ``sr`` mixed scales (annualised numerator vs
+    # per-obs SR*). Use the un-annualised Sharpe for significance; keep the
+    # annualised ``sr`` for the reported metric. (Fixed 2026-06-09.)
+    sr_per_obs = sharpe_ratio(pnls, None)
     sortino = sortino_ratio(pnls, ann_factor)
     sk = skewness(pnls)
     kt = excess_kurtosis(pnls)
-    psr = probabilistic_sharpe_ratio(sr, n, sk, kt, n_strategies_tested)
+    psr = probabilistic_sharpe_ratio(sr_per_obs, n, sk, kt, n_strategies_tested)
 
     # DSR with real cumulative trial count from hypothesis_audit. Falls
     # back to n_strategies_tested so test fixtures and legacy callers
@@ -585,11 +616,20 @@ def analyze_run(
     # fire when the closed-form denom_sq <= 0 on non-Gaussian
     # distributions (e.g. ML-gate-induced high-skew long-tail PnLs).
     dsr_n_trials = cumulative_trials if cumulative_trials is not None else n_strategies_tested
-    dsr = deflated_sharpe_ratio(sr, n, sk, kt, dsr_n_trials, pnls=pnls)
+    dsr = deflated_sharpe_ratio(sr_per_obs, n, sk, kt, dsr_n_trials, pnls=pnls)
 
     return_pct = _f(run.get("return_pct"))
     max_dd = _f(run.get("max_drawdown_pct"))
-    calmar = (return_pct / max_dd) if (return_pct and max_dd and max_dd > 0) else None
+    # Calmar (industry standard) = ANNUALISED return / maxDD. Using the raw
+    # period return made it window-dependent (a longer backtest inflated it).
+    # Annualise the cumulative return over the calendar window the same way as
+    # the geometric metric. (Fixed 2026-06-09.)
+    annualized_return_pct = annualize_geometric_return(return_pct, window_days)
+    calmar = (
+        (annualized_return_pct / max_dd)
+        if (annualized_return_pct is not None and max_dd and max_dd > 0)
+        else None
+    )
 
     # V60 — sizing-independent compounding metric, annualised over the
     # CALENDAR window (operator decision 2026-06-07). The prior deployed-time

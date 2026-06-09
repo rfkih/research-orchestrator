@@ -16,6 +16,7 @@ from ..repo import backtest_equity
 from ..repo import market_data
 from ..repo import trades as trades_repo
 from . import portfolio, pool
+from .analyze import RISK_FREE_RATE_ANNUAL_PCT
 
 # ── Pinned gate constants (operator-tunable; pin-tested below) ──────────
 TOL_CAGR_PCT: float = 5.0       # hedge may give up at most this much CAGR vs buy-hold
@@ -54,7 +55,13 @@ def _sharpe(rets: list[float]) -> float | None:
     sd = math.sqrt(var)
     if sd == 0:
         return None
-    return (mu / sd) * math.sqrt(TRADING_DAYS)
+    # Excess over the daily risk-free rate (industry-standard Sharpe). rf is
+    # subtracted from the mean only (a constant shift leaves σ unchanged). The
+    # daily rate is the annual rate de-compounded over TRADING_DAYS. Default
+    # RISK_FREE_RATE_ANNUAL_PCT=0.0 makes this a strict no-op. Applied to BOTH
+    # strat and benchmark, so the paired comparison stays on an excess basis.
+    rf_daily = ((1.0 + RISK_FREE_RATE_ANNUAL_PCT / 100.0) ** (1.0 / TRADING_DAYS)) - 1.0
+    return ((mu - rf_daily) / sd) * math.sqrt(TRADING_DAYS)
 
 
 # The buy-hold benchmark is ALWAYS evaluated on DAILY bars: _sharpe annualises
