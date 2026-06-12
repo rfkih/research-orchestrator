@@ -195,3 +195,27 @@ async def get_journal(conn: asyncpg.Connection, journal_id: UUID) -> dict[str, A
         journal_id,
     )
     return dict(row) if row else None
+
+
+async def count_signal_screens(
+    conn: asyncpg.Connection, *, signal_family: str
+) -> int:
+    """Number of PRIOR signal-screen journal rows for one signal family.
+
+    Signal screens are discriminated by ``structured_data->>'kind' =
+    'signal_screen'`` (the entry_type CHECK constraint has no
+    SIGNAL_SCREEN value -- same coexistence pattern as null_screen). The
+    count feeds the running multiplicity note: N prior screens on the
+    same family means a borderline t-stat on screen N+1 carries a
+    selection-bias caveat.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT COUNT(*) AS n
+        FROM research_journal
+        WHERE structured_data->>'kind' = 'signal_screen'
+          AND structured_data->>'signal_family' = $1
+        """,
+        signal_family,
+    )
+    return int(row["n"])

@@ -10,7 +10,12 @@ CREATE TABLE IF NOT EXISTS research_journal (
     content         TEXT         NOT NULL,
     structured_data JSONB        NOT NULL DEFAULT '{}',
     status          VARCHAR(20)  NOT NULL DEFAULT 'ACTIVE',
+    iteration_id_refs    UUID[],
+    related_journal_ids  UUID[],
     created_time    TIMESTAMP    NOT NULL DEFAULT NOW(),
+    created_by      VARCHAR(100),
+    updated_time    TIMESTAMP,
+    updated_by      VARCHAR(100),
     CONSTRAINT pk_research_journal PRIMARY KEY (journal_id)
 );
 
@@ -199,3 +204,30 @@ CREATE TABLE IF NOT EXISTS signal_pool (
 CREATE UNIQUE INDEX IF NOT EXISTS signal_pool_active_unique
     ON signal_pool (strategy_code, symbol, interval_name)
     WHERE status = 'active';
+
+
+-- /signal-screen integration surface: a TRIMMED feature_store (one numeric
+-- signal column is enough for information_schema resolution + the exact-ts
+-- join) and the feature_values series store (V70). Types match Flyway.
+CREATE TABLE IF NOT EXISTS feature_store (
+    id             BIGSERIAL     PRIMARY KEY,
+    id_market_data BIGINT        NOT NULL DEFAULT 0,
+    symbol         VARCHAR(20)   NOT NULL,
+    interval       VARCHAR(10)   NOT NULL,
+    start_time     TIMESTAMP     NOT NULL,
+    end_time       TIMESTAMP     NOT NULL,
+    price          NUMERIC(24,8) NOT NULL,
+    rsi            NUMERIC(24,8)
+);
+
+CREATE TABLE IF NOT EXISTS feature_values (
+    feature_name VARCHAR(120)  NOT NULL,
+    version      INTEGER       NOT NULL DEFAULT 1,
+    symbol       VARCHAR(20)   NOT NULL DEFAULT '',
+    interval     VARCHAR(10)   NOT NULL DEFAULT '',
+    ts           TIMESTAMP     NOT NULL,
+    value        DOUBLE PRECISION,
+    value_text   TEXT,
+    compute_run_id UUID,
+    PRIMARY KEY (feature_name, version, symbol, interval, ts)
+);

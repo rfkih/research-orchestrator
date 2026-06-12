@@ -161,6 +161,20 @@ async def playbook() -> Playbook:
                 "the pool's marginal-Sharpe test rejects. Endgame is combined Sharpe "
                 "≈ s·√N over many weak orthogonal signals, not one hero strategy."
             ),
+            "ic_screen_before_hypothesis": (
+                "PLAYBOOK SECTION 1.9 (2026-06-12): an IC screen (POST "
+                "/signal-screen, minutes, read-only) is REQUIRED before "
+                "pre-registering a HYPOTHESIS on any NOT-YET-TRADED signal "
+                "family. PROMISING on any (instrument, horizon) -> proceed to "
+                "the HYPOTHESIS journal row + null-screen as usual. DEAD on "
+                "ALL horizons/instruments -> the screen row is already "
+                "journaled; pivot WITHOUT registering a hypothesis (no DSR "
+                "multiplicity spent). Completes the cost ladder: IC screen "
+                "(minutes) -> null-screen (~1h) -> sweep (hours) -> "
+                "walk-forward. ADVISORY only -- it never alters the frozen "
+                "V11/V60 gates, and screens are logged with a running "
+                "multiplicity note per signal family."
+            ),
             "falsify_and_move_on": (
                 "One clean NO_EDGE (or null-screen NO_EDGE_DETECTED) ends a "
                 "hypothesis. Do NOT re-grid a dead hypothesis hoping for a different "
@@ -676,6 +690,35 @@ async def playbook() -> Playbook:
                     "multiplicity budget for the confirmatory sweep that "
                     "follows). Result journaled as NULL_SCREEN_RESULT. "
                     "Synchronous; ~30-60min for K=8."
+                ),
+                idempotent=False,
+            ),
+            PlaybookCapability(
+                name="run_signal_screen",
+                method="POST",
+                path="/signal-screen",
+                purpose=(
+                    "Feature-level IC screen -- the cheapest rung of the cost "
+                    "ladder (minutes, read-only, ADVISORY). Body: {signal "
+                    "(feature_store column or feature_values name), "
+                    "instruments[], interval, horizons_bars (default "
+                    "[1,6,24]), transform (zscore|rank|raw, default zscore), "
+                    "start?, end?}. Per (instrument, horizon) + a POOLED row: "
+                    "Spearman rank IC vs forward log-return, Newey-West "
+                    "t-stat (lag=horizon, Bartlett kernel -- overlapping "
+                    "forward windows), top-vs-bottom quantile spread "
+                    "(quintiles; terciles n<200), seeded moving-block "
+                    "bootstrap 95% CI on the IC. Verdict per row: PROMISING "
+                    "(|t|>=2 AND CI excludes 0) / WEAK / DEAD / "
+                    "INSUFFICIENT_DATA; rows ranked by |IC| x |t|. "
+                    "feature_values series are aligned point-in-time (latest "
+                    "value with ts <= bar start -- NO look-ahead). Journals "
+                    "one structured_data.kind='signal_screen' row with a "
+                    "running per-family multiplicity note. REQUIRED before "
+                    "pre-registering a HYPOTHESIS on a not-yet-traded signal "
+                    "family (methodology: ic_screen_before_hypothesis). Does "
+                    "NOT touch V11/V60 and writes no hypothesis_audit row. "
+                    "Idempotency-Key honoured."
                 ),
                 idempotent=False,
             ),
@@ -1217,6 +1260,35 @@ async def playbook() -> Playbook:
                     "POST /reviews with verdict + findings list. Reviewer's "
                     "verdict is authoritative — researcher cannot override "
                     "without operator escape hatch.",
+                ],
+            ),
+            PlaybookRecipe(
+                name="feature-ic-screen",
+                when=(
+                    "Considering a NOT-YET-TRADED signal family (new feature, "
+                    "alt-data series, alpha-discovery candidate) -- BEFORE "
+                    "pre-registering a HYPOTHESIS or requesting an engine. "
+                    "Section 1.9 of the methodology; advisory, V11/V60 "
+                    "untouched."
+                ),
+                steps=[
+                    "GET /features?family=<family> or coverage check -- "
+                    "confirm the series has rows over the window.",
+                    "POST /signal-screen {signal, instruments, interval, "
+                    "horizons_bars, transform} + Idempotency-Key.",
+                    "Read response.overall_verdict:",
+                    "  'PROMISING'         -> POST /journal entry_type=HYPOTHESIS "
+                    "(pre-register, cite the screen's journal_id), then "
+                    "/null-screen -> focused sweep per the ladder",
+                    "  'DEAD'              -> pivot; the screen is already "
+                    "journaled -- do NOT register a hypothesis or request an "
+                    "engine for it",
+                    "  'WEAK'              -> try another interval/horizon or "
+                    "wait for more history; do not spend a hypothesis yet",
+                    "  'INSUFFICIENT_DATA' -> backfill coverage first "
+                    "(/features/{name}/v/{version}/backfill), then re-screen",
+                    "Mind response.multiplicity.note -- repeated screens of "
+                    "one family accumulate selection bias.",
                 ],
             ),
             PlaybookRecipe(

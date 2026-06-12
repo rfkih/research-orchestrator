@@ -23,13 +23,14 @@ Returns `{track, generated_count, hypotheses:[...], handoff}`.
 
 ## Handoff — CONFIRMATORY discipline (the hard rule)
 For **each** returned hypothesis, **before any backtest**:
-1. `POST /journal` `{entry_type:"HYPOTHESIS", status:"ACTIVE", title, content:<rationale>, structured_data:{track, mechanism, signal_definition, predicted_sign, declared_n_trials, sources}}` → capture `journal_id`. **This pre-registration must happen first.**
+0. **IC screen first (§1.9, 2026-06-12) — required for NOT-YET-TRADED signal families.** If the hypothesis rides a feature no live/graduated strategy already trades, run `POST /signal-screen` `{signal, instruments, interval, horizons_bars, transform}` (minutes, read-only, advisory). **PROMISING** on any (instrument, horizon) → proceed to step 1. **DEAD on all horizons/instruments** → the screen row is already journaled (`structured_data.kind='signal_screen'`); **pivot without registering a hypothesis** — no DSR multiplicity spent. WEAK/INSUFFICIENT_DATA → fix coverage or try another interval before spending a hypothesis. This is advisory triage only; it does not alter V11/V60.
+1. `POST /journal` `{entry_type:"HYPOTHESIS", status:"ACTIVE", title, content:<rationale>, structured_data:{track, mechanism, signal_definition, predicted_sign, declared_n_trials, sources}}` → capture `journal_id`. **This pre-registration must happen first** (cite the IC screen's `journal_id` in `structured_data` when step 0 ran).
 2. `POST /queue` `{track, instrument, interval_name, sweep_config:{...combos, track, n_trials:declared_n_trials}, hypothesis:<journal_id>}`.
 
 Then the existing `/tick` loop runs the **single confirmatory** test. Rules:
 - The HYPOTHESIS row MUST exist before `/queue` — this is pre-registration, not scan-then-formalize.
 - Do **not** exceed `declared_n_trials` — every extra combo raises the DSR significance bar (anti-p-hacking).
-- No orchestrator code was added for the handoff — it reuses `POST /journal` + `POST /queue` (Phase 1 added `track` to `/queue`).
+- No orchestrator code was added for the handoff — it reuses `POST /signal-screen` + `POST /journal` + `POST /queue` (Phase 1 added `track` to `/queue`).
 
 ## Relationship to the loops
 `/research-track <trading|hedging>` consults this workflow when it needs a fresh hypothesis line, then pre-registers + enqueues per the handoff. Discovery (web) and validation (`/tick`, no web) stay cleanly separated.
