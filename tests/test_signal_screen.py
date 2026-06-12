@@ -490,3 +490,24 @@ def test_next_actions_dead_does_not_register_hypothesis() -> None:
     out = _next_actions("DEAD", "btc_dvol")
     paths = [a.get("path") for a in out]
     assert "/journal" not in paths and "/queue" not in paths
+
+
+# -- tz-normalization regression (prod bug 2026-06-12) -------------------------
+
+
+def test_fetch_feature_series_ts_normalized_to_naive_utc():
+    """feature_values.ts is TIMESTAMPTZ (tz-aware via asyncpg) while bar
+    starts from market_data are naive -- the repo must normalize to naive
+    UTC or align_point_in_time raises TypeError (seen live on prod)."""
+    from datetime import datetime, timedelta, timezone
+
+    from orchestrator.repo.features import _to_naive_utc
+
+    aware_utc = datetime(2026, 6, 1, 12, 30, tzinfo=timezone.utc)
+    assert _to_naive_utc(aware_utc) == datetime(2026, 6, 1, 12, 30)
+
+    aware_wib = datetime(2026, 6, 1, 19, 30, tzinfo=timezone(timedelta(hours=7)))
+    assert _to_naive_utc(aware_wib) == datetime(2026, 6, 1, 12, 30)
+
+    naive = datetime(2026, 6, 1, 12, 30)
+    assert _to_naive_utc(naive) == naive

@@ -7,9 +7,19 @@ SELECT but not INSERT/UPDATE on these tables. Writes happen inside
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
+
+
+def _to_naive_utc(dt: datetime) -> datetime:
+    """feature_values.ts is TIMESTAMPTZ (asyncpg -> tz-aware), while
+    market_data/feature_store use naive TIMESTAMP. Normalize to naive UTC
+    so the /signal-screen point-in-time merge compares like with like
+    (aware-vs-naive comparison raises TypeError)."""
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 async def list_features(
@@ -321,7 +331,7 @@ async def fetch_feature_series(
         )
         if rows:
             return (
-                [(r["ts"], float(r["value"])) for r in rows],
+                [(_to_naive_utc(r["ts"]), float(r["value"])) for r in rows],
                 {
                     "resolved": True,
                     "version": int(version),
