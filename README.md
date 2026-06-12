@@ -104,6 +104,8 @@ src/orchestrator/
     reviews.py       — /reviews/request, /reviews, /reviews/by-target,
                        /reviews/auto-run-checklist (server-side reviewer)
     tick.py          — /tick, /tick/drain (server-side runner)
+    signal_screen.py — /signal-screen (feature-level IC screen; advisory triage
+                       before hypothesis registration — cost ladder rung 0)
     pagination.py    — opaque cursor encode/decode
     json_response.py — Decimal/UUID/datetime-aware encoder
     deps.py          — DB connection + agent-name dependencies
