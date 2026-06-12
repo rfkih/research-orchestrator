@@ -47,7 +47,9 @@ def test_portfolio_constants_are_pinned() -> None:
 
     assert PORTFOLIO_DISCOUNT_K == 0.5
     assert PROTECTED_STRATEGY_CODES == ("LSR", "VCB", "VBO")
-    assert MIN_OVERLAP_DAYS_FOR_CORR == 5
+    # Raised 5 -> 20 (2026-06-12): Spearman on 5 points (SE ~0.7) must
+    # not bind a 50%-PF-discount decision.
+    assert MIN_OVERLAP_DAYS_FOR_CORR == 20
     assert BASELINE_CACHE_TTL_S == 24 * 3600
     assert BASELINE_MAX_AGE_DAYS == 30
 
@@ -139,17 +141,23 @@ def _series(pairs: list[tuple[int, float]]) -> dict[date, float]:
     return {date(2026, 1, d): v for d, v in pairs}
 
 
+def _lin(n, f, month: int = 1) -> dict[date, float]:
+    """n-day series over 2026-{month} with value f(day). Fixtures need
+    >= MIN_OVERLAP_DAYS_FOR_CORR (20) points since the 2026-06-12 raise."""
+    return {date(2026, month, d): float(f(d)) for d in range(1, n + 1)}
+
+
 def test_pearson_corr_perfect_positive_is_one() -> None:
-    a = _series([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0), (5, 5.0)])
-    b = _series([(1, 2.0), (2, 4.0), (3, 6.0), (4, 8.0), (5, 10.0)])
+    a = _lin(21, lambda d: d)
+    b = _lin(21, lambda d: 2 * d)
     rho = pearson_corr(a, b)
     assert rho is not None
     assert abs(rho - 1.0) < 1e-9
 
 
 def test_pearson_corr_perfect_negative_is_minus_one() -> None:
-    a = _series([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0), (5, 5.0)])
-    b = _series([(1, 5.0), (2, 4.0), (3, 3.0), (4, 2.0), (5, 1.0)])
+    a = _lin(21, lambda d: d)
+    b = _lin(21, lambda d: 22 - d)
     rho = pearson_corr(a, b)
     assert rho is not None
     assert abs(rho + 1.0) < 1e-9
@@ -162,14 +170,14 @@ def test_pearson_corr_thin_overlap_returns_none() -> None:
 
 
 def test_pearson_corr_no_overlap_returns_none() -> None:
-    a = _series([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0), (5, 5.0)])
-    b = _series([(10, 1.0), (11, 2.0), (12, 3.0), (13, 4.0), (14, 5.0)])
+    a = _lin(21, lambda d: d)
+    b = _lin(21, lambda d: d, month=2)
     assert pearson_corr(a, b) is None
 
 
 def test_pearson_corr_constant_series_returns_none() -> None:
-    a = _series([(1, 1.0), (2, 1.0), (3, 1.0), (4, 1.0), (5, 1.0)])
-    b = _series([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0), (5, 5.0)])
+    a = _lin(21, lambda d: 1.0)
+    b = _lin(21, lambda d: d)
     assert pearson_corr(a, b) is None  # zero variance in a → undefined
 
 
@@ -187,8 +195,8 @@ def test_ranks_with_average_ties_handles_ties() -> None:
 
 def test_spearman_corr_perfect_monotonic_is_one() -> None:
     # Spearman picks up monotonic but non-linear relationships.
-    a = _series([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0), (5, 5.0)])
-    b = _series([(1, 1.0), (2, 4.0), (3, 9.0), (4, 16.0), (5, 25.0)])
+    a = _lin(21, lambda d: d)
+    b = _lin(21, lambda d: d * d)
     rho = spearman_corr(a, b)
     assert rho is not None
     assert abs(rho - 1.0) < 1e-9
@@ -197,8 +205,8 @@ def test_spearman_corr_perfect_monotonic_is_one() -> None:
 def test_spearman_corr_ignores_outliers_more_than_pearson() -> None:
     # Six matched-rank pairs, then one extreme outlier in B that doesn't
     # change ranks. Pearson swings; Spearman barely moves.
-    a = _series([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0), (5, 5.0), (6, 6.0)])
-    b = _series([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0), (5, 5.0), (6, 1000.0)])
+    a = _lin(21, lambda d: d)
+    b = _lin(21, lambda d: d if d < 21 else 1000.0)
     rho_s = spearman_corr(a, b)
     rho_p = pearson_corr(a, b)
     assert rho_s is not None and rho_p is not None
@@ -216,11 +224,11 @@ def test_spearman_corr_thin_overlap_returns_none() -> None:
 
 
 def test_max_abs_correlation_picks_largest_abs() -> None:
-    cand = _series([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0), (5, 5.0)])
+    cand = _lin(21, lambda d: d)
     base = {
-        "LSR": _series([(1, 5.0), (2, 4.0), (3, 3.0), (4, 2.0), (5, 1.0)]),  # rho=-1
-        "VCB": _series([(1, 1.0), (2, 1.5), (3, 1.7), (4, 1.6), (5, 2.0)]),  # rho<+1
-        "VBO": _series([(10, 5.0), (11, 4.0)]),  # no overlap → None
+        "LSR": _lin(21, lambda d: 22 - d),                        # rho=-1
+        "VCB": _lin(21, lambda d: d + (1.5 if d == 3 else 0.0)),  # rho<+1 (one inversion)
+        "VBO": _lin(2, lambda d: d, month=2),  # no overlap → None
     }
     # Default method is spearman now; on rank-perfect series, both yield 1.
     max_abs, per_code = max_abs_correlation(cand, base)
@@ -230,15 +238,15 @@ def test_max_abs_correlation_picks_largest_abs() -> None:
 
 
 def test_max_abs_correlation_method_pearson_explicit() -> None:
-    cand = _series([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0), (5, 5.0)])
-    base = {"LSR": _series([(1, 2.0), (2, 4.0), (3, 6.0), (4, 8.0), (5, 10.0)])}
+    cand = _lin(21, lambda d: d)
+    base = {"LSR": _lin(21, lambda d: 2 * d)}
     max_abs, per_code = max_abs_correlation(cand, base, method="pearson")
     assert max_abs is not None and abs(max_abs - 1.0) < 1e-9
     assert per_code["LSR"] is not None and abs(per_code["LSR"] - 1.0) < 1e-9
 
 
 def test_max_abs_correlation_no_baselines_returns_none() -> None:
-    cand = _series([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0), (5, 5.0)])
+    cand = _lin(21, lambda d: d)
     max_abs, per_code = max_abs_correlation(cand, {})
     assert max_abs is None
     assert per_code == {}
@@ -251,10 +259,10 @@ def test_max_positive_correlation_picks_largest_positive() -> None:
     # Candidate is rank-perfectly anti-correlated with LSR (-1.0) and
     # perfectly correlated with VBO (+1.0). max_positive must be +1.0
     # and per_code preserves the SIGNED values (no |abs|).
-    cand = _series([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0), (5, 5.0)])
+    cand = _lin(21, lambda d: d)
     base = {
-        "LSR": _series([(1, 5.0), (2, 4.0), (3, 3.0), (4, 2.0), (5, 1.0)]),
-        "VBO": _series([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0), (5, 5.0)]),
+        "LSR": _lin(21, lambda d: 22 - d),
+        "VBO": _lin(21, lambda d: d),
     }
     max_positive, per_code = max_positive_correlation(cand, base)
     assert max_positive is not None and abs(max_positive - 1.0) < 1e-9
@@ -266,10 +274,10 @@ def test_max_positive_correlation_all_negative_returns_zero() -> None:
     # Every per-code correlation is negative (pure-diversifier candidate).
     # max_positive returns 0.0 (no positive correlation present), not
     # the |abs| value — i.e. the gate won't discount pf_lo at all.
-    cand = _series([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0), (5, 5.0)])
+    cand = _lin(21, lambda d: d)
     base = {
-        "LSR": _series([(1, 5.0), (2, 4.0), (3, 3.0), (4, 2.0), (5, 1.0)]),
-        "VCB": _series([(1, 4.0), (2, 3.5), (3, 3.0), (4, 2.5), (5, 2.0)]),
+        "LSR": _lin(21, lambda d: 22 - d),
+        "VCB": _lin(21, lambda d: 50.0 - 2 * d),
     }
     max_positive, per_code = max_positive_correlation(cand, base)
     assert max_positive == 0.0
@@ -277,15 +285,15 @@ def test_max_positive_correlation_all_negative_returns_zero() -> None:
 
 
 def test_max_positive_correlation_no_baselines_returns_none() -> None:
-    cand = _series([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0), (5, 5.0)])
+    cand = _lin(21, lambda d: d)
     max_positive, per_code = max_positive_correlation(cand, {})
     assert max_positive is None
     assert per_code == {}
 
 
 def test_max_positive_correlation_method_pearson_explicit() -> None:
-    cand = _series([(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0), (5, 5.0)])
-    base = {"LSR": _series([(1, 2.0), (2, 4.0), (3, 6.0), (4, 8.0), (5, 10.0)])}
+    cand = _lin(21, lambda d: d)
+    base = {"LSR": _lin(21, lambda d: 2 * d)}
     max_positive, per_code = max_positive_correlation(cand, base, method="pearson")
     assert max_positive is not None and abs(max_positive - 1.0) < 1e-9
     assert per_code["LSR"] is not None and abs(per_code["LSR"] - 1.0) < 1e-9
@@ -460,10 +468,10 @@ def test_evaluate_portfolio_gate_reads_snake_case_initial_capital(monkeypatch) -
 
     # Inject a baseline that's perfectly rank-correlated with the
     # candidate. Patch fetch_book_baselines to return it directly.
-    candidate_trades = _make_trades({1: 1.0, 2: 2.0, 3: 3.0, 4: 4.0, 5: 5.0})
-    baseline_returns = {date(2026, 1, d): float(d) for d in range(1, 6)}
+    candidate_trades = _make_trades({d: float(d) for d in range(1, 22)})
+    baseline_returns = {date(2026, 1, d): float(d) for d in range(1, 22)}
 
-    async def fake_fetch(db, codes=None, now_fn=None):
+    async def fake_fetch(db, codes=None, now_fn=None, **kwargs):
         return {"LSR": baseline_returns}
 
     monkeypatch.setattr(
@@ -493,7 +501,7 @@ def test_evaluate_portfolio_gate_no_baseline_skips(monkeypatch) -> None:
         evaluate_portfolio_gate,
     )
 
-    async def fake_fetch(db, codes=None, now_fn=None):
+    async def fake_fetch(db, codes=None, now_fn=None, **kwargs):
         return {}  # no protected backtests on file
 
     monkeypatch.setattr(
@@ -505,7 +513,7 @@ def test_evaluate_portfolio_gate_no_baseline_skips(monkeypatch) -> None:
         evaluate_portfolio_gate(
             db=_FakeDb(),
             run_metrics={"initial_capital": "100.0"},
-            trades=_make_trades({1: 1.0, 2: 2.0, 3: 3.0, 4: 4.0, 5: 5.0}),
+            trades=_make_trades({d: float(d) for d in range(1, 22)}),
             pf_ci={"low": 1.05, "high": 1.5},
         )
     )
@@ -524,10 +532,10 @@ def test_evaluate_portfolio_gate_exposes_both_spearman_and_pearson(monkeypatch) 
         evaluate_portfolio_gate,
     )
 
-    candidate_trades = _make_trades({1: 1.0, 2: 2.0, 3: 3.0, 4: 4.0, 5: 5.0})
-    baseline = {date(2026, 1, d): float(d) for d in range(1, 6)}
+    candidate_trades = _make_trades({d: float(d) for d in range(1, 22)})
+    baseline = {date(2026, 1, d): float(d) for d in range(1, 22)}
 
-    async def fake_fetch(db, codes=None, now_fn=None):
+    async def fake_fetch(db, codes=None, now_fn=None, **kwargs):
         return {"LSR": baseline}
 
     monkeypatch.setattr(

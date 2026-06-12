@@ -18,21 +18,43 @@ import logging
 import os
 import re
 import subprocess
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ..config import Settings
 
 logger = logging.getLogger(__name__)
 
-_CLAUDE_BIN = os.environ.get(
-    "CLAUDE_BIN",
-    r"C:\Users\rifki\AppData\Local\Microsoft\WinGet\Links\claude.exe",
-)
-_TIMEOUT_S = int(os.environ.get("ORCH_AI_NARRATIVE_TIMEOUT_S", "480"))
 
+def _resolve_config(settings: "Settings | None") -> tuple[bool, str, int]:
+    """(enabled, claude_bin, timeout_s) — Settings is authoritative.
 
-def _is_enabled() -> bool:
-    # Checked at call time (not module-load) so load_dotenv() in __main__
-    # has already run before the first paper request arrives.
-    return os.environ.get("ORCH_AI_NARRATIVE_ENABLED", "").strip() in ("1", "true", "True", "yes")
+    The pre-2026-06-12 version read ``os.environ`` at module import, which
+    silently ignored ``.env`` under ``uvicorn orchestrator.main:app``
+    (pydantic-settings reads .env itself without populating os.environ) —
+    the validated ``ai_narrative_*`` Settings fields were dead code and the
+    flag no-opped depending on how the process was launched. When no
+    Settings object is passed, one is constructed (pydantic-settings reads
+    env + .env); the raw-env fallback only remains for minimal test
+    environments where Settings can't validate.
+    """
+    if settings is None:
+        try:
+            from ..config import Settings as _Settings
+
+            settings = _Settings()
+        except Exception:  # noqa: BLE001 — minimal envs can't build Settings
+            settings = None
+    if settings is not None:
+        return (
+            settings.ai_narrative_enabled,
+            settings.ai_narrative_claude_bin,
+            settings.ai_narrative_timeout_s,
+        )
+    enabled = os.environ.get("ORCH_AI_NARRATIVE_ENABLED", "").strip() in (
+        "1", "true", "True", "yes",
+    )
+    return enabled, os.environ.get("CLAUDE_BIN", "claude"), 240
 
 _SYSTEM = (
     "You are an expert quantitative finance researcher writing a formal empirical "
@@ -85,9 +107,15 @@ async def generate_narrative(
     iterations: list[dict[str, Any]],
     run_meta: dict[str, Any] | None,
     gate: dict[str, Any],
+    settings: "Settings | None" = None,
 ) -> list[dict[str, Any]] | None:
-    """Return AI-generated sections or None if the CLI is unavailable/call fails."""
-    if not _is_enabled():
+    """Return AI-generated sections or None if the CLI is unavailable/call fails.
+
+    ``settings`` is optional for caller back-compat (paper_generator doesn't
+    carry one); when omitted, a Settings is constructed from env/.env.
+    """
+    enabled, claude_bin, timeout_s = _resolve_config(settings)
+    if not enabled:
         return None
     data_block = _build_data_block(queue, best, iterations, run_meta, gate)
     prompt = _SECTION_PROMPT.format(
@@ -95,27 +123,27 @@ async def generate_narrative(
         data=json.dumps(data_block, indent=2, default=str),
     )
 
-    logger.info("paper_narrator: prompt_chars=%d, timeout_s=%d", len(prompt), _TIMEOUT_S)
+    logger.info("paper_narrator: prompt_chars=%d, timeout_s=%d", len(prompt), timeout_s)
 
     def _run_cli() -> subprocess.CompletedProcess[bytes]:
         return subprocess.run(
-            [_CLAUDE_BIN, "--print", "--allowed-tools", ""],
+            [claude_bin, "--print", "--allowed-tools", ""],
             input=prompt.encode(),
             capture_output=True,
-            timeout=_TIMEOUT_S,
+            timeout=timeout_s,
         )
 
     loop = asyncio.get_event_loop()
     try:
         completed = await asyncio.wait_for(
             loop.run_in_executor(None, _run_cli),
-            timeout=_TIMEOUT_S + 10,
+            timeout=timeout_s + 10,
         )
     except FileNotFoundError:
-        logger.warning("paper_narrator: claude CLI not found at %s; skipping AI narrative", _CLAUDE_BIN)
+        logger.warning("paper_narrator: claude CLI not found at %s; skipping AI narrative", claude_bin)
         return None
     except (asyncio.TimeoutError, subprocess.TimeoutExpired):
-        logger.warning("paper_narrator: claude CLI timed out after %ds; skipping AI narrative", _TIMEOUT_S)
+        logger.warning("paper_narrator: claude CLI timed out after %ds; skipping AI narrative", timeout_s)
         return None
     except Exception as exc:
         logger.warning("paper_narrator: subprocess error (%s); skipping AI narrative", exc)

@@ -21,49 +21,69 @@ log = get_logger(__name__)
 
 # Refresh interval: 3600 seconds (1 hour)
 FEATURE_REFRESH_INTERVAL_S = 3600
+# After this many consecutive failures, escalate from warning to ERROR so
+# the ErrorReporter ships it (error_log + Telegram). A permanent failure —
+# wrong route, dead container — must not warn politely forever while the
+# ML signal pipeline silently starves.
+CONSECUTIVE_FAILURES_TO_ESCALATE = 3
 
 
 async def hourly_feature_refresh(settings: Settings) -> None:
     """Coroutine that refreshes features on a 1-hour loop.
 
-    Calls POST {ingest_base_url}/compute/refresh to trigger feature compute
-    from the last-persisted timestamp up to the present. This is a best-effort
-    background task — exceptions are logged but do not crash the app.
+    Calls ``POST {ingest_base_url}/compute/incremental`` — the route served
+    by the DEPLOYED ingest entrypoint (``blackheart_ingest.workers.server``,
+    :8001). The pre-2026-06-12 version POSTed ``/compute/refresh``, which
+    exists only on the never-served ``app.py`` — every hourly attempt 404'd
+    and was demoted to a warning, forever (memory:
+    project_ingest_two_fastapi_apps_dead_refresh_route).
 
-    Args:
-        settings: Orchestrator settings (ingest_base_url, ingest_request_timeout_s)
+    Body is empty: the ingest side then uses its own
+    ``compute_lookback_hours`` setting for the incremental window.
+
+    The first attempt fires shortly after startup (not a full interval
+    later) so a deploy cadence faster than 1h still refreshes at least once.
     """
+    consecutive_failures = 0
+    first_run = True
     while True:
         try:
-            await asyncio.sleep(FEATURE_REFRESH_INTERVAL_S)
+            await asyncio.sleep(30 if first_run else FEATURE_REFRESH_INTERVAL_S)
+            first_run = False
             log.info("feature_refresh.start")
 
             async with httpx.AsyncClient(
                 timeout=settings.ingest_request_timeout_s
             ) as client:
                 response = await client.post(
-                    f"{settings.ingest_base_url}/compute/refresh",
-                    # Incremental: compute only from max(feature_values.ts) to now,
-                    # not a full 180-day recompute. Full recompute every hour was
-                    # writing 900+ rows/feature and racing the bar_event_consumer —
-                    # if the refresh won the race, rows_written=0 suppressed the
-                    # inference webhook, flipping source from stream→catchup_scan.
-                    json={"incremental": True},
+                    f"{settings.ingest_base_url}/compute/incremental",
                 )
                 response.raise_for_status()
                 result: dict[str, Any] = response.json()
+                consecutive_failures = 0
                 log.info(
                     "feature_refresh.complete",
                     features_computed=result.get("features_computed"),
-                    rows_written=result.get("rows_written"),
-                    compute_duration_s=result.get("compute_duration_s"),
+                    total_rows=result.get("total_rows"),
+                    failures=result.get("failures"),
+                    lookback_hours=result.get("lookback_hours"),
                 )
         except asyncio.CancelledError:
             log.info("feature_refresh.shutdown")
             raise
         except httpx.HTTPError as exc:
-            log.warning("feature_refresh.http_error", error=repr(exc))
+            consecutive_failures += 1
+            if consecutive_failures >= CONSECUTIVE_FAILURES_TO_ESCALATE:
+                log.error(
+                    "feature_refresh.persistent_failure",
+                    error=repr(exc),
+                    consecutive_failures=consecutive_failures,
+                    ingest_base_url=settings.ingest_base_url,
+                )
+            else:
+                log.warning("feature_refresh.http_error", error=repr(exc))
         except Exception as exc:  # noqa: BLE001
+            consecutive_failures += 1
             log.exception("feature_refresh.error", error=repr(exc))
 
 

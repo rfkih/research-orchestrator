@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS research_queue (
     started_at      TIMESTAMP,
     completed_at    TIMESTAMP,
     notes           TEXT,
+    active_backtest_run_id UUID,
     CONSTRAINT pk_research_queue PRIMARY KEY (queue_id)
 );
 

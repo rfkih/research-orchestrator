@@ -208,7 +208,9 @@ def test_statistical_verdict_no_edge_when_ci_below_one() -> None:
 
 
 def test_statistical_verdict_significant_when_ci_above_one() -> None:
-    out = statistical_verdict(200, {"low": 1.2, "high": 2.5})
+    # dsr must clear the multiplicity bar — dsr=None at gate sample size
+    # fails CLOSED since 2026-06-12 (see test_tier1_quant_grade).
+    out = statistical_verdict(200, {"low": 1.2, "high": 2.5}, dsr=0.97)
     assert out["verdict"] == "SIGNIFICANT_EDGE"
 
 

@@ -145,32 +145,73 @@ OptimizerName = Literal["HRP", "EQUAL_WEIGHT", "MEAN_VARIANCE"]
 def _apply_guardrails(
     raw_weights: dict[str, float],
 ) -> tuple[dict[str, float], dict[str, Any]]:
-    """Clamp each weight to ``[MIN_WEIGHT, MAX_WEIGHT]`` then renormalise
-    so they sum to 1.0. Returns ``(clamped_weights, diagnostics)`` --
-    diagnostics includes per-code clamp events so the operator can see
-    which weights the bounds bound.
+    """Clamp each weight to ``[MIN_WEIGHT, MAX_WEIGHT]`` and renormalise
+    so they sum to 1.0, iterating to a fixed point (water-filling).
+    Returns ``(clamped_weights, diagnostics)`` -- diagnostics includes
+    per-code clamp events so the operator can see which weights the
+    bounds bound.
+
+    A single clamp-then-renormalise pass VIOLATES the cap after renorm:
+    {0.7, 0.2, 0.1} → clamp to {0.5, 0.2, 0.1} → ÷0.8 → A = 0.625 > 0.50,
+    written straight to live ``account_strategy.portfolio_weight``. So we
+    pin saturated weights at their bound and renormalise only the free
+    remainder, repeating until no new weight breaches a bound. Converges
+    in ≤ n passes (each pass pins at least one new weight or terminates).
+    When every weight pins (bounds infeasible for exact sum-1), the pinned
+    values are returned normalised as a last resort — with N·MAX ≥ 1 and
+    N·MIN ≤ 1 that never re-breaches MAX.
 
     Empty input → empty output (caller decides what to do; an empty
     book is not a rebalance, it's a no-op).
     """
     if not raw_weights:
         return {}, {"n_clamped_low": 0, "n_clamped_high": 0, "renorm_factor": 1.0}
+
+    eps = 1e-12
+    pinned: dict[str, float] = {}
+    free: dict[str, float] = {c: float(w) for c, w in raw_weights.items()}
     n_low = 0
     n_high = 0
-    clamped: dict[str, float] = {}
-    for code, w in raw_weights.items():
-        if w < MIN_WEIGHT:
-            n_low += 1
-            clamped[code] = MIN_WEIGHT
-        elif w > MAX_WEIGHT:
-            n_high += 1
-            clamped[code] = MAX_WEIGHT
-        else:
-            clamped[code] = float(w)
-    s = sum(clamped.values())
+    for _ in range(len(raw_weights) + 1):
+        pinned_budget = sum(pinned.values())
+        free_budget = 1.0 - pinned_budget
+        free_sum = sum(free.values())
+        if not free or free_budget <= 0:
+            break
+        if free_sum <= 0:
+            # Degenerate (e.g. all-zero raw weights): scaling is undefined,
+            # so pin the remainder at MIN_WEIGHT and renormalise below.
+            for code in list(free):
+                pinned[code] = MIN_WEIGHT
+                del free[code]
+                n_low += 1
+            break
+        factor = free_budget / free_sum
+        breached = False
+        for code, w in list(free.items()):
+            scaled = w * factor
+            if scaled > MAX_WEIGHT + eps:
+                pinned[code] = MAX_WEIGHT
+                del free[code]
+                n_high += 1
+                breached = True
+            elif scaled < MIN_WEIGHT - eps:
+                pinned[code] = MIN_WEIGHT
+                del free[code]
+                n_low += 1
+                breached = True
+        if not breached:
+            normalised = {**pinned, **{c: w * factor for c, w in free.items()}}
+            return {c: float(w) for c, w in normalised.items()}, {
+                "n_clamped_low": n_low,
+                "n_clamped_high": n_high,
+                "renorm_factor": round(factor, 6),
+            }
+    # Everything pinned (or degenerate input): renormalise the pinned set.
+    combined = {**pinned, **free}
+    s = sum(combined.values())
     factor = 1.0 / s if s > 0 else 1.0
-    normalised = {c: float(w * factor) for c, w in clamped.items()}
-    return normalised, {
+    return {c: float(w * factor) for c, w in combined.items()}, {
         "n_clamped_low": n_low,
         "n_clamped_high": n_high,
         "renorm_factor": round(factor, 6),

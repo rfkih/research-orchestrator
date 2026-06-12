@@ -81,27 +81,45 @@ def _classify_verdict(
     gradual_pct: float = DEGRADATION_PCT_GRADUAL,
 ) -> tuple[EdgeDecayVerdict, float | None]:
     """Reduce a list of per-scale results to a single verdict + the
-    largest capital where edge holds (None if INVERTED)."""
-    valid = [
-        s for s in per_scale
-        if "metrics" in s and s["metrics"].get("pf") is not None
-    ]
-    if not valid:
+    largest capital where edge holds (None if INVERTED).
+
+    Hardened 2026-06-12: (a) requires ≥2 valid scales — one surviving run
+    (e.g. only the $1M tier when the $100 tier errored) used to produce the
+    STRONGEST verdict, LINEAR_SCALABLE with max_viable=$1M, off zero decay
+    evidence; (b) scales are sorted by scale_usd so an unsorted request
+    can't make the largest tier the "base"; (c) max_viable stops at the
+    FIRST scale below the noise floor (contiguous semantics, per the module
+    docstring "the prior scale is the cap") instead of jumping interior
+    cliffs; (d) max_viable starts as None when even the base PF is below
+    the noise floor."""
+    valid = sorted(
+        (
+            s for s in per_scale
+            if "metrics" in s and s["metrics"].get("pf") is not None
+        ),
+        key=lambda s: float(s["scale_usd"]),
+    )
+    if len(valid) < 2:
         return "INSUFFICIENT_DATA", None
     base = valid[0]
     base_pf = base["metrics"]["pf"]
     if base_pf is None or base_pf < 1.0:
         return "INVERTED", None
-    max_viable: float | None = base["scale_usd"]
+    max_viable: float | None = (
+        base["scale_usd"] if base_pf >= noise_floor else None
+    )
     max_decay_pct = 0.0
+    viable_run_intact = base_pf >= noise_floor
     for s in valid[1:]:
         pf = s["metrics"]["pf"]
         if pf is None:
             continue
         decay_pct = ((base_pf - pf) / base_pf) * 100.0
         max_decay_pct = max(max_decay_pct, decay_pct)
-        if pf >= noise_floor:
+        if pf >= noise_floor and viable_run_intact:
             max_viable = s["scale_usd"]
+        else:
+            viable_run_intact = False
     if max_decay_pct < gentle_pct:
         return "LINEAR_SCALABLE", max_viable
     if max_decay_pct < gradual_pct:
@@ -375,13 +393,21 @@ async def run_capacity_sweep(
                 "error": e.envelope.error_code,
             })
             continue
-        final_status = await _poll_backtest_status(db, run_id)
+        final_status = await _poll_backtest_status(
+            db, run_id, timeout_s=settings.poll_timeout_s
+        )
         if final_status != "COMPLETED":
+            capped = final_status not in ("FAILED", "CANCELLED", "ERROR")
             per_scale.append({
                 "scale_index": idx,
                 "scale_usd": scale,
                 "run_id": run_id,
-                "error": f"status={final_status}",
+                "error": (
+                    f"poll_cap_exceeded status={final_status}"
+                    if capped
+                    else f"status={final_status}"
+                ),
+                "poll_capped": capped,
             })
             continue
         async with db.acquire() as conn:

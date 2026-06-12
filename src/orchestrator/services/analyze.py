@@ -272,9 +272,25 @@ def deflated_sharpe_ratio(
     pnls: list[float] | None = None,
     bootstrap_B: int = 1000,
     bootstrap_seed: int = 17,
+    trial_sharpes: list[float] | None = None,
 ) -> float | None:
-    """Deflated Sharpe Ratio (Bailey & Lopez de Prado 2014), using the
-    REAL cumulative trial count rather than the V11 hardcoded N=5.
+    """Multiplicity-deflated Sharpe significance, using the REAL cumulative
+    trial count rather than the V11 hardcoded N=5.
+
+    Honest labelling (2026-06-12): the default threshold here is a
+    BONFERRONI bar — SR* = Phi^-1(1 - 0.05/n_trials)/sqrt(n_obs) — not the
+    published Bailey-LdP expected-maximum term. Under the null (trial
+    Sharpes ~ N(0, 1/n)) Bonferroni is STRICTER than E[max], so the default
+    direction is conservative; but when the sweep's trials have genuinely
+    dispersed Sharpes (V[{SR_n}] > 1/n, typical of wide param grids) the
+    true LdP deflation exceeds Bonferroni. Callers that can supply the
+    per-trial Sharpes (``trial_sharpes``) get the full Bailey-LdP term
+
+        SR*_ldp = sqrt(V[{SR_n}]) · [(1-γ)·Phi^-1(1-1/N) + γ·Phi^-1(1-1/(N·e))]
+
+    (γ = Euler-Mascheroni 0.5772…), and the binding threshold is
+    max(SR*_bonferroni, SR*_ldp) — the gate can only get STRICTER, never
+    looser (operator V11 contract).
 
     Closed-form (default): the Bailey-LdP Gaussian-asymptotic standard
     error of the sample Sharpe is
@@ -282,11 +298,10 @@ def deflated_sharpe_ratio(
         SE^2 = (1 - skew·SR + ((kurt+2)/4)·SR^2) / (n_obs - 1)
         (``kurt`` = EXCESS kurtosis κ; ((κ+2)/4) == Bailey-LdP ((γ4-1)/4))
 
-    DSR = Phi((SR - SR*) / SE), where SR* = Phi^-1(1 - 0.05/n_trials) /
-    sqrt(n_obs) is the selection-bias-adjusted threshold. The
-    ``denom_sq`` numerator can go non-positive when the return
-    distribution is heavily skewed (skew·SR > 1 + ((kurt-1)/4)·SR^2),
-    in which case the closed-form is undefined.
+    DSR = Phi((SR - SR*) / SE). The ``denom_sq`` numerator can go
+    non-positive when the return distribution is heavily skewed
+    (skew·SR > 1 + ((kurt-1)/4)·SR^2), in which case the closed-form is
+    undefined.
 
     Bootstrap fallback (this commit, 2026-05-21): when ``denom_sq <= 0``
     AND a ``pnls`` series is supplied, fall back to the non-parametric
@@ -314,6 +329,17 @@ def deflated_sharpe_ratio(
     n_trials = max(1, int(n_trials))
     z_alpha = _norm_inv(1 - 0.05 / n_trials)
     sr_star = z_alpha / math.sqrt(n_obs)
+    # Bailey-LdP expected-max term when per-trial Sharpes are available.
+    # max() keeps Bonferroni as the floor — never looser than the default.
+    if trial_sharpes is not None and len(trial_sharpes) >= 2 and n_trials > 1:
+        var_trials = statistics.pvariance(trial_sharpes)
+        if var_trials > 0:
+            gamma = 0.5772156649015329  # Euler-Mascheroni
+            sr_star_ldp = math.sqrt(var_trials) * (
+                (1 - gamma) * _norm_inv(1 - 1.0 / n_trials)
+                + gamma * _norm_inv(1 - 1.0 / (n_trials * math.e))
+            )
+            sr_star = max(sr_star, sr_star_ldp)
     # See probabilistic_sharpe_ratio: ``kurt`` is EXCESS kurtosis, so the
     # Bailey-LdP ((γ4-1)/4) term is ((kurt + 2)/4), not (kurt - 1)/4.
     denom_sq = 1 - skew * sr + ((kurt + 2) / 4) * (sr**2)
@@ -535,9 +561,11 @@ def statistical_verdict(
     cumulative trial count. If DSR < 0.95, demote SIGNIFICANT_EDGE to
     INSUFFICIENT_EVIDENCE with a reason that names the multiplicity.
 
-    DSR is None for n<30 (insufficient observations for the PSR formula);
-    in that case we fall back to PF-only behaviour rather than blocking
-    valid early-stage iterations.
+    dsr=None at gate sample size is fail-CLOSED (2026-06-12): past the
+    n>=MIN_TRADES_FOR_SIG floor the DSR is always computable unless the
+    return distribution is so degenerate that BOTH the closed form and
+    the bootstrap fallback gave up — letting that case through on the
+    PF CI alone was the one fail-open in the verdict chain.
     """
     if n < MIN_TRADES_FOR_SIG:
         return {"verdict": "INSUFFICIENT_EVIDENCE",
@@ -547,7 +575,17 @@ def statistical_verdict(
         return {"verdict": "INSUFFICIENT_EVIDENCE",
                 "reason": "PF confidence interval not computable"}
     if lo > 1.0:
-        if dsr is not None and dsr < DSR_SIGNIFICANCE_THRESHOLD:
+        if dsr is None:
+            return {
+                "verdict": "INSUFFICIENT_EVIDENCE",
+                "reason": (
+                    f"PF 95% CI [{lo}, {hi}] favorable but DSR is not "
+                    f"computable at n={n} (degenerate return distribution; "
+                    f"closed form and bootstrap both failed) — the "
+                    f"multiplicity gate cannot be bypassed."
+                ),
+            }
+        if dsr < DSR_SIGNIFICANCE_THRESHOLD:
             return {
                 "verdict": "INSUFFICIENT_EVIDENCE",
                 "reason": (

@@ -27,9 +27,14 @@ from .specialists.portfolio_math import (
     spearman_corr_matrix,
 )
 
-# Trading days per year for Sharpe annualisation — matches the rest of the
-# platform (BacktestMetricsService / analyze.py use 252).
-_TRADING_DAYS = 252
+# Days per year for Sharpe annualisation. 365, NOT 252: the series is
+# calendar-filled (missing days = 0) onto a 365-day grid, and the platform
+# convention for crypto is a 365-day year (analyze.py DAYS_PER_YEAR=365 —
+# the old comment claiming "the rest of the platform uses 252" was wrong).
+# Mixing a 365-day grid with √252 understated pool/stream Sharpes ~17%.
+# NB: DEFAULT_THETA margins were calibrated on the old basis; absolute
+# Sharpes rise ~17% under this fix while marginal COMPARISONS are unmoved.
+_TRADING_DAYS = 365
 # Minimum marginal Sharpe uplift to admit — a small positive margin so noise
 # doesn't pad the book. Overridable per call.
 DEFAULT_THETA = 0.02
@@ -353,17 +358,22 @@ STREAM_MIN_OBS = 252         # ~1 year of daily observations
 
 
 def _skew_kurt(vals: list[float]) -> tuple[float, float]:
-    """Sample skewness + (raw) kurtosis; (0, 3) — Gaussian — for degenerate input."""
+    """Sample skewness + EXCESS kurtosis; (0, 0) — Gaussian — for degenerate
+    input. ``probabilistic_sharpe_ratio`` expects EXCESS kurtosis (its
+    denominator uses ((κ+2)/4)); the pre-2026-06-12 version returned RAW
+    kurtosis (Gaussian = 3), overstating the SE for every stream-admission
+    PSR — conservative in direction but a real basis mismatch in the
+    binding STREAM_PSR_THRESHOLD gate."""
     n = len(vals)
     if n < 4:
-        return 0.0, 3.0
+        return 0.0, 0.0
     mean = sum(vals) / n
     m2 = sum((v - mean) ** 2 for v in vals) / n
     if m2 == 0:
-        return 0.0, 3.0
+        return 0.0, 0.0
     m3 = sum((v - mean) ** 3 for v in vals) / n
     m4 = sum((v - mean) ** 4 for v in vals) / n
-    return m3 / (m2 ** 1.5), m4 / (m2 ** 2)
+    return m3 / (m2 ** 1.5), m4 / (m2 ** 2) - 3.0
 
 
 STREAM_MIN_YEAR_DAYS = 90  # a calendar year needs >= this many obs to be judged
@@ -586,7 +596,14 @@ def _greedy_evictions(
         worst_marg: float | None = None
         for k, s in remaining.items():
             others = {kk: ss for kk, ss in remaining.items() if kk != k}
-            m = marginal_sharpe_contribution(s, others)["marginal"]
+            contrib = marginal_sharpe_contribution(s, others)
+            # insufficient_overlap means UNMEASURABLE, not redundant — its
+            # marginal is a 0.0 placeholder that would otherwise satisfy
+            # m <= evict_theta(=0.0) and evict every newly-admitted member
+            # whose history doesn't yet overlap the rest of the book.
+            if contrib.get("reason") == "insufficient_overlap":
+                continue
+            m = contrib["marginal"]
             if m <= evict_theta and (worst_marg is None or m < worst_marg):
                 worst_key, worst_marg = k, m
         if worst_key is None:

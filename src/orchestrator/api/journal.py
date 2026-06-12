@@ -107,6 +107,17 @@ async def list_journal(
         # Cursor is authoritative — ignore query-string sort params when paginating.
         sort_by = decoded.get("sb", "created_time")
         sort_dir = decoded.get("sd", "desc")
+        # Re-validate: the cursor is caller-forgeable base64(JSON), and these
+        # values bypassed the query-param validation above. An unlisted sb
+        # used to KeyError in the repo (500 instead of the documented
+        # bad_cursor 400); a garbage sd silently flipped page direction.
+        if sort_by not in _VALID_SORT_BY or sort_dir not in _VALID_SORT_DIR:
+            raise OrchestratorError(
+                status_code=400,
+                error_code="bad_cursor",
+                message="Cursor contains an invalid sort_by/sort_dir.",
+                retryable=False,
+            )
         after_id = decoded.get("id")
         raw_v = decoded.get("v")
         if sort_by == "created_time":

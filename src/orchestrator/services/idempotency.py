@@ -95,24 +95,30 @@ class PostgresIdempotencyStore:
                 )
                 return None
             payload = row["response_jsonb"]
-            # asyncpg returns JSONB as str when the codec isn't registered;
-            # callers expect a dict, so normalise.
+            # LOAD-BEARING, do not remove: rows written before 2026-06-12
+            # were double-encoded (json.dumps + jsonb codec re-dump), so
+            # they decode to a *string* containing JSON; fixtures that
+            # bypass the codec also surface str. Normalise both to dict.
             if isinstance(payload, str):
                 return json.loads(payload)
             return payload
 
     async def put(self, agent: str, key: str, value: Any) -> None:
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=self._ttl)
-        # asyncpg's JSONB codec accepts dicts directly when registered; the
-        # codebase registers it in infra/db.py, so passing the dict is fine.
-        # We serialise to text as a defensive fallback for fixtures that
-        # bypass the codec.
-        payload = json.dumps(value, default=str)
+        # Pass a plain dict and let infra/db.py's jsonb codec do the ONE
+        # encode (codebase convention — CLAUDE.md "asyncpg + JSONB"). The
+        # previous json.dumps-then-$::jsonb shape double-encoded: the codec
+        # re-dumped the already-serialised string, storing a JSON *string*
+        # scalar instead of an object — SQL-side consumers of
+        # response_jsonb->>'...' got NULLs for every row. The dumps/loads
+        # round-trip below only coerces non-JSON-native types (datetime,
+        # UUID, Decimal) the old default=str handled.
+        payload = json.loads(json.dumps(value, default=str))
         async with self._db.acquire() as conn:
             await conn.execute(
                 """
                 INSERT INTO idempotency_record (agent_name, key, response_jsonb, expires_at)
-                VALUES ($1, $2, $3::jsonb, $4)
+                VALUES ($1, $2, $3, $4)
                 ON CONFLICT (agent_name, key) DO UPDATE
                 SET response_jsonb = EXCLUDED.response_jsonb,
                     expires_at     = EXCLUDED.expires_at,

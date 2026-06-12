@@ -15,9 +15,11 @@ from orchestrator.services import pool as pool_svc
 
 
 # ── information_coefficient ──────────────────────────────────────────────────
+# Fixtures use n >= _IC_MIN_OBS (raised 3 → 20 on 2026-06-12; n=8 series
+# would now hit the not-judgeable sentinel by design).
 def test_ic_monotonic_signal_is_plus_one_significant():
-    signal = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
-    fwd = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0]
+    signal = [float(i) for i in range(1, 25)]
+    fwd = [10.0 * i for i in range(1, 25)]
     out = cb.information_coefficient(signal, fwd)
     assert round(out["ic"], 6) == 1.0
     assert out["significant"] is True
@@ -25,8 +27,8 @@ def test_ic_monotonic_signal_is_plus_one_significant():
 
 
 def test_ic_reversed_signal_is_minus_one_significant():
-    signal = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
-    fwd = [80.0, 70.0, 60.0, 50.0, 40.0, 30.0, 20.0, 10.0]
+    signal = [float(i) for i in range(1, 25)]
+    fwd = [10.0 * i for i in range(24, 0, -1)]
     out = cb.information_coefficient(signal, fwd)
     assert round(out["ic"], 6) == -1.0
     assert out["significant"] is True
@@ -35,8 +37,8 @@ def test_ic_reversed_signal_is_minus_one_significant():
 
 def test_ic_noise_is_not_significant():
     # Deliberately uncorrelated-ish pairing → |ic| small → not significant.
-    signal = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
-    fwd = [3.0, 1.0, 4.0, 2.0, 6.0, 5.0]
+    signal = [float(i) for i in range(1, 25)]
+    fwd = [3.0, 1.0, 4.0, 2.0, 6.0, 5.0] * 4
     out = cb.information_coefficient(signal, fwd)
     assert out["significant"] is False
 
@@ -47,14 +49,27 @@ def test_ic_too_few_points_guarded():
     assert out["sign"] == "0"
 
 
+def test_ic_below_min_obs_is_not_judgeable():
+    # n=8 perfectly monotonic — judgeable pre-2026-06-12, now below the
+    # n>=20 floor (a 3-point |ic|=1 was auto-significant with P=1/3 under
+    # the null; the floor closes that class).
+    out = cb.information_coefficient(
+        [float(i) for i in range(8)], [float(i) for i in range(8)]
+    )
+    assert out["significant"] is False
+    assert out["sign"] == "0"
+
+
 def test_ic_drops_non_finite_pairs():
     """A NaN/inf in either series must NOT silently corrupt the IC. The
     offending pair is dropped; if too few finite pairs remain → sentinel."""
     nan = float("nan")
-    # Only the (3.0, 3.0) pair is dropped (signal NaN); the rest are perfectly
+    # Only the NaN pair is dropped; the remaining 24 are perfectly
     # monotonic → IC stays a clean +1, NOT a silently-wrong value.
-    out = cb.information_coefficient([1.0, 2.0, nan, 4.0, 5.0],
-                                     [1.0, 2.0, 3.0, 4.0, 5.0])
+    signal = [float(i) for i in range(1, 26)]
+    fwd = [10.0 * i for i in range(1, 26)]
+    signal[2] = nan
+    out = cb.information_coefficient(signal, fwd)
     assert round(out["ic"], 6) == 1.0
     assert out["significant"] is True
     assert out["sign"] == "+"

@@ -21,7 +21,16 @@ from .observability.log_handler import ErrorReporterLoggingHandler
 
 
 def configure_logging(settings: Settings) -> None:
-    """Idempotent. Safe to call from both the app factory and tests."""
+    """Idempotent. Safe to call from both the app factory and tests.
+
+    structlog is routed THROUGH the stdlib logging tree
+    (``structlog.stdlib.LoggerFactory`` + ``wrap_for_formatter``), not
+    printed directly. The pre-2026-06-12 ``PrintLoggerFactory(stdout)``
+    bypassed stdlib entirely, so the ErrorReporterLoggingHandler attached
+    to the root logger NEVER saw a structlog ``log.error(...)`` — which is
+    nearly every error in the service (tick pipeline, JVM clients,
+    background tasks). Errors printed JSON to stdout and alerted nobody.
+    """
 
     timestamper = structlog.processors.TimeStamper(fmt="iso", utc=True, key="ts")
 
@@ -36,20 +45,26 @@ def configure_logging(settings: Settings) -> None:
     structlog.configure(
         processors=[
             *shared_processors,
-            structlog.processors.JSONRenderer(),
+            # Hand the event dict to the stdlib record (record.msg = dict);
+            # the ProcessorFormatter below renders it to one JSON line.
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ],
         wrapper_class=structlog.make_filtering_bound_logger(
             logging.getLevelName(settings.log_level)
         ),
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stdout),
+        logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
 
-    # Route stdlib (uvicorn, asyncpg) through structlog so the shape matches.
+    # One stdout handler renders BOTH structlog events and foreign stdlib
+    # records (uvicorn, asyncpg) to the same JSON-line shape.
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(
         structlog.stdlib.ProcessorFormatter(
-            processor=structlog.processors.JSONRenderer(),
+            processors=[
+                structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+                structlog.processors.JSONRenderer(),
+            ],
             foreign_pre_chain=shared_processors,
         )
     )

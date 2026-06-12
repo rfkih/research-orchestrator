@@ -24,60 +24,63 @@ class _DbShim:
         yield object()
 
 
-# ── Fix 2: evaluate() exception must NOT escape; maps to ITERATE ────────────
+# ── M2 (2026-06-12): evaluate() exception is an INFRA failure, not a verdict ─
 
 
-async def test_hedging_gate_exception_maps_to_iterate(monkeypatch):
-    """When hedging_gate.evaluate raises, _select_track_gate must NOT propagate
-    the exception. It maps to the same non-PASS ITERATE/continue outcome a
-    hedging FAIL produces and stashes an auditable error marker on the payload.
+async def test_hedging_gate_exception_raises_retryable(monkeypatch):
+    """When hedging_gate.evaluate raises, _select_track_gate must raise a
+    RETRYABLE OrchestratorError — never fabricate a ("SIGNIFICANT_EDGE",
+    "ITERATE") verdict. The old mapping wrote the fabricated verdict into the
+    append-only audit tables, consumed an iteration of budget, and (on the
+    last budgeted iteration) terminalized the queue off a DB blip. The outer
+    tick handler rolls the row back to PENDING; the next tick resumes the
+    same completed run via active_backtest_run_id and re-runs only the gate.
     """
+    from orchestrator.errors import OrchestratorError
+
     async def _boom(*args, **kwargs):
         raise RuntimeError("simulated hedging gate failure")
 
     monkeypatch.setattr(tick.hedging_gate, "evaluate", _boom)
 
-    stat_v, dec_v, payload = await tick._select_track_gate(
-        db=_DbShim(),
-        track="hedging",
-        # Trading-path verdicts that, if leaked through, would NOT be PASS —
-        # but the point is the hedging branch overrides + must not raise.
-        stat_v="NO_EDGE",
-        dec_v="DISCARD",
-        backtest_run_id=uuid.uuid4(),
-        instrument="BTCUSDT",
-        window_start=datetime(2024, 1, 1),
-        window_end=datetime(2024, 4, 1),
-    )
-
-    # Non-PASS ITERATE outcome (same as a hedging FAIL) — never PASS, no raise.
-    assert dec_v == "ITERATE"
-    assert stat_v == "SIGNIFICANT_EDGE"
-    # Auditable error marker on the payload (surfaces on
-    # metrics_snapshot.hedging_gate).
-    assert payload is not None
-    assert payload["passed"] is False
-    assert "error" in payload
-    assert "simulated hedging gate failure" in payload["error"]
+    with pytest.raises(OrchestratorError) as exc_info:
+        await tick._select_track_gate(
+            db=_DbShim(),
+            track="hedging",
+            stat_v="NO_EDGE",
+            dec_v="DISCARD",
+            backtest_run_id=uuid.uuid4(),
+            instrument="BTCUSDT",
+            window_start=datetime(2024, 1, 1),
+            window_end=datetime(2024, 4, 1),
+        )
+    envelope = exc_info.value.envelope
+    assert envelope.error_code == "hedging_gate_error"
+    assert envelope.retryable is True
+    # Not tagged terminal: the outer handler must run its PENDING rollback.
+    assert not getattr(exc_info.value, "queue_terminalized", False)
 
 
 async def test_hedging_gate_exception_never_marks_pass(monkeypatch):
+    from orchestrator.errors import OrchestratorError
+
     async def _boom(*args, **kwargs):
         raise ValueError("kaboom")
 
     monkeypatch.setattr(tick.hedging_gate, "evaluate", _boom)
-    _, dec_v, payload = await tick._select_track_gate(
-        db=_DbShim(),
-        track="hedging",
-        stat_v="SIGNIFICANT_EDGE",
-        dec_v="PASS",  # even if the trading inputs say PASS, error must not pass
-        backtest_run_id=uuid.uuid4(),
-        instrument="ETHUSDT",
-        window_start=datetime(2024, 1, 1),
-        window_end=datetime(2024, 4, 1),
-    )
-    assert dec_v != "PASS"
-    assert payload["passed"] is False
+    # Even if the trading inputs say PASS, the error must raise — there is
+    # no code path that converts a gate exception into any verdict at all.
+    with pytest.raises(OrchestratorError):
+        await tick._select_track_gate(
+            db=_DbShim(),
+            track="hedging",
+            stat_v="SIGNIFICANT_EDGE",
+            dec_v="PASS",
+            backtest_run_id=uuid.uuid4(),
+            instrument="ETHUSDT",
+            window_start=datetime(2024, 1, 1),
+            window_end=datetime(2024, 4, 1),
+        )
 
 
 # ── Fix 3: hedging FAIL must NOT enter the trade-level Signal-Pool lane ──────
@@ -100,10 +103,10 @@ def _stub_decide_io(monkeypatch):
     """Stub the DB-write + paper-gen side effects of _decide_next_state so the
     routing decision can be exercised without a live DB."""
     async def _noop_complete(conn, queue_id, **kwargs):
-        return None
+        return 1
 
-    async def _noop_reset(conn, queue_id, note):
-        return None
+    async def _noop_reset(conn, queue_id, note, *, expected_status=None):
+        return 1
 
     async def _noop_paper(db, queue_id, agent_name, state):
         return None

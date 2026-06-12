@@ -21,10 +21,11 @@ from fastapi.testclient import TestClient
 from orchestrator.config import Settings
 from orchestrator.main import create_app
 from orchestrator.services.ml_training import (
+    _SUMMARY_SCAN_BYTES,
     _dsn_to_train_db_env,
     _extract_ids,
     _parse_summary,
-    _read_file_full,
+    _read_file_last_bytes,
     _read_file_tail,
     _tail_text,
     build_cli_args,
@@ -274,19 +275,28 @@ def test_read_file_tail_large_file_trims_from_front(tmp_path) -> None:
     assert "FINAL_SUMMARY_LINE" in out
 
 
-def test_read_file_full_returns_complete_content(tmp_path) -> None:
-    """F5 regression — _read_file_full is used to parse the trailing
-    JSON summary; it must return the entire stream, not just a tail."""
+def test_read_file_last_bytes_keeps_trailing_summary(tmp_path) -> None:
+    """L14 (2026-06-12): the summary parser reads a BOUNDED tail, not the
+    whole (potentially 100MB+) capture. The trailing JSON must survive."""
     p = tmp_path / "complete.log"
     body = b"prefix " * 1000 + b'\n{"status": "ok"}\n'
     p.write_bytes(body)
-    out = _read_file_full(p)
+    out = _read_file_last_bytes(p, _SUMMARY_SCAN_BYTES)
     assert out.endswith('{"status": "ok"}\n')
+    # File smaller than the cap → returned in full.
     assert out.count("prefix") == 1000
 
 
-def test_read_file_full_missing_returns_empty(tmp_path) -> None:
-    assert _read_file_full(tmp_path / "missing.log") == ""
+def test_read_file_last_bytes_caps_large_files(tmp_path) -> None:
+    p = tmp_path / "huge.log"
+    p.write_bytes(b"x" * 10_000 + b'\n{"status": "ok"}\n')
+    out = _read_file_last_bytes(p, 1024)
+    assert len(out.encode("utf-8")) <= 1024
+    assert out.endswith('{"status": "ok"}\n')
+
+
+def test_read_file_last_bytes_missing_returns_empty(tmp_path) -> None:
+    assert _read_file_last_bytes(tmp_path / "missing.log", 1024) == ""
 
 
 # ── Subprocess env propagation (2026-06-02 INFRA_FAIL fix) ─────────

@@ -57,8 +57,34 @@ MAX_CORR: float = 0.80
 # ("import, do not redefine the threshold").
 MARGINAL_SHARPE_MIN: float = pool.DEFAULT_THETA
 
-# Minimum paired observations for a defensible Spearman IC.
-_IC_MIN_OBS: int = 3
+# Minimum paired observations for a defensible Spearman IC. Raised 3 → 20
+# (2026-06-12): at n=3 a |ic|=1 fit is auto-"significant" with probability
+# 1/3 under the null, and the fixed t=2.0 cutoff is far below the df-aware
+# critical value (df=1: 12.7). n>=20 is the conventional floor for IC work.
+_IC_MIN_OBS: int = 20
+
+# Two-sided 5% Student-t critical values by df. The binding bar is
+# max(IC_TSTAT_MIN, t_crit(df)) — df-aware where it is STRICTER than the
+# legacy 2.0 floor, never looser. Bracketing picks the crit of the largest
+# table df <= actual df (crit decreases in df, so bracketing is stricter).
+_T_CRIT_05: tuple[tuple[int, float], ...] = (
+    (1, 12.706), (2, 4.303), (3, 3.182), (4, 2.776), (5, 2.571),
+    (6, 2.447), (7, 2.365), (8, 2.306), (9, 2.262), (10, 2.228),
+    (12, 2.179), (15, 2.131), (18, 2.101), (20, 2.086), (25, 2.060),
+    (30, 2.042), (40, 2.021), (60, 2.000),
+)
+
+
+def _t_crit(df: int) -> float:
+    """Two-sided 5% t critical value, bracketed conservatively (the crit of
+    the largest tabulated df <= ``df``)."""
+    crit = _T_CRIT_05[0][1]
+    for table_df, c in _T_CRIT_05:
+        if table_df <= df:
+            crit = c
+        else:
+            break
+    return crit
 
 
 def information_coefficient(
@@ -108,12 +134,14 @@ def information_coefficient(
     sign = "+" if ic > 0 else ("-" if ic < 0 else "0")
 
     # |ic| == 1 makes (1 − ic²) == 0 → t undefined; a perfect monotonic relation
-    # over n >= _IC_MIN_OBS is unambiguously significant.
+    # over n >= _IC_MIN_OBS (now 20) is unambiguously significant.
     if abs(ic) >= 1.0:
         significant = True
     else:
         t = ic * math.sqrt((n - 2) / (1.0 - ic * ic))
-        significant = abs(t) >= IC_TSTAT_MIN
+        # df-aware bar with the legacy 2.0 as a floor — stricter at small n,
+        # identical at large n (df>=60 crit = 2.000 == IC_TSTAT_MIN).
+        significant = abs(t) >= max(IC_TSTAT_MIN, _t_crit(n - 2))
 
     return {"ic": round(ic, 6), "significant": bool(significant), "sign": sign}
 

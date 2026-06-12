@@ -16,7 +16,7 @@ GET  /papers/{paper_id}/export/latex — download compilable .tex source
 
 from __future__ import annotations
 
-import subprocess
+import asyncio
 import tempfile
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -411,16 +411,42 @@ async def export_pdf(
         # cross-references.  Each pass capped at 60s; total wall-time
         # bounded at 120s.  -halt-on-error left OFF so non-fatal warnings
         # (overfull boxes, unresolved refs on pass 1) don't abort.
-        proc = None
+        #
+        # Async subprocess (2026-06-12): the old subprocess.run BLOCKED the
+        # single-worker event loop for up to 120s — freezing /healthz,
+        # in-flight /tick polls and every background task while LaTeX
+        # ground away (an external healthchecker could kill the service
+        # mid-iteration). Pattern mirrors paper_narrator's exec.
+        last_returncode = 0
+        last_stdout = b""
         try:
             for _ in range(2):
-                proc = subprocess.run(
-                    ["pdflatex", "-interaction=nonstopmode", tex_name],
+                proc = await asyncio.create_subprocess_exec(
+                    "pdflatex",
+                    "-interaction=nonstopmode",
+                    tex_name,
                     cwd=tmpdir,
-                    capture_output=True,
-                    timeout=60,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
                 )
-                if proc.returncode != 0:
+                try:
+                    stdout_b, _stderr_b = await asyncio.wait_for(
+                        proc.communicate(), timeout=60
+                    )
+                except asyncio.TimeoutError:
+                    # wait_for cancels the WAIT, not the child — kill it or
+                    # the pdflatex process grinds on unreaped.
+                    proc.kill()
+                    await proc.wait()
+                    raise OrchestratorError(
+                        status_code=504,
+                        error_code="pdf_compilation_timeout",
+                        message="PDF compilation timed out after 60 seconds.",
+                        retryable=True,
+                    )
+                last_returncode = proc.returncode or 0
+                last_stdout = stdout_b
+                if last_returncode != 0:
                     break
         except FileNotFoundError:
             raise OrchestratorError(
@@ -429,19 +455,12 @@ async def export_pdf(
                 message="pdflatex is not available on this server.",
                 retryable=False,
             )
-        except subprocess.TimeoutExpired:
-            raise OrchestratorError(
-                status_code=504,
-                error_code="pdf_compilation_timeout",
-                message="PDF compilation timed out after 60 seconds.",
-                retryable=True,
-            )
 
         if not pdf_path.exists():
             # pdflatex writes its real diagnostics to STDOUT (the .log file
             # mirror); stderr is usually empty. Surface stdout + .log tail
             # so the operator can see the actual LaTeX error.
-            stdout_tail = proc.stdout.decode("utf-8", errors="replace")[-1500:] if proc else ""
+            stdout_tail = last_stdout.decode("utf-8", errors="replace")[-1500:]
             log_path = Path(tmpdir) / f"{paper_id}.log"
             log_tail = (
                 log_path.read_text(encoding="utf-8", errors="replace")[-1500:]

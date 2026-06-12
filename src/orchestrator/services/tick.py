@@ -72,9 +72,10 @@ _STUCK_RUNNING_BUFFER_S = 5 * 60
 def _terminal(err: OrchestratorError) -> OrchestratorError:
     """Tag an OrchestratorError so the outer rollback skips it.
 
-    Used when a code path has already moved the queue row to a terminal
-    state (FAILED/PARKED/COMPLETED). The default ``except`` arm would
-    otherwise call ``_rollback`` and silently undo that with status=PENDING.
+    Used when a code path has already written the queue row's next state
+    itself (FAILED/PARKED/COMPLETED, or a deliberate PENDING-for-resume).
+    The default ``except`` arm would otherwise call ``_rollback`` and
+    clobber that with a second decrement.
     """
     err.queue_terminalized = True  # type: ignore[attr-defined]
     return err
@@ -387,6 +388,7 @@ async def run_tick(
     iter_budget = int(claim["iter_budget"])
     early_stop = bool(claim["early_stop_on_no_edge"])
     started_at = claim["started_at"]
+    active_run_id = claim.get("active_backtest_run_id")
     new_iter = prior_iter + 1
 
     log.info(
@@ -415,6 +417,7 @@ async def run_tick(
             iter_budget=iter_budget,
             early_stop=early_stop,
             started_at=started_at,
+            active_run_id=active_run_id,
         )
     except OrchestratorError as err:
         # If the failing path already moved the row to a terminal state
@@ -430,9 +433,20 @@ async def run_tick(
 
 
 async def _rollback(db: Database, queue_id: Any, note: str) -> None:
+    # expected_status='RUNNING': if the operator cancelled (PARKED) the row
+    # while this tick was in flight, the rollback must not resurrect it.
+    # active_backtest_run_id survives the rollback, so a run that is still
+    # going on the JVM is resumed — not resubmitted — by the next tick.
     try:
         async with db.acquire() as conn:
-            await queue_write.rollback_iter(conn, queue_id, note)
+            affected = await queue_write.rollback_iter(
+                conn, queue_id, note, expected_status="RUNNING"
+            )
+        if affected == 0:
+            log.warn(
+                "tick.rollback_skipped_row_not_running",
+                queue_id=str(queue_id),
+            )
     except Exception as cleanup_err:  # noqa: BLE001
         log.warn("tick.rollback_failed", queue_id=str(queue_id), error=str(cleanup_err))
 
@@ -455,7 +469,139 @@ async def _execute_after_claim(
     iter_budget: int,
     early_stop: bool,
     started_at: Any,
+    active_run_id: Any = None,
 ) -> TickResult:
+    # ── Step 1.5: resume an in-flight run from a prior dead attempt ───
+    # A prior tick that died mid-poll (client disconnect, poll-cap expiry,
+    # crash, reaper recovery) leaves its run id on the queue row. Resuming
+    # it — instead of re-deriving the combo and submitting a fresh run —
+    # is what prevents duplicate JVM runs and duplicate audit rows.
+    resumed = False
+    resume_status: str | None = None
+    combo: dict[str, Any] | None = None
+    audit_id: Any = None
+    if active_run_id is not None:
+        async with db.acquire() as conn:
+            resume_status = await conn.fetchval(
+                "SELECT status FROM backtest_run WHERE backtest_run_id = $1",
+                active_run_id,
+            )
+        if resume_status in ("RUNNING", "COMPLETED"):
+            async with db.acquire() as conn:
+                prior_audit = await audit_repo.latest_unattached_for_queue(
+                    conn, queue_id
+                )
+                existing_iter_probe = await iterations_write.find_iteration_for_run(
+                    conn, active_run_id
+                )
+            if prior_audit is not None or existing_iter_probe is not None:
+                resumed = True
+                if prior_audit is not None:
+                    # The audit row written just before the original submit
+                    # holds the authoritative combo (TPE sampling is not
+                    # deterministic across processes — re-deriving diverges).
+                    combo = prior_audit["params_snapshot"]
+                    audit_id = prior_audit["audit_id"]
+                log.info(
+                    "tick.resuming_active_run",
+                    queue_id=str(queue_id),
+                    run_id=str(active_run_id),
+                    run_status=resume_status,
+                    adopting_iteration=existing_iter_probe is not None,
+                )
+            else:
+                # Pointer with neither an unattached audit row nor a logged
+                # iteration — inconsistent leftover. Fall through to a fresh
+                # submit; the old run's result is orphaned (logged for ops).
+                log.warn(
+                    "tick.active_run_unresumable",
+                    queue_id=str(queue_id),
+                    run_id=str(active_run_id),
+                )
+        else:
+            # FAILED/CANCELLED/ERROR or row missing — nothing to resume.
+            resume_status = None
+
+    if resumed:
+        backtest_run_id = str(active_run_id)
+        async with db.acquire() as conn:
+            cumulative_trials = await audit_repo.count_data_universe_trials(
+                conn, instrument, interval_name
+            ) + 1
+    else:
+        combo, audit_id, cumulative_trials, backtest_run_id = (
+            await _derive_and_submit(
+                db=db,
+                jvm=jvm,
+                settings=settings,
+                agent_name=agent_name,
+                session_id=session_id,
+                redis_client=redis_client,
+                queue_id=queue_id,
+                strategy_code=strategy_code,
+                interval_name=interval_name,
+                instrument=instrument,
+                sweep_config=sweep_config,
+                prior_iter=prior_iter,
+                new_iter=new_iter,
+            )
+        )
+        if backtest_run_id is None:
+            # Sweep exhausted — _derive_and_submit already parked the row.
+            return TickResult(
+                outcome="sweep_exhausted",
+                queue_id=str(queue_id),
+                notes=[str(combo)],
+                next_actions=[
+                    {"kind": "read_doc", "doc_anchor": "queue.sweep_exhausted"}
+                ],
+            )
+
+    return await _poll_and_finish(
+        db=db,
+        settings=settings,
+        agent_name=agent_name,
+        session_id=session_id,
+        redis_client=redis_client,
+        queue_id=queue_id,
+        strategy_code=strategy_code,
+        interval_name=interval_name,
+        instrument=instrument,
+        sweep_config=sweep_config,
+        new_iter=new_iter,
+        iter_budget=iter_budget,
+        early_stop=early_stop,
+        started_at=started_at,
+        backtest_run_id=backtest_run_id,
+        combo=combo or {},
+        audit_id=audit_id,
+        cumulative_trials=cumulative_trials,
+        skip_poll=(resumed and resume_status == "COMPLETED"),
+    )
+
+
+async def _derive_and_submit(
+    *,
+    db: Database,
+    jvm: JvmClient,
+    settings: Settings,
+    agent_name: str,
+    session_id: UUID | None,
+    redis_client: AsyncRedis | None,
+    queue_id: Any,
+    strategy_code: str,
+    interval_name: str,
+    instrument: str,
+    sweep_config: dict[str, Any],
+    prior_iter: int,
+    new_iter: int,
+) -> tuple[dict[str, Any] | None, Any, int, str | None]:
+    """Steps 2-4: derive combo, resolve account, audit, submit.
+
+    Returns ``(combo, audit_id, cumulative_trials, backtest_run_id)``.
+    ``backtest_run_id`` is None when the sweep is exhausted (row already
+    parked; ``combo`` then carries the exhaustion note).
+    """
     # ── Step 2: derive sweep combo ────────────────────────────────────
     # Grid: deterministic cross-product index. TPE: ask Optuna for the
     # next point given the queue's history of (params, pf) pairs.
@@ -474,7 +620,9 @@ async def _execute_after_claim(
                 f"at iter={prior_iter}: {type(e).__name__}: {e}."
             )
             async with db.acquire() as conn:
-                await queue_write.fail_queue(conn, queue_id, note)
+                await queue_write.fail_queue(
+                    conn, queue_id, note, expected_status="RUNNING"
+                )
             raise _terminal(OrchestratorError(
                 status_code=500,
                 error_code="tpe_sampler_failed",
@@ -498,13 +646,10 @@ async def _execute_after_claim(
             )
         note = f"[{datetime.now(timezone.utc).isoformat()}] {exhausted_note}"
         async with db.acquire() as conn:
-            await queue_write.park_exhausted(conn, queue_id, note)
-        return TickResult(
-            outcome="sweep_exhausted",
-            queue_id=str(queue_id),
-            notes=[note],
-            next_actions=[{"kind": "read_doc", "doc_anchor": "queue.sweep_exhausted"}],
-        )
+            await queue_write.park_exhausted(
+                conn, queue_id, note, expected_status="RUNNING"
+            )
+        return note, None, 0, None
 
     # ── Step 3: resolve account_strategy_id ───────────────────────────
     async with db.acquire() as conn:
@@ -517,7 +662,9 @@ async def _execute_after_claim(
             f"for strategy_code={strategy_code} (is_deleted=false)."
         )
         async with db.acquire() as conn:
-            await queue_write.fail_queue(conn, queue_id, note)
+            await queue_write.fail_queue(
+                conn, queue_id, note, expected_status="RUNNING"
+            )
         raise _terminal(OrchestratorError(
             status_code=412,
             error_code="account_strategy_missing",
@@ -605,6 +752,11 @@ async def _execute_after_claim(
         run_id=backtest_run_id,
         combo=combo,
     )
+    # Persist the in-flight run on the queue row IMMEDIATELY: from here on,
+    # any death of this tick (disconnect, crash, poll cap) is recoverable —
+    # the next claim resumes this run instead of double-submitting.
+    async with db.acquire() as conn:
+        await queue_write.set_active_run(conn, queue_id, backtest_run_id)
 
     # Activity log: TICK_DISPATCHED (fire-and-forget)
     try:
@@ -629,25 +781,132 @@ async def _execute_after_claim(
     except Exception as _act_exc:  # noqa: BLE001
         log.warning("tick.activity_log_failed", step="TICK_DISPATCHED", error=str(_act_exc))
 
-    final_status = await _poll_backtest_status(
-        db, backtest_run_id, timeout_s=settings.poll_timeout_s
-    )
+    return combo, audit_id, cumulative_trials, backtest_run_id
+
+
+async def _poll_and_finish(
+    *,
+    db: Database,
+    settings: Settings,
+    agent_name: str,
+    session_id: UUID | None,
+    redis_client: AsyncRedis | None,
+    queue_id: Any,
+    strategy_code: str,
+    interval_name: str,
+    instrument: str,
+    sweep_config: dict[str, Any],
+    new_iter: int,
+    iter_budget: int,
+    early_stop: bool,
+    started_at: Any,
+    backtest_run_id: str,
+    combo: dict[str, Any],
+    audit_id: Any,
+    cumulative_trials: int,
+    skip_poll: bool = False,
+) -> TickResult:
+    """Steps 4.5-6: poll to terminal, analyze, log, decide next state."""
+    if skip_poll:
+        final_status = "COMPLETED"
+    else:
+        final_status = await _poll_backtest_status(
+            db, backtest_run_id, timeout_s=settings.poll_timeout_s
+        )
     if final_status != "COMPLETED":
+        ts = datetime.now(timezone.utc).isoformat()
+        if final_status in ("FAILED", "CANCELLED", "ERROR"):
+            # JVM-reported terminal failure — the run is genuinely dead.
+            note = (
+                f"[{ts}] Backtest terminal status="
+                f"{final_status} (run_id={backtest_run_id})."
+            )
+            async with db.acquire() as conn:
+                await queue_write.fail_queue(
+                    conn, queue_id, note, expected_status="RUNNING"
+                )
+            raise _terminal(OrchestratorError(
+                status_code=502,
+                error_code="backtest_did_not_complete",
+                message=note,
+                retryable=False,
+                hint=(
+                    "JVM reported a terminal failure for this run. Inspect the "
+                    "run, then POST /queue/{queue_id}/requeue to retry the cell."
+                ),
+                details={"backtest_run_id": backtest_run_id, "final_status": final_status},
+            ))
+        # Poll cap expired while the run is still going (RUNNING / UNKNOWN /
+        # TIMEOUT) — an orchestrator-side latency condition, NOT a research
+        # outcome. The historical bug terminalized the row to FAILED here,
+        # orphaning a backtest that completed minutes later. Instead: hand
+        # the row back to PENDING (active_backtest_run_id stays set) and
+        # tell the caller to retry — the next tick resumes this same run.
         note = (
-            f"[{datetime.now(timezone.utc).isoformat()}] Backtest terminal status="
-            f"{final_status} (run_id={backtest_run_id})."
+            f"[{ts}] Poll cap ({settings.poll_timeout_s}s) expired with run "
+            f"status={final_status} (run_id={backtest_run_id}); row reset to "
+            f"PENDING for resume — the run was NOT failed."
         )
         async with db.acquire() as conn:
-            await queue_write.fail_queue(conn, queue_id, note)
+            await queue_write.rollback_iter(
+                conn, queue_id, note, expected_status="RUNNING"
+            )
         raise _terminal(OrchestratorError(
-            status_code=502,
-            error_code="backtest_did_not_complete",
+            status_code=503,
+            error_code="backtest_poll_cap_exceeded",
             message=note,
-            retryable=False,
-            details={"backtest_run_id": backtest_run_id, "final_status": final_status},
+            retryable=True,
+            hint=(
+                "The backtest is still running on the JVM. POST /tick again "
+                "to resume polling the same run — no duplicate is submitted."
+            ),
+            details={"backtest_run_id": backtest_run_id, "last_status": final_status},
         ))
 
-    # ── Step 5: analyze, log iteration + queue pointer in one transaction ──
+    # ── Step 5: analyze + log iteration. If a prior attempt already logged
+    # the iteration for this run (it died between commit and pointer
+    # update), ADOPT that row instead of inserting a duplicate. ──────────
+    async with db.acquire() as conn:
+        existing_iter = await iterations_write.find_iteration_for_run(
+            conn, backtest_run_id
+        )
+    if existing_iter is not None:
+        iteration_id = existing_iter["iteration_id"]
+        stat_v = existing_iter["statistical_verdict"]
+        dec_v = existing_iter["verdict"]
+        _ms = existing_iter.get("metrics_snapshot") or {}
+        analysis = (_ms.get("analysis") or {}) if isinstance(_ms, dict) else {}
+        log.info(
+            "tick.adopted_existing_iteration",
+            queue_id=str(queue_id),
+            iteration_id=str(iteration_id),
+            backtest_run_id=str(backtest_run_id),
+        )
+        await _attach_fenced(
+            db,
+            queue_id=queue_id,
+            iteration_id=iteration_id,
+            backtest_run_id=backtest_run_id,
+            started_at=started_at,
+        )
+        return await _finish_iteration(
+            db=db,
+            agent_name=agent_name,
+            session_id=session_id,
+            redis_client=redis_client,
+            queue_id=queue_id,
+            strategy_code=strategy_code,
+            sweep_config=sweep_config,
+            new_iter=new_iter,
+            iter_budget=iter_budget,
+            early_stop=early_stop,
+            backtest_run_id=backtest_run_id,
+            iteration_id=iteration_id,
+            stat_v=stat_v,
+            dec_v=dec_v,
+            analysis=analysis,
+        )
+
     async with db.acquire() as conn:
         run_metrics = await _fetch_run_metrics(conn, backtest_run_id)
         trades = await trades_repo.fetch_trades(conn, backtest_run_id)
@@ -742,6 +1001,11 @@ async def _execute_after_claim(
         # Stash the full hedging verdict for audit (mirrors portfolio_corr).
         metrics_snapshot["hedging_gate"] = hedging_gate_payload
 
+    # Transaction A: commit the EVIDENCE (iteration + DSR + audit backfill)
+    # before the fenced queue-pointer update. The previous single-transaction
+    # shape rolled the iteration row back when the fence failed — destroying
+    # a fully-completed backtest's audit trail and leaving the step-3.5
+    # audit row uncounted by DSR multiplicity exactly when ticks raced.
     async with db.acquire() as conn:
         async with conn.transaction():
             log_iter_n = await iterations_write.next_iteration_number(conn, strategy_code)
@@ -783,44 +1047,26 @@ async def _execute_after_claim(
                 deflated_sharpe=analysis.get("dsr"),
                 dsr_n_trials=analysis.get("dsr_n_trials"),
             )
-            attached = await queue_write.attach_iteration(
-                conn,
-                queue_id,
-                iteration_id=iteration_id,
-                backtest_run_id=backtest_run_id,
-                expected_started_at=started_at,
-            )
-            if attached == 0:
-                # Reaper recovered this row mid-flight and another tick
-                # re-claimed it. Don't continue to next-state decision —
-                # raise so the outer handler logs and the new tick's
-                # iteration_log row is the canonical one.
-                raise _terminal(OrchestratorError(
-                    status_code=409,
-                    error_code="queue_row_reclaimed",
-                    message=(
-                        f"Queue row {queue_id} was reclaimed by another tick "
-                        f"(started_at fence mismatched). This tick's "
-                        f"iteration_log row was written but the queue "
-                        f"pointer was not updated."
-                    ),
-                    retryable=False,
-                    details={
-                        "queue_id": str(queue_id),
-                        "iteration_id": str(iteration_id),
-                        "backtest_run_id": str(backtest_run_id),
-                    },
-                ))
             # Backfill the audit row written in step 3.5 with the resolved
             # verdicts. The re-discovery gate keys on decision_verdict so
             # this update is what enables the gate to fire on later sweeps.
-            await audit_repo.update_audit_verdict(
-                conn,
-                audit_id=audit_id,
-                iteration_id=iteration_id,
-                statistical_verdict=stat_v,
-                decision_verdict=dec_v,
-            )
+            if audit_id is not None:
+                await audit_repo.update_audit_verdict(
+                    conn,
+                    audit_id=audit_id,
+                    iteration_id=iteration_id,
+                    statistical_verdict=stat_v,
+                    decision_verdict=dec_v,
+                )
+
+    # Transaction B: fenced queue-pointer update.
+    await _attach_fenced(
+        db,
+        queue_id=queue_id,
+        iteration_id=iteration_id,
+        backtest_run_id=backtest_run_id,
+        started_at=started_at,
+    )
 
     log.info(
         "tick.iteration_logged",
@@ -829,7 +1075,90 @@ async def _execute_after_claim(
         statistical_verdict=stat_v,
         verdict=dec_v,
     )
+    return await _finish_iteration(
+        db=db,
+        agent_name=agent_name,
+        session_id=session_id,
+        redis_client=redis_client,
+        queue_id=queue_id,
+        strategy_code=strategy_code,
+        sweep_config=sweep_config,
+        new_iter=new_iter,
+        iter_budget=iter_budget,
+        early_stop=early_stop,
+        backtest_run_id=backtest_run_id,
+        iteration_id=iteration_id,
+        stat_v=stat_v,
+        dec_v=dec_v,
+        analysis=analysis,
+    )
 
+
+async def _attach_fenced(
+    db: Database,
+    *,
+    queue_id: Any,
+    iteration_id: Any,
+    backtest_run_id: str,
+    started_at: Any,
+) -> None:
+    """Fenced queue-pointer update (transaction B).
+
+    Runs AFTER the iteration row is committed, so a fence mismatch loses
+    nothing: the iteration is durable, and the next tick on this row adopts
+    it via ``find_iteration_for_run`` instead of re-running the combo.
+    """
+    async with db.acquire() as conn:
+        attached = await queue_write.attach_iteration(
+            conn,
+            queue_id,
+            iteration_id=iteration_id,
+            backtest_run_id=backtest_run_id,
+            expected_started_at=started_at,
+        )
+    if attached == 0:
+        # The reaper recovered this row mid-flight (started_at NULLed) or
+        # another tick re-claimed it (fresh started_at). The iteration row
+        # IS committed; only the queue pointer was withheld.
+        raise _terminal(OrchestratorError(
+            status_code=409,
+            error_code="queue_row_reclaimed",
+            message=(
+                f"Queue row {queue_id} was recovered/reclaimed while this tick "
+                f"was in flight (started_at fence mismatched). The iteration "
+                f"row IS committed; the queue pointer was not updated. The "
+                f"next tick on this row adopts the committed iteration — no "
+                f"duplicate run will be submitted."
+            ),
+            retryable=True,
+            details={
+                "queue_id": str(queue_id),
+                "iteration_id": str(iteration_id),
+                "backtest_run_id": str(backtest_run_id),
+            },
+        ))
+
+
+async def _finish_iteration(
+    *,
+    db: Database,
+    agent_name: str,
+    session_id: UUID | None,
+    redis_client: AsyncRedis | None,
+    queue_id: Any,
+    strategy_code: str,
+    sweep_config: dict[str, Any],
+    new_iter: int,
+    iter_budget: int,
+    early_stop: bool,
+    backtest_run_id: str,
+    iteration_id: Any,
+    stat_v: str,
+    dec_v: str,
+    analysis: dict[str, Any],
+) -> TickResult:
+    """Activity log + step 6 next-state + result assembly. Shared by the
+    fresh-iteration path and the adopt-existing-iteration resume path."""
     # Activity log: ITERATION_COMPLETED (fire-and-forget)
     try:
         async with db.acquire() as _log_conn:
@@ -938,13 +1267,16 @@ async def _select_track_gate(
     # Benchmark the underlying on DAILY closes regardless of the strategy's bar
     # interval (buy-hold is an equity-level, daily-frequency baseline).
     #
-    # Defensive guard (Fix 2, 2026-06-07): any failure inside the hedging gate
-    # (DB read, thin/None metrics, bootstrap edge case) must NOT 500 the tick.
-    # The trading path never reaches here (it short-circuits above), so this
-    # only affects hedging rows. On error we log and map to the SAME non-PASS
-    # ITERATE/continue outcome a hedging FAIL produces — never raise, never
-    # mark PASS — and stash an auditable error marker on the payload so it
-    # surfaces on metrics_snapshot.hedging_gate.
+    # Failure semantics (fixed 2026-06-12): an exception here is an INFRA
+    # failure, not a gate verdict. The prior arm mapped it onto the same
+    # ("SIGNIFICANT_EDGE", "ITERATE") signal a genuine gate FAIL produces —
+    # writing a fabricated stat verdict into the append-only audit tables,
+    # consuming an iteration of budget for a combo whose gate never ran, and
+    # (on the last budgeted iteration) terminalizing the queue with a
+    # research conclusion reached from a DB blip. Raise retryable instead:
+    # the outer handler rolls the row back to PENDING and the next tick
+    # resumes the SAME completed run (active_backtest_run_id) and re-runs
+    # only the gate.
     try:
         async with db.acquire() as conn:
             payload = await hedging_gate.evaluate(
@@ -955,15 +1287,23 @@ async def _select_track_gate(
                 start=window_start,
                 end=window_end,
             )
-    except Exception as exc:  # noqa: BLE001 — must not propagate to the tick
+    except Exception as exc:
         log.exception(
             "tick.hedging_gate_error",
             instrument=instrument,
             backtest_run_id=str(backtest_run_id),
         )
-        error_payload = {"error": f"{type(exc).__name__}: {exc}", "passed": False}
-        # Same control-flow signal as a hedging FAIL: ITERATE/continue.
-        return "SIGNIFICANT_EDGE", "ITERATE", error_payload
+        raise OrchestratorError(
+            status_code=503,
+            error_code="hedging_gate_error",
+            message=(
+                f"Hedging gate evaluation failed for run {backtest_run_id}: "
+                f"{type(exc).__name__}: {exc}. The backtest itself completed; "
+                f"retry the tick to re-evaluate the gate on the same run."
+            ),
+            retryable=True,
+            details={"backtest_run_id": str(backtest_run_id)},
+        ) from exc
     # Drive existing control flow off the equity-level verdict. V11/V60 are
     # intentionally bypassed for hedging rows.
     new_stat_v = "SIGNIFICANT_EDGE"
@@ -996,13 +1336,16 @@ async def _decide_next_state(
     if statistical_verdict == "NO_EDGE" and early_stop:
         note = f"[{ts}] Discarded at iter {new_iter}: stat verdict NO_EDGE + early_stop=true."
         async with db.acquire() as conn:
-            await queue_write.complete_queue(
+            affected = await queue_write.complete_queue(
                 conn,
                 queue_id,
                 final_verdict="DISCARD",
                 walk_forward_id=None,
                 note=note,
+                expected_status="RUNNING",
             )
+        if affected == 0:
+            return _transition_lost(queue_id, "COMPLETED/DISCARD")
         await _try_generate_paper(db, queue_id, agent_name, state="COMPLETED/DISCARD")
         return [{"kind": "call", "method": "GET", "path": "/journal?entry_type=ANTI_PATTERN"}]
 
@@ -1029,7 +1372,11 @@ async def _decide_next_state(
                 f"walk-forward validation. POST /walk-forward to gate PASS."
             )
             async with db.acquire() as conn:
-                await queue_write.park_exhausted(conn, queue_id, note)
+                affected = await queue_write.park_exhausted(
+                    conn, queue_id, note, expected_status="RUNNING"
+                )
+            if affected == 0:
+                return _transition_lost(queue_id, "PARKED/SIGNIFICANT_EDGE")
             await _try_generate_paper(
                 db, queue_id, agent_name, state="PARKED/SIGNIFICANT_EDGE"
             )
@@ -1046,13 +1393,16 @@ async def _decide_next_state(
                 f"exhausted. Completing as ITERATE_EXHAUSTED."
             )
             async with db.acquire() as conn:
-                await queue_write.complete_queue(
+                affected = await queue_write.complete_queue(
                     conn,
                     queue_id,
                     final_verdict="INSUFFICIENT_EVIDENCE",
                     walk_forward_id=None,
                     note=note,
+                    expected_status="RUNNING",
                 )
+            if affected == 0:
+                return _transition_lost(queue_id, "COMPLETED/ITERATE_EXHAUSTED")
             await _try_generate_paper(
                 db, queue_id, agent_name, state="COMPLETED/ITERATE_EXHAUSTED"
             )
@@ -1099,7 +1449,11 @@ async def _decide_next_state(
             f"{decision_verdict} (V60 economic gate not met); continuing sweep."
         )
         async with db.acquire() as conn:
-            await queue_write.reset_to_pending(conn, queue_id, note)
+            affected = await queue_write.reset_to_pending(
+                conn, queue_id, note, expected_status="RUNNING"
+            )
+        if affected == 0:
+            return _transition_lost(queue_id, "PENDING/continue")
         return [{"kind": "call", "method": "POST", "path": "/tick"}]
 
     if statistical_verdict in ("INSUFFICIENT_EVIDENCE", "NOT_TESTED"):
@@ -1109,25 +1463,76 @@ async def _decide_next_state(
                 f"after iter_budget={iter_budget}. Human review."
             )
             async with db.acquire() as conn:
-                await queue_write.complete_queue(
+                affected = await queue_write.complete_queue(
                     conn,
                     queue_id,
                     final_verdict="INSUFFICIENT_EVIDENCE",
                     walk_forward_id=None,
                     note=note,
+                    expected_status="RUNNING",
                 )
+            if affected == 0:
+                return _transition_lost(queue_id, "COMPLETED/INSUFFICIENT_EVIDENCE")
             await _try_generate_paper(db, queue_id, agent_name, state="COMPLETED/INSUFFICIENT_EVIDENCE")
             return [{"kind": "contact_human"}]
         note = f"[{ts}] iter {new_iter} INSUFFICIENT_EVIDENCE; continuing."
         async with db.acquire() as conn:
-            await queue_write.reset_to_pending(conn, queue_id, note)
+            affected = await queue_write.reset_to_pending(
+                conn, queue_id, note, expected_status="RUNNING"
+            )
+        if affected == 0:
+            return _transition_lost(queue_id, "PENDING/continue")
         return [{"kind": "call", "method": "POST", "path": "/tick"}]
 
-    # NO_EDGE without early_stop, or unknown — leave row PENDING for next tick.
+    # NO_EDGE without early_stop, or unknown. The iter_budget applies here
+    # too — before 2026-06-12 this branch never checked it, so a grid sweep
+    # with early_stop_on_no_edge=false ran to grid exhaustion regardless of
+    # budget, each NO_EDGE cell adding a trial to DSR multiplicity.
+    if new_iter >= iter_budget:
+        final = "DISCARD" if statistical_verdict == "NO_EDGE" else "INSUFFICIENT_EVIDENCE"
+        note = (
+            f"[{ts}] iter {new_iter} statistical_verdict={statistical_verdict}; "
+            f"iter_budget={iter_budget} exhausted. Completing as {final}."
+        )
+        async with db.acquire() as conn:
+            affected = await queue_write.complete_queue(
+                conn,
+                queue_id,
+                final_verdict=final,
+                walk_forward_id=None,
+                note=note,
+                expected_status="RUNNING",
+            )
+        if affected == 0:
+            return _transition_lost(queue_id, f"COMPLETED/{final}")
+        await _try_generate_paper(db, queue_id, agent_name, state=f"COMPLETED/{final}")
+        return [{"kind": "call", "method": "GET", "path": "/journal?entry_type=ANTI_PATTERN"}]
     note = f"[{ts}] iter {new_iter} statistical_verdict={statistical_verdict}; continuing."
     async with db.acquire() as conn:
-        await queue_write.reset_to_pending(conn, queue_id, note)
+        affected = await queue_write.reset_to_pending(
+            conn, queue_id, note, expected_status="RUNNING"
+        )
+    if affected == 0:
+        return _transition_lost(queue_id, "PENDING/continue")
     return [{"kind": "call", "method": "POST", "path": "/tick"}]
+
+
+def _transition_lost(queue_id: Any, intended: str) -> list[dict[str, Any]]:
+    """Step-6 transition affected 0 rows: the operator PARKed/cancelled the
+    row while the tick was in flight. The iteration evidence is committed;
+    honour the cancel by NOT resurrecting the row."""
+    log.warn(
+        "tick.transition_skipped_row_not_running",
+        queue_id=str(queue_id),
+        intended_state=intended,
+    )
+    return [{
+        "kind": "call", "method": "GET", "path": f"/queue/{queue_id}",
+        "hint": (
+            "Queue row left RUNNING-state machine mid-tick (operator cancel). "
+            "Iteration was logged; row state was preserved."
+        ),
+    }]
 
 
 async def _try_generate_paper(

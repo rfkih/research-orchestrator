@@ -292,11 +292,18 @@ def low_freq_stability_verdict(
     # must use the effective independent-observation count, not the raw day
     # count. This is the difference between an honest gate and a rubber stamp.
     n_eff = effective_sample_size(oos_daily_returns)
+    # DSR takes the PER-OBSERVATION Sharpe — SR* (= z_α/√n) and the variance
+    # formula both live at observation frequency (Bailey & LdP 2014). The
+    # 2026-06-09 fix (86651af) corrected this in analyze_run but missed this
+    # call site: passing the √365-annualised ``sr`` inflated the DSR z-score
+    # ~19×, letting i.i.d. noise with annualised Sharpe 0.19 score DSR 0.967
+    # and clear the 0.95 bar as ROBUST. ``sr`` (annualised) stays reported.
+    sr_per_obs = sharpe_ratio(oos_daily_returns, None)
     dsr = (
         deflated_sharpe_ratio(
-            sr, int(n_eff), skew, kurt, n_trials, pnls=oos_daily_returns
+            sr_per_obs, int(n_eff), skew, kurt, n_trials, pnls=oos_daily_returns
         )
-        if sr is not None and n_eff >= LOW_FREQ_MIN_DAILY_OBS
+        if sr_per_obs is not None and n_eff >= LOW_FREQ_MIN_DAILY_OBS
         else None
     )
 
@@ -306,6 +313,7 @@ def low_freq_stability_verdict(
         "oos_n_eff": round(n_eff, 1),
         "oos_autocorr_lag1": round(_lag1_autocorr(oos_daily_returns), 4),
         "oos_sharpe": round(sr, 4) if sr is not None else None,
+        "oos_sharpe_per_obs": round(sr_per_obs, 6) if sr_per_obs is not None else None,
         "dsr": round(dsr, 4) if dsr is not None else None,
         "dsr_n_trials": int(max(1, n_trials)),
         "fold_return_positive_pct": fold_pos_pct,
@@ -430,6 +438,23 @@ async def run_walk_forward(
     if full_end is None:
         full_end = (datetime.now(timezone.utc) - timedelta(days=1)).date()
 
+    # Overlapping OOS test windows double-count daily returns in the
+    # concatenated low-frequency series (inflating n and DSR) — the Lo-2002
+    # n_eff adjustment corrects autocorrelation, not duplication. Refuse the
+    # configuration outright rather than silently producing inflated stats.
+    if step_months < test_months:
+        raise OrchestratorError(
+            status_code=400,
+            error_code="walk_forward_overlapping_folds",
+            message=(
+                f"step_months={step_months} < test_months={test_months} produces "
+                f"overlapping OOS test windows; overlapping days would be "
+                f"double-counted in the validation series."
+            ),
+            retryable=False,
+            hint="Use step_months >= test_months (default 3/3).",
+        )
+
     # Bear-coverage gate. A walk-forward is the gate's only OOS evidence; if its
     # window has no drawdown, ROBUST proves nothing for a trend hedge. Reject
     # bull-only windows unless the operator explicitly overrides (e.g. an
@@ -527,14 +552,27 @@ async def run_walk_forward(
             })
             continue
 
-        final_status = await _poll_backtest_status(db, run_id)
+        final_status = await _poll_backtest_status(
+            db, run_id, timeout_s=settings.poll_timeout_s
+        )
         if final_status != "COMPLETED":
+            # Distinguish a JVM-reported failure from a poll-cap expiry on a
+            # still-RUNNING fold — the latter is an orchestrator latency
+            # condition; lumping them together silently degraded the fold
+            # set (and biased the verdict) on exactly the long-window
+            # strategies most likely to hit the cap.
+            capped = final_status not in ("FAILED", "CANCELLED", "ERROR")
             fold_results.append({
                 "fold": idx,
                 "test_start": test_start.isoformat(),
                 "test_end": test_end.isoformat(),
                 "run_id": run_id,
-                "error": f"status={final_status}",
+                "error": (
+                    f"poll_cap_exceeded status={final_status}"
+                    if capped
+                    else f"status={final_status}"
+                ),
+                "poll_capped": capped,
             })
             continue
 
@@ -557,14 +595,29 @@ async def run_walk_forward(
         })
 
     agg = aggregate_folds(fold_results)
+    agg["n_folds_poll_capped"] = len(
+        [f for f in fold_results if f.get("poll_capped")]
+    )
     total_trades = agg.get("total_trades_across_folds") or 0
-    window_days = (full_end - full_start).days
+    # Routing rate denominator = the TEST days the trades actually occurred
+    # in (completed folds only). Dividing by the full window — which includes
+    # the train prefix and, since the 2018 bear-coverage floor, ~6 years of
+    # calendar the folds never test — understated the rate ~5×, misrouting
+    # strategies trading up to ~290/yr into the low-frequency track and past
+    # its trade-level gates.
+    test_window_days = sum(
+        (
+            date.fromisoformat(f["test_end"]) - date.fromisoformat(f["test_start"])
+        ).days
+        for f in fold_results
+        if f.get("metrics") and not f.get("error")
+    )
 
     # Frequency-aware routing. A low-turnover strategy (e.g. a 1d trend
     # hedge) is validated on the OOS daily-equity return series rather than
     # trade-count fold statistics it can't satisfy by design. Same bars,
     # different observation unit — see low_freq_stability_verdict.
-    low_freq = is_low_frequency(interval_name, total_trades, window_days)
+    low_freq = is_low_frequency(interval_name, total_trades, test_window_days)
     if low_freq:
         oos_daily_returns: list[float] = []
         fold_returns_pct: list[float] = []

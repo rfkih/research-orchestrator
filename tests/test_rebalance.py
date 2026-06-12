@@ -527,3 +527,31 @@ def test_check_min_notional_carries_symbol_for_ui() -> None:
     assert len(violations) == 2
     symbols = {v["symbol"] for v in violations}
     assert symbols == {"BTCUSDT", "ETHUSDT"}
+
+
+def test_apply_guardrails_iterates_to_respect_max_after_renorm() -> None:
+    """H5 regression (2026-06-12): a single clamp-then-renorm pass let
+    {0.7, 0.2, 0.1} renormalise to A=0.625 > MAX_WEIGHT on the live book.
+    Water-filling must hold every weight at or below the cap."""
+    weights, diag = _apply_guardrails({"A": 0.7, "B": 0.2, "C": 0.1})
+    assert max(weights.values()) <= MAX_WEIGHT + 1e-9
+    assert math.isclose(sum(weights.values()), 1.0, abs_tol=1e-9)
+    assert math.isclose(weights["A"], MAX_WEIGHT, abs_tol=1e-9)
+    assert diag["n_clamped_high"] >= 1
+
+
+def test_apply_guardrails_two_assets_extreme_split() -> None:
+    weights, _ = _apply_guardrails({"A": 0.9, "B": 0.1})
+    assert max(weights.values()) <= MAX_WEIGHT + 1e-9
+    assert math.isclose(sum(weights.values()), 1.0, abs_tol=1e-9)
+    # Two assets, MAX=0.5 → the only feasible point is 50/50.
+    assert math.isclose(weights["A"], 0.5, abs_tol=1e-9)
+    assert math.isclose(weights["B"], 0.5, abs_tol=1e-9)
+
+
+def test_apply_guardrails_in_bounds_input_unchanged() -> None:
+    raw = {"A": 0.4, "B": 0.35, "C": 0.25}
+    weights, diag = _apply_guardrails(raw)
+    for code, w in raw.items():
+        assert math.isclose(weights[code], w, abs_tol=1e-9)
+    assert diag["n_clamped_high"] == 0 and diag["n_clamped_low"] == 0

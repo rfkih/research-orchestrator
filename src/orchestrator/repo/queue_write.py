@@ -151,7 +151,8 @@ async def claim_next(
         RETURNING claimed.queue_id, claimed.strategy_code, claimed.interval_name,
                   claimed.instrument, claimed.sweep_config, claimed.prior_iter,
                   claimed.iter_budget, claimed.early_stop_on_no_edge,
-                  claimed.require_walk_forward, rq.started_at
+                  claimed.require_walk_forward, rq.started_at,
+                  rq.active_backtest_run_id
         """,
         track,
     )
@@ -164,11 +165,18 @@ async def recover_stuck(conn: asyncpg.Connection, max_age_seconds: int) -> int:
     Covers the SIGKILL case: a tick whose process died before its rollback
     handler could run leaves a row in RUNNING permanently. We call this at
     the top of every tick; the cost is one indexed UPDATE.
+
+    ``started_at`` is NULLed so the original tick — if it is merely slow,
+    not dead — fails the ``attach_iteration`` fence instead of spuriously
+    matching the unchanged timestamp and racing the recovery. The
+    ``active_backtest_run_id`` pointer is deliberately KEPT: the next claim
+    resumes the in-flight run instead of double-submitting.
     """
     result = await conn.execute(
         """
         UPDATE research_queue
         SET status = 'PENDING',
+            started_at = NULL,
             iteration_number = GREATEST(iteration_number - 1, 0),
             notes = COALESCE(notes,'') || E'\n[' || NOW()::text ||
                     '] Recovered: RUNNING > ' || $1::text || 's; reset to PENDING.'
@@ -181,51 +189,133 @@ async def recover_stuck(conn: asyncpg.Connection, max_age_seconds: int) -> int:
     return int(result.split()[-1])
 
 
-async def rollback_iter(conn: asyncpg.Connection, queue_id: UUID, note: str) -> None:
+async def rollback_iter(
+    conn: asyncpg.Connection,
+    queue_id: UUID,
+    note: str,
+    *,
+    expected_status: str | None = None,
+) -> int:
     """Decrement iteration_number when a tick crashes mid-flight.
 
     Matches the bash ``cleanup`` trap behaviour. Status is reset to PENDING
-    so the next tick can pick the row up cleanly.
+    so the next tick can pick the row up cleanly. ``active_backtest_run_id``
+    is kept so the next claim can resume a run that is still in flight.
+
+    ``expected_status`` (the tick passes 'RUNNING') guards the transition:
+    if an operator PARKed/cancelled the row while the tick was in flight,
+    the rollback must NOT resurrect it to PENDING. Returns affected rows.
     """
-    await conn.execute(
-        """
+    result = await conn.execute(
+        f"""
         UPDATE research_queue
         SET iteration_number = GREATEST(iteration_number - 1, 0),
             status = 'PENDING',
             notes = COALESCE(notes,'') || E'\n' || $2
         WHERE queue_id = $1
+          {"AND status = $3" if expected_status else ""}
         """,
-        queue_id,
-        note,
+        *([queue_id, note, expected_status] if expected_status else [queue_id, note]),
     )
+    return int(result.split()[-1])
 
 
-async def park_exhausted(conn: asyncpg.Connection, queue_id: UUID, note: str) -> None:
-    await conn.execute(
-        """
+async def park_exhausted(
+    conn: asyncpg.Connection,
+    queue_id: UUID,
+    note: str,
+    *,
+    expected_status: str | None = None,
+) -> int:
+    """PARK the row. ``expected_status`` guards against overwriting an
+    operator cancel that landed while the tick was in flight (see
+    ``rollback_iter``). Returns affected rows."""
+    result = await conn.execute(
+        f"""
         UPDATE research_queue
         SET status = 'PARKED',
             completed_at = NOW(),
+            active_backtest_run_id = NULL,
             notes = COALESCE(notes,'') || E'\n' || $2
         WHERE queue_id = $1
+          {"AND status = $3" if expected_status else ""}
         """,
-        queue_id,
-        note,
+        *([queue_id, note, expected_status] if expected_status else [queue_id, note]),
     )
+    return int(result.split()[-1])
 
 
-async def fail_queue(conn: asyncpg.Connection, queue_id: UUID, note: str) -> None:
-    await conn.execute(
-        """
+async def fail_queue(
+    conn: asyncpg.Connection,
+    queue_id: UUID,
+    note: str,
+    *,
+    expected_status: str | None = None,
+) -> int:
+    """Mark FAILED (JVM-reported terminal failure or config error). Clears
+    the active-run pointer — the run is dead, there is nothing to resume.
+    FAILED rows can be returned to PENDING via ``requeue_failed`` (operator
+    action, POST /queue/{id}/requeue). Returns affected rows."""
+    result = await conn.execute(
+        f"""
         UPDATE research_queue
         SET status = 'FAILED',
             completed_at = NOW(),
+            active_backtest_run_id = NULL,
             notes = COALESCE(notes,'') || E'\n' || $2
         WHERE queue_id = $1
+          {"AND status = $3" if expected_status else ""}
+        """,
+        *([queue_id, note, expected_status] if expected_status else [queue_id, note]),
+    )
+    return int(result.split()[-1])
+
+
+async def requeue_failed(conn: asyncpg.Connection, queue_id: UUID, note: str) -> int:
+    """Operator escape hatch: return a FAILED row to PENDING so the sweep
+    can continue after the underlying infra/config problem is fixed.
+
+    Before this existed FAILED was a dead end — ``claim_next`` only claims
+    PENDING and ``recover_stuck`` only resets RUNNING, so a row failed by a
+    transient problem was permanently stranded. The iteration counter is
+    decremented (mirroring ``rollback_iter``) so the next tick re-derives
+    the combo whose attempt failed instead of silently skipping a cell.
+    Returns affected rows (0 when the row isn't FAILED).
+    """
+    result = await conn.execute(
+        """
+        UPDATE research_queue
+        SET status = 'PENDING',
+            iteration_number = GREATEST(iteration_number - 1, 0),
+            completed_at = NULL,
+            notes = COALESCE(notes,'') || E'\n' || $2
+        WHERE queue_id = $1
+          AND status = 'FAILED'
         """,
         queue_id,
         note,
     )
+    return int(result.split()[-1])
+
+
+async def set_active_run(
+    conn: asyncpg.Connection, queue_id: UUID, backtest_run_id: UUID | str
+) -> int:
+    """Persist the just-submitted run id on the claimed row (status guard:
+    only while still RUNNING). If the tick later dies — client disconnect,
+    poll-cap expiry, crash — the next claim resumes this run instead of
+    submitting a duplicate. Returns affected rows."""
+    result = await conn.execute(
+        """
+        UPDATE research_queue
+        SET active_backtest_run_id = $2
+        WHERE queue_id = $1
+          AND status = 'RUNNING'
+        """,
+        queue_id,
+        backtest_run_id,
+    )
+    return int(result.split()[-1])
 
 
 async def complete_queue(
@@ -235,22 +325,30 @@ async def complete_queue(
     final_verdict: str,
     walk_forward_id: UUID | None,
     note: str,
-) -> None:
-    await conn.execute(
-        """
+    expected_status: str | None = None,
+) -> int:
+    """COMPLETE the row. ``expected_status`` (tick passes 'RUNNING') keeps
+    an in-flight tick from overwriting an operator cancel; walk-forward
+    callers complete PARKED rows and pass no guard. Returns affected rows."""
+    result = await conn.execute(
+        f"""
         UPDATE research_queue
         SET status = 'COMPLETED',
             final_verdict = $2,
             walk_forward_id = $3,
             completed_at = NOW(),
+            active_backtest_run_id = NULL,
             notes = COALESCE(notes,'') || E'\n' || $4
         WHERE queue_id = $1
+          {"AND status = $5" if expected_status else ""}
         """,
-        queue_id,
-        final_verdict,
-        walk_forward_id,
-        note,
+        *(
+            [queue_id, final_verdict, walk_forward_id, note, expected_status]
+            if expected_status
+            else [queue_id, final_verdict, walk_forward_id, note]
+        ),
     )
+    return int(result.split()[-1])
 
 
 async def update_regime_label(
@@ -272,17 +370,27 @@ async def update_regime_label(
     )
 
 
-async def reset_to_pending(conn: asyncpg.Connection, queue_id: UUID, note: str) -> None:
-    await conn.execute(
-        """
+async def reset_to_pending(
+    conn: asyncpg.Connection,
+    queue_id: UUID,
+    note: str,
+    *,
+    expected_status: str | None = None,
+) -> int:
+    """Continue-branch transition back to PENDING. ``expected_status``
+    (tick passes 'RUNNING') keeps an in-flight tick from resurrecting a
+    row the operator cancelled mid-flight. Returns affected rows."""
+    result = await conn.execute(
+        f"""
         UPDATE research_queue
         SET status = 'PENDING',
             notes = COALESCE(notes,'') || E'\n' || $2
         WHERE queue_id = $1
+          {"AND status = $3" if expected_status else ""}
         """,
-        queue_id,
-        note,
+        *([queue_id, note, expected_status] if expected_status else [queue_id, note]),
     )
+    return int(result.split()[-1])
 
 
 async def cancel_queue(conn: asyncpg.Connection, queue_id: UUID, note: str) -> int:
@@ -317,17 +425,20 @@ async def attach_iteration(
     When ``expected_started_at`` is provided, the UPDATE is fenced with
     ``AND started_at = $4`` so a stale tick that came back after
     ``recover_stuck`` reset the row affects 0 rows — caller can detect
-    by checking the returned count.
+    by checking the returned count. ``recover_stuck`` NULLs ``started_at``,
+    so the fence also fails when the reaper recovered the row even if no
+    rival tick has re-claimed it yet.
 
-    Pairs with the iteration_log INSERT in the same transaction so the
-    queue row never points at an iteration that doesn't exist yet.
+    Clears ``active_backtest_run_id`` — the run's result is now attached,
+    there is nothing left to resume.
     """
     if expected_started_at is None:
         result = await conn.execute(
             """
             UPDATE research_queue
             SET last_iteration_id = $2,
-                last_run_id = $3
+                last_run_id = $3,
+                active_backtest_run_id = NULL
             WHERE queue_id = $1
             """,
             queue_id,
@@ -339,7 +450,8 @@ async def attach_iteration(
             """
             UPDATE research_queue
             SET last_iteration_id = $2,
-                last_run_id = $3
+                last_run_id = $3,
+                active_backtest_run_id = NULL
             WHERE queue_id = $1
               AND started_at = $4
             """,

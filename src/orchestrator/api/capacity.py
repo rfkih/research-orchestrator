@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 from ..errors import OrchestratorError
 from ..services.idempotency import cache_response, replay_cached_response
 from ..services.capacity import run_capacity_sweep
-from .deps import get_agent_name, get_db_conn
+from .deps import get_agent_name
 
 router = APIRouter(tags=["capacity"])
 
@@ -88,7 +88,10 @@ async def post_capacity_sweep(
     body: CapacitySweepRequest,
     request: Request,
     agent: str = Depends(get_agent_name),
-    conn=Depends(get_db_conn),  # noqa: ARG001 — ensures DB reachable + auth
+    # NO Depends(get_db_conn): the old "ensures DB reachable" dependency
+    # pinned a pooled connection idle for the entire multi-hour sweep
+    # (the service acquires its own connections). Auth is middleware;
+    # DB reachability is proven by the sweep's first query.
 ) -> dict[str, Any]:
     cached, idempotency_key = await replay_cached_response(request, agent, "capacity")
     if cached is not None:
