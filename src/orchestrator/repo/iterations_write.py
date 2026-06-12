@@ -38,6 +38,31 @@ async def next_iteration_number(conn: asyncpg.Connection, strategy_code: str) ->
     return int(val)
 
 
+async def find_iteration_for_run(
+    conn: asyncpg.Connection, backtest_run_id: UUID | str
+) -> dict[str, Any] | None:
+    """Existing iteration row for a backtest run, or None.
+
+    The resume path checks this before inserting: a tick that died between
+    committing its iteration row and updating the queue pointer leaves a
+    fully-logged iteration behind. The resuming tick must ADOPT that row
+    (attach + decide next state) rather than insert a duplicate — there is
+    no UNIQUE constraint on backtest_run_id to catch a double insert.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT iteration_id, statistical_verdict, verdict,
+               sample_size_adequate, metrics_snapshot
+        FROM research_iteration_log
+        WHERE backtest_run_id = $1
+        ORDER BY created_time DESC
+        LIMIT 1
+        """,
+        backtest_run_id,
+    )
+    return dict(row) if row else None
+
+
 async def update_backtest_run_dsr(
     conn: asyncpg.Connection,
     *,

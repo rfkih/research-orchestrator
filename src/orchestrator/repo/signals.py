@@ -198,12 +198,15 @@ async def list_firings(
     if source:
         params.append(source); where.append(f"sh.source = ${len(params)}")
     params.extend([limit, offset])
+    # Tiebreaker on the full PK: a multi-symbol signal fires several rows
+    # with the IDENTICAL ts each bar close, and OFFSET pagination over an
+    # unstable order skips/duplicates rows at page boundaries.
     sql = f"""
         SELECT sh.signal_id, sh.symbol, sh.ts, sh.value, sh.confidence,
                sh.produced_at, sh.source, sh.meta, sh.created_time
         FROM signal_history sh
         WHERE {' AND '.join(where)}
-        ORDER BY sh.ts DESC
+        ORDER BY sh.ts DESC, sh.signal_id DESC, sh.symbol DESC
         LIMIT ${len(params) - 1} OFFSET ${len(params)}
     """
     return [dict(r) for r in await conn.fetch(sql, *params)]

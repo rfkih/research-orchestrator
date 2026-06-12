@@ -36,7 +36,10 @@ def lenient_client(settings: Settings) -> TestClient:
 
 
 def test_pinned_constants() -> None:
-    assert MIN_PAIRS_FOR_VERDICT == 3
+    # MIN_PAIRS raised 3 → 8 (2026-06-12): at n=3 the percentile bootstrap
+    # had a 12.5%-per-direction false-positive rate (all-same-sign deltas
+    # always exclude zero) on a verdict that can block graduation.
+    assert MIN_PAIRS_FOR_VERDICT == 8
     assert DEFAULT_BOOTSTRAP_REPS == 1000
     assert NEUTRAL_MAGNITUDE_THRESHOLD == 0.05
 

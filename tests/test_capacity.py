@@ -249,3 +249,54 @@ def test_edge_at_floor_handles_off_ladder_floor():
     # Errored scales (no metrics) are skipped.
     errored = [{"scale_usd": 10_000.0, "error": "status=FAILED"}]
     assert _edge_at_floor(errored, 10_000.0) is None
+
+
+# ── 2026-06-12 hardening: fail-open + interior-cliff + ordering ───────────────
+
+
+def test_classify_single_valid_scale_is_insufficient_data() -> None:
+    # One surviving run (base tier errored) used to return the STRONGEST
+    # verdict — LINEAR_SCALABLE with max_viable at the surviving tier.
+    per_scale = [
+        {"scale_usd": 100.0, "error": "status=FAILED"},
+        {"scale_usd": 1_000_000.0, "metrics": {"pf": 1.8}},
+    ]
+    verdict, max_viable = _classify_verdict(per_scale)
+    assert verdict == "INSUFFICIENT_DATA"
+    assert max_viable is None
+
+
+def test_classify_max_viable_does_not_jump_interior_cliff() -> None:
+    # PF recovers above the floor after an interior collapse; the cap must
+    # stay at the last scale BEFORE the collapse ("the prior scale is the
+    # cap"), not jump to the recovered tier.
+    per_scale = [
+        {"scale_usd": 100.0, "metrics": {"pf": 1.5}},
+        {"scale_usd": 10_000.0, "metrics": {"pf": 0.8}},
+        {"scale_usd": 1_000_000.0, "metrics": {"pf": 1.3}},
+    ]
+    verdict, max_viable = _classify_verdict(per_scale)
+    assert verdict == "SHARP_CLIFF"
+    assert max_viable == 100.0
+
+
+def test_classify_sorts_unordered_scales() -> None:
+    # Descending input must not make the $1M tier the "base".
+    per_scale = [
+        {"scale_usd": 1_000_000.0, "metrics": {"pf": 1.0}},
+        {"scale_usd": 100.0, "metrics": {"pf": 1.6}},
+    ]
+    verdict, max_viable = _classify_verdict(per_scale)
+    # Decay from 1.6 → 1.0 is 37.5% → GRADUAL_DECAY, capped at the base.
+    assert verdict == "GRADUAL_DECAY"
+    assert max_viable == 100.0
+
+
+def test_classify_base_below_noise_floor_has_no_viable_capital() -> None:
+    # Base PF in [1.0, noise_floor): not INVERTED, but nothing is viable.
+    per_scale = [
+        {"scale_usd": 100.0, "metrics": {"pf": 1.1}},
+        {"scale_usd": 10_000.0, "metrics": {"pf": 1.05}},
+    ]
+    _, max_viable = _classify_verdict(per_scale)
+    assert max_viable is None

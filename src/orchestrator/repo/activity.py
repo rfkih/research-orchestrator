@@ -52,13 +52,17 @@ async def list_activities(
         if val is not None:
             wheres.append(f"{col} = ${n}"); params.append(val); n += 1
     params += [limit, offset]
+    # activity_id tiebreaker: same-timestamp rows are common (a tick logs
+    # several activities in one transaction) and OFFSET pagination over an
+    # unstable order skips/duplicates rows at page boundaries.
+    direction = "ASC" if session_id else "DESC"
     rows = await conn.fetch(
         f"""
         SELECT activity_id, session_id, agent_name, activity_type, strategy_code,
                title, details, related_id, related_type, status, created_time
         FROM research_agent_activity
         WHERE {" AND ".join(wheres)}
-        ORDER BY created_time {"ASC" if session_id else "DESC"}
+        ORDER BY created_time {direction}, activity_id {direction}
         LIMIT ${n} OFFSET ${n+1}
         """,
         *params,
@@ -125,7 +129,17 @@ async def list_sessions(conn, *, limit: int = 20, offset: int = 0) -> list[dict]
 
 
 async def count_sessions(conn) -> int:
+    # Must match list_sessions' GROUP BY (session_id, agent_name) exactly:
+    # COUNT(DISTINCT session_id) drops NULL session_ids (which form real
+    # groups in the list) and collapses a session shared by two agent
+    # names — making the paginated total smaller than the rows served.
     row = await conn.fetchrow(
-        "SELECT COUNT(DISTINCT session_id) FROM research_agent_activity"
+        """
+        SELECT COUNT(*) FROM (
+            SELECT 1
+            FROM research_agent_activity
+            GROUP BY session_id, agent_name
+        ) g
+        """
     )
     return row[0]

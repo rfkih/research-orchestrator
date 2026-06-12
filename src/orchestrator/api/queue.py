@@ -507,3 +507,44 @@ async def cancel_queue(
         )
     row = await queue_repo.get_queue(conn, queue_id)
     return {"cancelled": True, "queue_id": str(queue_id), "row": row}
+
+
+@router.post("/{queue_id}/requeue")
+async def requeue_queue(
+    queue_id: UUID,
+    body: CancelRequest,
+    conn: asyncpg.Connection = Depends(get_db_conn),
+    agent: str = Depends(get_agent_name),
+) -> dict[str, Any]:
+    """Return a FAILED row to PENDING (operator escape hatch).
+
+    FAILED was previously a dead end: ``claim_next`` only claims PENDING
+    and the reaper only resets RUNNING, so a row failed by a transient
+    infra/config problem was stranded forever. Requeue decrements the
+    iteration counter so the next tick retries the cell whose attempt
+    failed. ``body.reason`` documents why the operator believes the
+    failure was transient.
+    """
+    note = (
+        f"[{datetime.now(timezone.utc).isoformat()}] Requeued by {agent}: "
+        f"{body.reason}"
+    )
+    affected = await queue_write.requeue_failed(conn, queue_id, note)
+    if affected == 0:
+        raise OrchestratorError(
+            status_code=409,
+            error_code="queue_not_requeueable",
+            message=(
+                f"No FAILED row with queue_id={queue_id}. Only FAILED rows "
+                f"can be requeued; use POST /queue for a fresh sweep."
+            ),
+            retryable=False,
+            next_action=NextAction(kind="call", method="GET", path=f"/queue/{queue_id}"),
+        )
+    row = await queue_repo.get_queue(conn, queue_id)
+    return {
+        "requeued": True,
+        "queue_id": str(queue_id),
+        "row": row,
+        "next_actions": [{"kind": "call", "method": "POST", "path": "/tick"}],
+    }

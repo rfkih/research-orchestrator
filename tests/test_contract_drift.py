@@ -418,9 +418,12 @@ def test_playbook_has_section_for_every_loop_step_named_in_prompt(
         ("step 3", "### 3."),
         ("step 4", "### 4."),
         ("step 7", "### 5"),     # playbook merges steps 5 + 6 + 7
+        # The 2026-06-11 token-efficiency pass collapsed playbook sections
+        # 7.45/7.5/7.6 under one "### 7.45–7.6" heading (graduation path);
+        # the detailed recipes moved to quant-researcher-step7-graduation.md.
         ("step 9", "### 7.45"),  # paired-delta gate at 9.0
-        ("step 9d", "### 7.6"),  # Path C async checkpoint
-        ("step 10", "### 7.5"),  # walk-forward request (step 7.5 in playbook covers this)
+        ("step 9d", "§7.6"),     # Path C async checkpoint
+        ("step 10", "§7.5"),     # walk-forward request (graduation review)
     )
     missing: list[tuple[str, str]] = []
     for prompt_label, playbook_hint in expected_steps:

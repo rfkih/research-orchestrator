@@ -139,6 +139,17 @@ def mean_variance_weights(
         finite = off_diag[np.isfinite(off_diag)]
         fill = float(finite.mean()) if finite.size else 0.0
         sigma = np.where(np.isnan(sigma), fill, sigma)
+    # Pairwise-overlap correlations (each pair estimated on a different
+    # date window) + NaN imputation can produce a matrix that is NOT
+    # positive semi-definite — inverting it yields negative-variance
+    # directions that the clamp-to-positive step then masks rather than
+    # fixes. Clip negative eigenvalues to a small floor and reconstruct
+    # before inverting (symmetrise first: eigh assumes symmetry).
+    sigma = 0.5 * (sigma + sigma.T)
+    eigvals, eigvecs = np.linalg.eigh(sigma)
+    if eigvals.min() < 0:
+        eigvals = np.clip(eigvals, 1e-10, None)
+        sigma = (eigvecs * eigvals) @ eigvecs.T
     # Ridge for numerical stability when sigma is near-singular.
     sigma = sigma + 1e-8 * np.eye(n)
     try:
@@ -291,7 +302,15 @@ def hrp_weights(
 
 def realised_vol(series: dict[date, float], min_obs: int = 5) -> float | None:
     """Sample standard deviation of a daily-return series. Returns None
-    if too few observations or zero variance."""
+    if too few observations or zero variance.
+
+    Basis caveat: the input is the SPARSE exit-day series (only days with
+    a realised trade), while pool Sharpe is computed on a calendar-filled
+    series (missing days = 0). Sparse-basis vol is therefore biased HIGH
+    for infrequent traders relative to the calendar basis, which biases
+    their inverse-variance HRP weight LOW. Harmonising the two bases
+    requires the calendar-filled series at every call site; until then,
+    read HRP weights for sparse traders as conservative."""
     if len(series) < min_obs:
         return None
     vals = np.fromiter(series.values(), dtype=np.float64)

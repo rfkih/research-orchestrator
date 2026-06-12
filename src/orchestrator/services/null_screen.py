@@ -20,10 +20,15 @@ Decision rule (pinned):
     INSUFFICIENT_DATA     if  fewer than ceil(K/2) backtests produced a
                               finite PF (JVM failures, n<5 trades, etc.)
 
-The screen does NOT write to ``hypothesis_audit`` (would inflate the DSR
-multiplicity counter for the legitimate sweep that follows) or
-``research_iteration_log`` (an exploratory landscape probe is not an
-audit-grade trial). Result is journaled as ``NULL_SCREEN_RESULT``.
+Multiplicity accounting (fixed 2026-06-12): every COMPLETED draw IS
+recorded in ``hypothesis_audit`` with ``decision_verdict='NULL_SCREEN_DRAW'``
+and counted by ``count_data_universe_trials``. The screen's K backtests
+*select* which archetypes proceed to a sweep — that is exactly the
+selection process Bailey-LdP n_trials must include; excluding them (the
+old behaviour, on the theory it "would inflate the counter") silently
+granted every post-screen sweep ~K uncounted trials. The screen still
+does not write ``research_iteration_log`` (an exploratory landscape probe
+is not an audit-grade trial). Result is journaled as ``NULL_SCREEN_RESULT``.
 
 Pure functions are testable in isolation; the orchestration helper
 shells out to the JVM the same way ``services/tick.py`` does.
@@ -45,6 +50,7 @@ from ..config import Settings
 from ..errors import OrchestratorError
 from ..infra.db import Database
 from ..logging import get_logger
+from ..repo import hypothesis_audit as audit_repo
 from .tick import (
     _build_submit_payload,
     _fetch_run_metrics,
@@ -259,7 +265,9 @@ async def _run_one_draw(
             allow_short=allow_short,
         )
         backtest_run_id = await jvm.submit_backtest(payload)
-        final_status = await _poll_backtest_status(db, backtest_run_id)
+        final_status = await _poll_backtest_status(
+            db, backtest_run_id, timeout_s=settings.poll_timeout_s
+        )
         if final_status != "COMPLETED":
             return {
                 "combo": combo,
@@ -368,6 +376,30 @@ async def run_null_screen(
             pf=rec.get("pf"),
             error=rec.get("error"),
         )
+        if rec.get("error") is None:
+            # Count the completed draw toward data-universe multiplicity
+            # (see module docstring). Failure to record is logged loudly —
+            # an uncounted trial under-deflates every later DSR on this
+            # symbol × interval — but doesn't abort the screen.
+            try:
+                async with db.acquire() as conn:
+                    async with conn.transaction():
+                        await audit_repo.insert_audit(
+                            conn,
+                            strategy_code=strategy_code,
+                            symbol=instrument,
+                            interval_name=interval_name,
+                            params_snapshot=combo,
+                            queue_id=None,
+                            created_by=agent_name,
+                            decision_verdict="NULL_SCREEN_DRAW",
+                        )
+            except Exception as audit_exc:  # noqa: BLE001
+                log.error(
+                    "null_screen.audit_insert_failed",
+                    combo=combo,
+                    error=str(audit_exc),
+                )
         if rec.get("pf") is None:
             consecutive_failures += 1
         else:

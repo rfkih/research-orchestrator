@@ -24,16 +24,25 @@ class _FakeDb:
 
 @pytest.fixture
 def calls(monkeypatch: pytest.MonkeyPatch) -> dict:
+    # Stubs mirror the real queue_write contract: transitions take
+    # expected_status (the tick passes 'RUNNING') and return the affected
+    # row count — 1 here, simulating the row still being RUNNING.
     rec: dict[str, list] = {"park": [], "reset": [], "complete": []}
 
-    async def _park(conn, queue_id, note):
+    async def _park(conn, queue_id, note, *, expected_status=None):
         rec["park"].append(queue_id)
+        return 1
 
-    async def _reset(conn, queue_id, note):
+    async def _reset(conn, queue_id, note, *, expected_status=None):
         rec["reset"].append(queue_id)
+        return 1
 
-    async def _complete(conn, queue_id, *, final_verdict, walk_forward_id, note):
+    async def _complete(
+        conn, queue_id, *, final_verdict, walk_forward_id, note,
+        expected_status=None,
+    ):
         rec["complete"].append((queue_id, final_verdict))
+        return 1
 
     async def _paper(db, queue_id, agent_name, state):
         return None
@@ -115,3 +124,50 @@ async def test_exhausted_near_miss_with_weak_dsr_no_pool_route(calls: dict) -> N
         iteration_id="22222222-2222-2222-2222-222222222222", dsr=0.80,
     )
     assert [a["path"] for a in actions] == ["/queue"]
+
+
+@pytest.mark.asyncio
+async def test_no_edge_without_early_stop_respects_iter_budget(calls: dict) -> None:
+    # 2026-06-12 fix: the catch-all branch (NO_EDGE + early_stop=false) used
+    # to skip the budget check entirely — a 100-cell grid ticked to grid
+    # exhaustion regardless of iter_budget.
+    actions = await tick_mod._decide_next_state(
+        db=_FakeDb(), queue_id="q6", new_iter=10, iter_budget=10,
+        early_stop=False, statistical_verdict="NO_EDGE",
+        decision_verdict="DISCARD", agent_name="quant-researcher",
+    )
+    assert calls["complete"] == [("q6", "DISCARD")]
+    assert calls["reset"] == []
+    assert actions[0]["path"].startswith("/journal")
+
+
+@pytest.mark.asyncio
+async def test_no_edge_without_early_stop_continues_within_budget(calls: dict) -> None:
+    actions = await tick_mod._decide_next_state(
+        db=_FakeDb(), queue_id="q7", new_iter=3, iter_budget=10,
+        early_stop=False, statistical_verdict="NO_EDGE",
+        decision_verdict="DISCARD", agent_name="quant-researcher",
+    )
+    assert calls["complete"] == []
+    assert calls["reset"] == ["q7"]
+    assert actions[0]["path"] == "/tick"
+
+
+@pytest.mark.asyncio
+async def test_operator_cancel_mid_flight_is_honoured(
+    monkeypatch: pytest.MonkeyPatch, calls: dict
+) -> None:
+    # 2026-06-12 fix (cancel ≠ stop drain): when the operator PARKs the row
+    # mid-tick, the step-6 transition affects 0 rows and must NOT resurrect
+    # the row to PENDING — the next_action points at the row, not /tick.
+    async def _reset_lost(conn, queue_id, note, *, expected_status=None):
+        return 0
+
+    monkeypatch.setattr(tick_mod.queue_write, "reset_to_pending", _reset_lost)
+    actions = await tick_mod._decide_next_state(
+        db=_FakeDb(), queue_id="q8", new_iter=2, iter_budget=10,
+        early_stop=False, statistical_verdict="INSUFFICIENT_EVIDENCE",
+        decision_verdict="ITERATE", agent_name="quant-researcher",
+    )
+    assert actions[0]["path"] == "/queue/q8"
+    assert actions[0]["method"] == "GET"

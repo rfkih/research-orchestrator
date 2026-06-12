@@ -31,6 +31,13 @@ from ..logging import get_logger
 log = get_logger(__name__)
 
 
+class _StaleJwtError(httpx.TransportError):
+    """Sentinel for the 401 re-mint path. Subclasses TransportError so the
+    idempotent retry predicate keeps catching it, but is its own type so
+    the NON-idempotent predicate can allow it (a 401 response proves the
+    JVM rejected the request — retry cannot double-dispatch)."""
+
+
 class JvmClient:
     """Wraps the research JVM (port 8081)."""
 
@@ -145,10 +152,13 @@ class JvmClient:
             return False
 
     async def get(self, path: str, **kwargs: Any) -> httpx.Response:
-        return await self._request("GET", path, **kwargs)
+        return await self._request("GET", path, idempotent=True, **kwargs)
 
     async def post(self, path: str, **kwargs: Any) -> httpx.Response:
-        return await self._request("POST", path, **kwargs)
+        # POSTs are NOT idempotent: a ReadTimeout/connection-reset after the
+        # request body was delivered may mean the JVM already accepted the
+        # submit — blind retry double-dispatches an hour-long backtest.
+        return await self._request("POST", path, idempotent=False, **kwargs)
 
     async def submit_backtest(self, payload: dict[str, Any]) -> str:
         """POST /api/v1/backtest. Returns the new ``backtestRunId``."""
@@ -178,24 +188,40 @@ class JvmClient:
             )
         return str(run_id)
 
-    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+    async def _request(
+        self, method: str, path: str, *, idempotent: bool = True, **kwargs: Any
+    ) -> httpx.Response:
         # Retry only transport-level failures; 4xx/5xx from the JVM are
         # business errors and bubble up to the handler so the agent can
         # branch on the envelope.
+        #
+        # Idempotency split (2026-06-12): non-idempotent calls (POST submit)
+        # only retry errors guaranteed to precede request delivery —
+        # ConnectError/ConnectTimeout — plus the explicit 401 re-mint
+        # sentinel. Retrying a POST on ReadTimeout span up to 3 concurrent
+        # duplicate backtests when the JVM was merely slow to answer.
+        if idempotent:
+            retryable_exc: tuple[type[Exception], ...] = (httpx.TransportError,)
+        else:
+            retryable_exc = (httpx.ConnectError, httpx.ConnectTimeout, _StaleJwtError)
+        # Read caller headers ONCE, non-destructively — the old kwargs.pop
+        # inside the loop stripped them from attempt 2 onward.
+        caller_headers = kwargs.pop("headers", {})
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(3),
             wait=wait_exponential(multiplier=0.5, min=0.5, max=4),
-            retry=retry_if_exception_type(httpx.TransportError),
+            retry=retry_if_exception_type(retryable_exc),
             reraise=True,
         ):
             with attempt:
-                headers = kwargs.pop("headers", {}) | await self._authed_headers()
+                headers = caller_headers | await self._authed_headers()
                 r = await self.client.request(method, path, headers=headers, **kwargs)
                 if r.status_code == 401:
                     # Token expired or rotated — mint once and retry on the
-                    # next attempt by clearing the cached JWT.
+                    # next attempt by clearing the cached JWT. Safe for POSTs
+                    # too: a 401 response proves the JVM REJECTED the call.
                     self._jwt = None
-                    raise httpx.TransportError("JVM 401 — re-mint and retry")
+                    raise _StaleJwtError("JVM 401 — re-mint and retry")
                 return r
         # Unreachable — tenacity reraise=True
         raise RuntimeError("JvmClient._request retry loop fell through")

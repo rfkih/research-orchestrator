@@ -78,9 +78,10 @@ def _gauss_returns(n: int, mean: float, std: float, seed: int = 7) -> list[float
     """i.i.d. Gaussian daily returns with EXACT sample mean = ``mean``.
 
     De-meaning removes sample-mean drift so the realised Sharpe is
-    deterministic (the DSR bar at n_eff≈400 is only ~0.16 annualised, so an
-    un-centered mean-0 draw would still clear it). i.i.d. → lag-1
-    autocorrelation ≈ 0 so the Lo(2002) effective-N ≈ n."""
+    deterministic. DSR is computed on the PER-OBSERVATION Sharpe (the
+    2026-06-12 C1 fix); at n≈400, n_trials=1 the honest bar is per-obs
+    Sharpe ≈ 0.165 (annualised ≈ 3.1). i.i.d. → lag-1 autocorrelation ≈ 0
+    so the Lo(2002) effective-N ≈ n."""
     rng = random.Random(seed)
     raw = [rng.gauss(0.0, std) for _ in range(n)]
     m = sum(raw) / n
@@ -88,8 +89,9 @@ def _gauss_returns(n: int, mean: float, std: float, seed: int = 7) -> list[float
 
 
 def _strong_returns(n: int = 400) -> list[float]:
-    """High-Sharpe daily series: mean/std = 0.1 → annualised Sharpe ≈ 1.9."""
-    return _gauss_returns(n, mean=0.10, std=1.0)
+    """High-Sharpe daily series: per-obs mean/std = 0.2 → annualised
+    Sharpe ≈ 3.8 — comfortably above the honest per-obs DSR bar."""
+    return _gauss_returns(n, mean=0.20, std=1.0)
 
 
 def _weak_returns(n: int = 400) -> list[float]:
@@ -174,6 +176,37 @@ def test_robust_when_significant_and_consistent():
     assert verdict == "ROBUST"
     assert m["dsr"] is not None and m["dsr"] >= wf.LOW_FREQ_DSR_BAR
     assert m["fold_return_positive_pct"] == 100.0
+
+
+def test_low_ann_sharpe_noise_is_not_robust_c1_regression():
+    """C1 regression (2026-06-12): the DSR must take the PER-OBSERVATION
+    Sharpe. The pre-fix code passed the √365-annualised Sharpe, inflating
+    the z-score ~19× — this exact series (annualised Sharpe ≈ 0.19 at
+    n=341, i.e. pure junk) scored DSR 0.967 and graduated ROBUST. With the
+    honest convention it must fail the significance bar."""
+    junk = _gauss_returns(341, mean=0.01, std=1.0)  # ann Sharpe ≈ 0.19
+    verdict, m = wf.low_freq_stability_verdict(
+        oos_daily_returns=junk,
+        fold_returns_pct=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        total_trades=40,
+        n_trials=1,
+    )
+    assert verdict == "INSUFFICIENT_EVIDENCE"
+    assert m["dsr"] is not None and m["dsr"] < wf.LOW_FREQ_DSR_BAR
+
+
+def test_dsr_uses_per_observation_sharpe_not_annualised():
+    """Structural pin for C1: the reported per-obs Sharpe must be ~1/√365
+    of the annualised one, and the DSR must move with the per-obs value."""
+    verdict, m = wf.low_freq_stability_verdict(
+        oos_daily_returns=_strong_returns(),
+        fold_returns_pct=[5.0, 8.0, 4.0, 12.0, 3.0, 6.0],
+        total_trades=40,
+        n_trials=1,
+    )
+    assert m["oos_sharpe_per_obs"] is not None and m["oos_sharpe"] is not None
+    ratio = m["oos_sharpe"] / m["oos_sharpe_per_obs"]
+    assert abs(ratio - wf.DAYS_PER_YEAR ** 0.5) < 0.1
 
 
 # ── Autocorrelation discount (Lo 2002) — the honesty guard ────────────────────

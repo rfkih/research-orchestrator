@@ -175,26 +175,32 @@ async def log_metric(
     constraint will raise asyncpg.CheckViolationError on NaN/Inf — callers
     must sanitize per cli.py's allow_nan=False convention.
     """
-    metric_id = await conn.fetchval(
-        """
-        INSERT INTO experiment_metric (run_id, fold_idx, metric_name, value, step)
-        VALUES ($1, $2::int, $3::text, $4::double precision, $5::int)
-        RETURNING metric_id
-        """,
-        run_id, fold_idx, metric_name, value, step,
-    )
-    if fold_idx is None:
-        # Mirror run-level scalars into the header for JOIN-free leaderboards.
-        # jsonb_build_object + concat: existing keys are overwritten.
-        await conn.execute(
+    # One transaction: the metric INSERT and the summary-mirror UPDATE must
+    # land together. Split-autocommit left metric rows committed with no
+    # JSONB mirror on a crash between the statements — and leaderboard()
+    # filters on ``summary_metrics ? metric``, so the run silently vanished
+    # from rankings while the metric row said otherwise.
+    async with conn.transaction():
+        metric_id = await conn.fetchval(
             """
-            UPDATE experiment_run
-            SET summary_metrics = summary_metrics || jsonb_build_object($2::text, $3::double precision),
-                updated_time = NOW()
-            WHERE run_id = $1
+            INSERT INTO experiment_metric (run_id, fold_idx, metric_name, value, step)
+            VALUES ($1, $2::int, $3::text, $4::double precision, $5::int)
+            RETURNING metric_id
             """,
-            run_id, metric_name, value,
+            run_id, fold_idx, metric_name, value, step,
         )
+        if fold_idx is None:
+            # Mirror run-level scalars into the header for JOIN-free leaderboards.
+            # jsonb_build_object + concat: existing keys are overwritten.
+            await conn.execute(
+                """
+                UPDATE experiment_run
+                SET summary_metrics = summary_metrics || jsonb_build_object($2::text, $3::double precision),
+                    updated_time = NOW()
+                WHERE run_id = $1
+                """,
+                run_id, metric_name, value,
+            )
     return int(metric_id)
 
 
@@ -240,30 +246,33 @@ async def log_metrics(
         )
         for m in metrics
     ]
-    await conn.executemany(
-        """
-        INSERT INTO experiment_metric (run_id, fold_idx, metric_name, value, step)
-        VALUES ($1, $2::int, $3::text, $4::double precision, $5::int)
-        """,
-        rows,
-    )
-
-    # Collapse run-level entries into a single JSONB object and merge.
-    run_level = {
-        m["name"]: float(m["value"])
-        for m in metrics
-        if m.get("fold_idx") is None
-    }
-    if run_level:
-        await conn.execute(
+    # One transaction — see log_metric: a crash between the INSERTs and the
+    # mirror UPDATE desyncs the leaderboard from the metric table.
+    async with conn.transaction():
+        await conn.executemany(
             """
-            UPDATE experiment_run
-            SET summary_metrics = summary_metrics || $2::jsonb,
-                updated_time = NOW()
-            WHERE run_id = $1
+            INSERT INTO experiment_metric (run_id, fold_idx, metric_name, value, step)
+            VALUES ($1, $2::int, $3::text, $4::double precision, $5::int)
             """,
-            run_id, run_level,
+            rows,
         )
+
+        # Collapse run-level entries into a single JSONB object and merge.
+        run_level = {
+            m["name"]: float(m["value"])
+            for m in metrics
+            if m.get("fold_idx") is None
+        }
+        if run_level:
+            await conn.execute(
+                """
+                UPDATE experiment_run
+                SET summary_metrics = summary_metrics || $2::jsonb,
+                    updated_time = NOW()
+                WHERE run_id = $1
+                """,
+                run_id, run_level,
+            )
     return len(rows)
 
 
@@ -413,7 +422,7 @@ async def list_runs(
                created_by
         FROM experiment_run
         WHERE {' AND '.join(wheres)}
-        ORDER BY started_at DESC
+        ORDER BY started_at DESC, run_id DESC
         LIMIT ${n} OFFSET ${n + 1}
         """,
         *params,

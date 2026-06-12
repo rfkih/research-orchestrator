@@ -22,11 +22,18 @@ import asyncpg
 async def _queue_counts(
     conn: asyncpg.Connection, *, track: str | None = None
 ) -> dict[str, int]:
+    # NULL-track arm mirrors claim_next's grandfathering: legacy rows with
+    # no sweep_config->>'track' belong to the trading track. Without it the
+    # trading digest reads PENDING=0 while POST /tick would still claim a
+    # legacy untracked row — the researcher would enqueue a duplicate sweep
+    # on top of work that's about to run.
     rows = await conn.fetch(
         """
         SELECT status, COUNT(*)::int AS n
         FROM research_queue
-        WHERE ($1::text IS NULL OR sweep_config->>'track' = $1)
+        WHERE ($1::text IS NULL
+               OR sweep_config->>'track' = $1
+               OR ($1 = 'trading' AND sweep_config->>'track' IS NULL))
         GROUP BY status
         """,
         track,
@@ -78,6 +85,11 @@ async def _recent_sig_edge_ids(
     SIG_EDGE iterations doesn't inflate the digest payload. The cap is
     informational only — if it's hit, the researcher should query
     ``GET /iterations?verdict=...`` directly for the full set.
+
+    Hedging rows stamp SIGNIFICANT_EDGE on PASS *and* FAIL (the hedging
+    gate reuses the trading control-flow signals; see _select_track_gate),
+    so filter out rows whose hedging_gate payload says passed=false —
+    otherwise every hedging FAIL surfaces in the digest as a recent edge.
     """
     rows = await conn.fetch(
         """
@@ -85,6 +97,8 @@ async def _recent_sig_edge_ids(
         FROM research_iteration_log
         WHERE statistical_verdict = 'SIGNIFICANT_EDGE'
           AND created_time > NOW() - ($1::int * INTERVAL '1 day')
+          AND COALESCE(
+                (metrics_snapshot->'hedging_gate'->>'passed')::boolean, true)
         ORDER BY created_time DESC
         LIMIT $2
         """,
@@ -102,7 +116,8 @@ async def _active_hypotheses(
         SELECT journal_id, strategy_code, title, created_time
         FROM research_journal
         WHERE entry_type = 'HYPOTHESIS' AND status = 'ACTIVE'
-          AND ($1::text IS NULL OR structured_data->>'track' = $1)
+          AND ($1::text IS NULL OR structured_data->>'track' = $1
+               OR ($1 = 'trading' AND structured_data->>'track' IS NULL))
         ORDER BY created_time DESC
         """,
         track,
@@ -127,7 +142,8 @@ async def _last_run_summary(
                structured_data, created_time
         FROM research_journal
         WHERE entry_type = 'RUN_SUMMARY'
-          AND ($1::text IS NULL OR structured_data->>'track' = $1)
+          AND ($1::text IS NULL OR structured_data->>'track' = $1
+               OR ($1 = 'trading' AND structured_data->>'track' IS NULL))
         ORDER BY created_time DESC
         LIMIT 1
         """,
@@ -176,7 +192,8 @@ async def _lockout_state(
             WHERE entry_type = 'RUN_SUMMARY'
               AND (title LIKE 'ARCHETYPE_EXHAUSTION_%'
                    OR title LIKE 'OPERATOR_ESCALATION_%')
-              AND ($1::text IS NULL OR structured_data->>'track' = $1)
+              AND ($1::text IS NULL OR structured_data->>'track' = $1
+               OR ($1 = 'trading' AND structured_data->>'track' IS NULL))
             ORDER BY created_time DESC
             LIMIT 1
         )
@@ -187,7 +204,8 @@ async def _lockout_state(
                    SELECT 1 FROM research_journal h
                    WHERE h.entry_type = 'HYPOTHESIS' AND h.status = 'ACTIVE'
                      AND h.created_time > t.created_time
-                     AND ($1::text IS NULL OR h.structured_data->>'track' = $1)
+                     AND ($1::text IS NULL OR h.structured_data->>'track' = $1
+                     OR ($1 = 'trading' AND h.structured_data->>'track' IS NULL))
                ) AS bypass_available
         FROM terminal t
         WHERE t.window_iv IS NOT NULL
@@ -230,7 +248,8 @@ async def _pending_specialist_reviews(
          WHERE entry_type = 'IDEA_BACKLOG'
            AND status = 'ACTIVE'
            AND structured_data->>'kind' = 'specialist_review_request'
-           AND ($2::text IS NULL OR structured_data->>'track' = $2)
+           AND ($2::text IS NULL OR structured_data->>'track' = $2
+           OR ($2 = 'trading' AND structured_data->>'track' IS NULL))
          ORDER BY created_time ASC
          LIMIT $1
         """,
@@ -279,7 +298,8 @@ async def _recent_specialist_verdicts(
            AND status = 'ACTIVE'
            AND structured_data->>'kind' = 'specialist_review_verdict'
            AND created_time > NOW() - ($1::int * INTERVAL '1 hour')
-           AND ($3::text IS NULL OR structured_data->>'track' = $3)
+           AND ($3::text IS NULL OR structured_data->>'track' = $3
+           OR ($3 = 'trading' AND structured_data->>'track' IS NULL))
          ORDER BY created_time DESC
          LIMIT $2
         """,
@@ -319,7 +339,8 @@ async def _last_null_screen_per_surface(
                title, structured_data, created_time
         FROM research_journal
         WHERE entry_type = 'NULL_SCREEN_RESULT'
-          AND ($1::text IS NULL OR structured_data->>'track' = $1)
+          AND ($1::text IS NULL OR structured_data->>'track' = $1
+               OR ($1 = 'trading' AND structured_data->>'track' IS NULL))
         ORDER BY strategy_code, instrument, interval_name, created_time DESC
         """,
         track,

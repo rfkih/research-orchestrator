@@ -46,7 +46,12 @@ from ..repo import cross_window as cw_repo
 from ..repo import trades as trades_repo
 from .analyze import PF_INFINITY_SENTINEL, slippage_sensitivity
 from .regime_windows import CATALOG_VERSION, RegimeWindow, windows_for
-from .tick import _fetch_run_metrics, _poll_backtest_status, _resolve_account_strategy
+from .tick import (
+    _POLL_TIMEOUT_S,
+    _fetch_run_metrics,
+    _poll_backtest_status,
+    _resolve_account_strategy,
+)
 from .walk_forward import _build_payload
 
 log = get_logger(__name__)
@@ -164,19 +169,32 @@ def aggregate_windows(window_results: list[dict[str, Any]]) -> dict[str, Any]:
     net_positive_n = 0
     thin_windows: list[str] = []
     no_data_windows: list[str] = []
+    errored_windows: list[str] = []
+    eligible_regime_tags: set[str] = set()
+    excluded_regime_tags: set[str] = set()
     pf_sentinel_dropped = 0
 
     for w in window_results:
+        tag = w.get("regime_tag")
         if w.get("error") == "no_data":
             no_data_windows.append(w["label"])
+            if tag:
+                excluded_regime_tags.add(tag)
             continue
         if w.get("error"):
+            errored_windows.append(w["label"])
+            if tag:
+                excluded_regime_tags.add(tag)
             continue
         trades = int(w.get("trades") or 0)
         total_trades += trades
         if trades < MIN_TRADES_PER_WINDOW:
             thin_windows.append(w["label"])
+            if tag:
+                excluded_regime_tags.add(tag)
             continue
+        if tag:
+            eligible_regime_tags.add(tag)
         eligible_n += 1
         eligible_trades += trades
         pf = w.get("pf")
@@ -229,6 +247,9 @@ def aggregate_windows(window_results: list[dict[str, Any]]) -> dict[str, Any]:
         "total_trades_eligible": eligible_trades,
         "thin_windows": thin_windows,
         "no_data_windows": no_data_windows,
+        "errored_windows": errored_windows,
+        "eligible_regime_tags": sorted(eligible_regime_tags),
+        "excluded_regime_tags": sorted(excluded_regime_tags - eligible_regime_tags),
         "notes": notes,
     }
 
@@ -249,6 +270,16 @@ def cross_window_verdict(agg: dict[str, Any]) -> str:
         return "NO_EDGE_CROSS_WINDOW"
     if pct_pos < ROBUST_PCT_THRESHOLD:
         return "INCONSISTENT_CROSS_WINDOW"
+    # Regime-coverage requirement (2026-06-12): thin and errored windows are
+    # excluded from BOTH sides of pct_pos, so before this check a long-biased
+    # strategy with 5 trades in the bear window (dropped as thin) and positive
+    # bull/chop windows scored 100% → ROBUST — the exact bull-rider this gate
+    # exists to catch. ROBUST now requires the BEAR regime to be represented
+    # in the *eligible* evidence; without it the claim is data-bound, not
+    # cross-regime. JVM failures on hard windows likewise no longer improve
+    # the verdict.
+    if "BEAR" not in set(agg.get("eligible_regime_tags") or []):
+        return "INSUFFICIENT_DATA_IN_WINDOW"
     return "ROBUST_CROSS_WINDOW"
 
 
@@ -264,6 +295,7 @@ async def _run_one_window(
     overrides: dict[str, Any] | None,
     allow_long: bool,
     allow_short: bool,
+    poll_timeout_s: int | None = None,
 ) -> dict[str, Any]:
     """Submit one window to the JVM, poll, fetch metrics + trades.
 
@@ -296,9 +328,23 @@ async def _run_one_window(
         except OrchestratorError as e:
             return {**base, "run_id": None, "error": e.error_code}
 
-        final_status = await _poll_backtest_status(db, run_id)
+        final_status = await _poll_backtest_status(
+            db,
+            run_id,
+            timeout_s=poll_timeout_s if poll_timeout_s is not None else _POLL_TIMEOUT_S,
+        )
         if final_status != "COMPLETED":
-            return {**base, "run_id": run_id, "error": f"status={final_status}"}
+            capped = final_status not in ("FAILED", "CANCELLED", "ERROR")
+            return {
+                **base,
+                "run_id": run_id,
+                "error": (
+                    f"poll_cap_exceeded status={final_status}"
+                    if capped
+                    else f"status={final_status}"
+                ),
+                "poll_capped": capped,
+            }
 
         async with db.acquire() as conn:
             metrics = await _fetch_run_metrics(conn, run_id)
@@ -432,10 +478,14 @@ async def run_cross_window(
             overrides=overrides,
             allow_long=as_row["allow_long"],
             allow_short=as_row["allow_short"],
+            poll_timeout_s=settings.poll_timeout_s,
         )
         window_results.append(result)
 
     agg = aggregate_windows(window_results)
+    agg["n_windows_poll_capped"] = len(
+        [w for w in window_results if w.get("poll_capped")]
+    )
     verdict = cross_window_verdict(agg)
 
     pf = agg.get("pf") or {}

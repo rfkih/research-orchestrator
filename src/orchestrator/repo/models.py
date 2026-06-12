@@ -214,7 +214,7 @@ async def list_models(
                status, version, created_time, created_by, updated_time
         FROM model_registry
         WHERE {' AND '.join(wheres)}
-        ORDER BY created_time DESC
+        ORDER BY created_time DESC, id DESC
         LIMIT ${n} OFFSET ${n + 1}
         """,
         *params,

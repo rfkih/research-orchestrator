@@ -272,15 +272,19 @@ def test_statistical_verdict_promotes_when_dsr_clears_threshold() -> None:
     assert out["verdict"] == "SIGNIFICANT_EDGE"
 
 
-def test_statistical_verdict_falls_back_when_dsr_unavailable() -> None:
-    # n<30 paths or test fixtures may pass dsr=None — must NOT block
-    # otherwise-valid SIGNIFICANT_EDGE results.
+def test_statistical_verdict_fails_closed_when_dsr_unavailable() -> None:
+    # L3 fix (2026-06-12): at gate sample size (n >= MIN_TRADES_FOR_SIG)
+    # the DSR is always computable unless the distribution is degenerate
+    # AND the bootstrap fallback failed too. Letting dsr=None through on
+    # the PF CI alone was the one fail-open in the verdict chain — the
+    # multiplicity gate must not be bypassable.
     out = statistical_verdict(
         n=200,
         pf_ci={"low": 1.5, "high": 3.0},
         dsr=None,
     )
-    assert out["verdict"] == "SIGNIFICANT_EDGE"
+    assert out["verdict"] == "INSUFFICIENT_EVIDENCE"
+    assert "DSR is not computable" in out["reason"]
 
 
 def test_statistical_verdict_no_edge_unaffected_by_dsr() -> None:

@@ -15,6 +15,7 @@ failure path.
 
 from __future__ import annotations
 
+import json
 import logging
 import traceback
 
@@ -47,9 +48,19 @@ class ErrorReporterLoggingHandler(logging.Handler):
                 # our POST, shipping that would loop straight back.
                 return
 
-            message = record.getMessage()
             exc_class: str | None = None
             stack: str | None = None
+            if isinstance(record.msg, dict):
+                # structlog event routed via wrap_for_formatter: record.msg
+                # is the event dict. Extract the event name as the message
+                # and the (already-rendered) exception text as the stack.
+                event_dict = dict(record.msg)
+                stack = event_dict.pop("exception", None)
+                event_dict.pop("_record", None)
+                event_dict.pop("_from_structlog", None)
+                message = json.dumps(event_dict, default=str)
+            else:
+                message = record.getMessage()
             if record.exc_info:
                 exc_type, exc_value, exc_tb = record.exc_info
                 if exc_type is not None:

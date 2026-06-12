@@ -76,6 +76,7 @@ async def insert_audit(
     params_snapshot: dict[str, Any],
     queue_id: UUID | None,
     created_by: str,
+    decision_verdict: str | None = None,
 ) -> UUID:
     """Record a trial attempt. Called BEFORE the backtest submits so a
     crashed tick still leaves an audit trail. Returns the audit_id so
@@ -90,6 +91,11 @@ async def insert_audit(
     research_queue. The hard-rule allowlist (BTCUSDT/ETHUSDT × 5m/15m/
     1h/4h) is enforced at the DB layer by V93's CHECK constraints — pass
     junk values and the INSERT will raise.
+
+    ``decision_verdict`` is normally NULL at insert (step 5 backfills it).
+    The null-screen passes ``'NULL_SCREEN_DRAW'`` for its completed draws
+    so they count toward data-universe multiplicity without an iteration
+    row (see ``count_data_universe_trials``).
     """
     names = list(params_snapshot.keys())
     a_hash = axis_set_hash(names)
@@ -99,9 +105,10 @@ async def insert_audit(
         INSERT INTO hypothesis_audit (
             audit_id, strategy_code, symbol, interval_name,
             axis_set_hash, param_combo_hash,
-            params_snapshot, queue_id, created_by, created_time, updated_time
+            params_snapshot, queue_id, created_by, decision_verdict,
+            created_time, updated_time
         ) VALUES (
-            gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW()
+            gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW()
         )
         RETURNING audit_id
         """,
@@ -113,8 +120,35 @@ async def insert_audit(
         params_snapshot,  # asyncpg's jsonb codec encodes the dict (infra/db.py)
         queue_id,
         created_by,
+        decision_verdict,
     )
     return row["audit_id"]
+
+
+async def latest_unattached_for_queue(
+    conn: asyncpg.Connection, queue_id: UUID
+) -> dict[str, Any] | None:
+    """Most recent audit row for this queue with no iteration attached.
+
+    The resume path uses it to recover the exact combo a prior (dead)
+    attempt submitted: step 3.5 wrote this row immediately before the
+    submit, so its ``params_snapshot`` is authoritative for the in-flight
+    run — re-deriving the combo would diverge for TPE sweeps, whose
+    sampler is not deterministic across processes.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT audit_id, params_snapshot, created_time
+          FROM hypothesis_audit
+         WHERE queue_id = $1
+           AND iteration_id IS NULL
+           AND decision_verdict IS DISTINCT FROM 'NULL_SCREEN_DRAW'
+         ORDER BY created_time DESC
+         LIMIT 1
+        """,
+        queue_id,
+    )
+    return dict(row) if row else None
 
 
 async def update_audit_verdict(
@@ -175,6 +209,13 @@ async def count_data_universe_trials(
     forensics but don't count toward multiplicity (an infra failure isn't
     selection bias).
 
+    Null-screen draws DO count (decision_verdict='NULL_SCREEN_DRAW', no
+    iteration row): the screen's K completed backtests SELECT which
+    archetypes proceed to a sweep — that is exactly the selection process
+    Bailey-LdP n_trials must include. Excluding them (the pre-2026-06-12
+    behaviour) silently granted every post-screen sweep ~K uncounted
+    trials.
+
     Callers must add 1 for the in-flight trial they're about to log;
     its audit row has iteration_id=NULL until step 5 backfills it.
     """
@@ -183,7 +224,8 @@ async def count_data_universe_trials(
         SELECT COUNT(*)::int FROM hypothesis_audit
          WHERE symbol = $1
            AND interval_name = $2
-           AND iteration_id IS NOT NULL
+           AND (iteration_id IS NOT NULL
+                OR decision_verdict = 'NULL_SCREEN_DRAW')
         """,
         symbol,
         interval_name,

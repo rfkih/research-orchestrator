@@ -49,7 +49,12 @@ from ..errors import OrchestratorError
 
 
 # Tuning knobs. Pinned in tests.
-MIN_PAIRS_FOR_VERDICT: int = 3
+# MIN_PAIRS raised 3 -> 8 (2026-06-12): with n=3 same-sign deltas the
+# percentile bootstrap CI excludes zero with probability 1, and under a
+# sign-symmetric null P(all 3 same sign) = 25% -- a 12.5% false-positive
+# rate PER DIRECTION on a verdict that can block graduation
+# (NEGATIVE_DELTA). At n=8 the same accident costs P = 2/2^8 ~ 0.8%.
+MIN_PAIRS_FOR_VERDICT: int = 8
 DEFAULT_BOOTSTRAP_REPS: int = 1000
 DEFAULT_CI_LEVEL: float = 0.95
 NEUTRAL_MAGNITUDE_THRESHOLD: float = 0.05  # |mean_delta| below this → NEUTRAL

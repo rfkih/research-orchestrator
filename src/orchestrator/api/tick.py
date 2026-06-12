@@ -1,7 +1,10 @@
 """``POST /tick`` — run one research iteration end-to-end.
 
 Synchronous on purpose: a backtest typically completes in 30-300s on the
-research JVM, well within an HTTP request budget. The poll cap is 1800s.
+research JVM, well within an HTTP request budget. The poll cap is
+``settings.poll_timeout_s`` (env ``ORCH_POLL_TIMEOUT_S``, default 3600s);
+on expiry the row returns to PENDING with the run id persisted, so the
+next tick RESUMES the same run (``backtest_poll_cap_exceeded``, retryable).
 For agents that don't want to hold a connection that long, the recommended
 pattern is to call once per cron firing — not loop in-memory.
 

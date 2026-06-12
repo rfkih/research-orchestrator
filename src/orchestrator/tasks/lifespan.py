@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from urllib.parse import urlsplit, urlunsplit
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI
@@ -22,10 +23,29 @@ from ..infra.db import Database
 from ..logging import get_logger
 from ..observability.error_reporter import get_reporter
 from ..services.idempotency import InMemoryIdempotencyStore, PostgresIdempotencyStore
-from ..services.ml_training import reap_orphaned_on_startup
+from ..services.ml_training import (
+    cancel_inflight_training_tasks,
+    reap_orphaned_on_startup,
+)
 from .feature_refresh import start_feature_refresh_task
 
 log = get_logger(__name__)
+
+
+def _redact_url_password(url: str) -> str:
+    """``redis://:secret@host:6379/0`` → ``redis://:***@host:6379/0``."""
+    try:
+        parts = urlsplit(url)
+        if parts.password is None:
+            return url
+        host = parts.hostname or ""
+        if parts.port:
+            host = f"{host}:{parts.port}"
+        user = parts.username or ""
+        netloc = f"{user}:***@{host}"
+        return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+    except ValueError:
+        return "<unparseable-url>"
 
 
 @asynccontextmanager
@@ -63,7 +83,12 @@ async def lifespan_for(settings: Settings, app: FastAPI) -> AsyncIterator[None]:
             encoding="utf-8",
             decode_responses=True,
         )
-        log.info("orchestrator.redis_connected", redis_url=settings.redis_url)
+        # Redact credentials before logging — redis:// URLs may embed a
+        # password and this line lands verbatim in the JSON stdout stream.
+        log.info(
+            "orchestrator.redis_connected",
+            redis_url=_redact_url_password(settings.redis_url),
+        )
     else:
         app.state.redis = None
 
@@ -94,7 +119,15 @@ async def lifespan_for(settings: Settings, app: FastAPI) -> AsyncIterator[None]:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+        except asyncio.TimeoutError:
+            # wait_for cancels the WAIT, not the child — without the kill,
+            # one LightGBM-importing interpreter leaks per slow boot.
+            with suppress(ProcessLookupError):
+                proc.kill()
+            await proc.wait()
+            raise
         if proc.returncode == 0:
             import json as _json
             payload = _json.loads(stdout.decode("utf-8").strip().splitlines()[-1])
@@ -139,6 +172,14 @@ async def lifespan_for(settings: Settings, app: FastAPI) -> AsyncIterator[None]:
                 await feature_refresh_task
             except asyncio.CancelledError:
                 pass
+        # Cancel in-flight ML-training tasks SO THEIR CLEANUP RUNS: an
+        # uncancelled task is killed when the loop closes, losing the
+        # terminal-status DB write and leaving the detached train child
+        # running against a row stuck in RUNNING until the next boot reaper.
+        try:
+            await cancel_inflight_training_tasks(timeout_s=10)
+        except Exception:  # noqa: BLE001
+            log.exception("orchestrator.ml_training_shutdown_cancel_failed")
         if app.state.redis is not None:
             await app.state.redis.aclose()
         await inference.close()

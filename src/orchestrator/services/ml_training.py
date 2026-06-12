@@ -204,6 +204,13 @@ def build_cli_args(
     return args
 
 
+# Strong references to in-flight training tasks. The event loop holds only
+# WEAK references to tasks — a fire-and-forget caller that discards the
+# handle leaves the task collectable mid-train ("Task was destroyed but it
+# is pending"), stranding the row in RUNNING until the next boot reaper.
+_INFLIGHT_TASKS: set[asyncio.Task] = set()
+
+
 def start_training_run(
     *,
     settings: Settings,
@@ -213,9 +220,11 @@ def start_training_run(
     agent_name: str,
 ) -> asyncio.Task:
     """Spawn the subprocess as a background task. Returns the task
-    handle (mostly for tests). Production callers fire-and-forget;
-    completion writes land via the background task itself."""
-    return asyncio.create_task(
+    handle (mostly for tests). Production callers fire-and-forget —
+    the module-level ``_INFLIGHT_TASKS`` set holds the strong reference
+    so GC can't destroy the task mid-train; completion writes land via
+    the background task itself."""
+    task = asyncio.create_task(
         _run_subprocess(
             settings=settings,
             db_pool=db_pool,
@@ -225,6 +234,23 @@ def start_training_run(
         ),
         name=f"ml-training-{training_run_id}",
     )
+    _INFLIGHT_TASKS.add(task)
+    task.add_done_callback(_INFLIGHT_TASKS.discard)
+    return task
+
+
+async def cancel_inflight_training_tasks(timeout_s: float = 10.0) -> int:
+    """Shutdown hook: cancel outstanding training tasks and wait briefly
+    so their CancelledError arms can kill the detached child and write a
+    terminal row. Without this, lifespan teardown killed the tasks with
+    the loop — losing the terminal write AND leaving the train child
+    running against a row stuck in RUNNING. Returns the count cancelled."""
+    tasks = [t for t in _INFLIGHT_TASKS if not t.done()]
+    for t in tasks:
+        t.cancel()
+    if tasks:
+        await asyncio.wait(tasks, timeout=timeout_s)
+    return len(tasks)
 
 
 async def reap_orphaned_on_startup(db_pool: asyncpg.Pool) -> int:
@@ -383,13 +409,18 @@ async def _run_subprocess(
 
         duration = int(time.monotonic() - started_monotonic)
         exit_code = proc.returncode if proc.returncode is not None else -1
-        # Read the full stdout for summary parsing; tail-cap both for
-        # the audit row. Stdout is needed in full to find the JSON
-        # summary blackheart-train dumps at the end.
-        stdout_text = _read_file_full(stdout_path)
+        # Summary parsing needs only the END of stdout (blackheart-train
+        # dumps the JSON summary right before exit) — read a bounded tail
+        # in a worker thread. The old full read pulled the entire capture
+        # (the file the F5 comment itself sizes at "100MB+") synchronously
+        # on the event loop: seconds of blocking I/O + a like-sized RAM
+        # spike per completed run.
+        stdout_text = await asyncio.to_thread(
+            _read_file_last_bytes, stdout_path, _SUMMARY_SCAN_BYTES
+        )
         stdout_tail = _tail_text(stdout_text, settings.ml_training_stdio_tail_bytes)
-        stderr_tail = _read_file_tail(
-            stderr_path, settings.ml_training_stdio_tail_bytes
+        stderr_tail = await asyncio.to_thread(
+            _read_file_tail, stderr_path, settings.ml_training_stdio_tail_bytes
         )
 
         if exit_code != 0:
@@ -433,9 +464,58 @@ async def _run_subprocess(
             error_envelope=None,
             updated_by=agent_name,
         )
+        # COMPLETED + summary persisted: the (up to 100MB+) capture files
+        # have served their purpose — delete them or disk grows unboundedly
+        # at ~100MB/run. FAILED/TIMED_OUT paths deliberately KEEP theirs
+        # for diagnostics.
+        for _p in (stdout_path, stderr_path):
+            try:
+                _p.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("could not delete stdio capture %s", _p)
+
+    except asyncio.CancelledError:
+        # Orchestrator shutdown (lifespan cancels us with a grace window).
+        # Kill the detached child — it would otherwise keep training for
+        # hours against a row we're about to terminalize, and could even
+        # --register a model against it — then record the interruption.
+        logger.warning("ml training run %s cancelled (shutdown)", training_run_id)
+        if proc is not None and proc.returncode is None:
+            with _quiet_kill(proc):
+                proc.kill()
+        try:
+            await _terminal(
+                db_pool,
+                training_run_id=training_run_id,
+                status="FAILED",
+                exit_code=None,
+                duration_seconds=int(time.monotonic() - started_monotonic),
+                stdout_tail=None,
+                stderr_tail=None,
+                experiment_run_id=None,
+                content_sha256=None,
+                model_id=None,
+                error_envelope={
+                    "error_code": "orchestrator_shutdown",
+                    "message": "orchestrator shut down mid-train; child killed",
+                },
+                updated_by=agent_name,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "failed to mark training run %s after shutdown cancel",
+                training_run_id,
+            )
+        raise
 
     except Exception as exc:  # noqa: BLE001 — never let the task die silently
         logger.exception("ml training run %s crashed", training_run_id)
+        # Kill the child if it's still alive: marking the row FAILED while
+        # the detached train keeps running for hours (and may --register a
+        # model against a FAILED run) is worse than a hard stop.
+        if proc is not None and proc.returncode is None:
+            with _quiet_kill(proc):
+                proc.kill()
         try:
             await _terminal(
                 db_pool,
@@ -532,13 +612,23 @@ def _read_file_tail(path: Path, cap_bytes: int) -> str:
     return data.decode("utf-8", errors="replace")
 
 
-def _read_file_full(path: Path) -> str:
-    """Read the entire stdio capture. Used for summary parsing on
-    COMPLETED runs where we need the trailing JSON. Returns empty
-    string on read failure rather than raising — caller handles
-    missing-summary path."""
+# How far back from EOF the summary scan reads. blackheart-train's JSON
+# summary (indent=2) is the LAST thing on stdout and is a few KB; 2MB of
+# headroom tolerates trailing log noise without ever pulling the whole
+# (100MB+) capture into memory.
+_SUMMARY_SCAN_BYTES = 2 * 1024 * 1024
+
+
+def _read_file_last_bytes(path: Path, max_bytes: int) -> str:
+    """Read at most the last ``max_bytes`` of the stdio capture. Used for
+    summary parsing on COMPLETED runs where the trailing JSON is all that
+    matters. Returns empty string on read failure rather than raising —
+    caller handles the missing-summary path."""
     try:
         with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes))
             data = f.read()
     except OSError:
         return ""

@@ -34,7 +34,11 @@ def render_latex(paper: dict[str, Any]) -> str:
     journal = paper.get("journal_entries") or []
     citations = paper.get("citations") or []
 
-    title = _esc(paper.get("title") or "Untitled Research Paper")
+    # RAW title — _preamble does the (single) escape. Escaping here too
+    # double-escaped every ``_``-containing strategy code: pass 1 produced
+    # ``EMA\_BAND``, pass 2 re-escaped the backslash into
+    # ``EMA\textbackslash{}\_BAND`` — garbling the \title of every export.
+    title = paper.get("title") or "Untitled Research Paper"
     abstract = paper.get("abstract") or ""
     paper_id = paper.get("paper_id") or ""
     version = paper.get("version") or 1

@@ -133,7 +133,9 @@ class Settings(BaseSettings):
     # Loopback by default — the orchestrator and ingest both live on the
     # home box. POST /features/{name}/v/{version}/backfill proxies to
     # ``{ingest_base_url}/compute/{name}/v/{version}``.
-    ingest_base_url: str = "http://127.0.0.1:8089"
+    # :8001 matches the deployed ingest server (Dockerfile EXPOSE 8001 /
+    # healthcheck); the old :8089 default pointed at nothing.
+    ingest_base_url: str = "http://127.0.0.1:8001"
     # 10-min ceiling covers a full-history per-bar feature compute over 5+
     # years on 1h bars (~38k rows). Most calls return in well under a
     # minute; the high default keeps the orchestrator from giving up while
@@ -165,6 +167,13 @@ class Settings(BaseSettings):
     # Max-plan claude CLI. Timeout is per-generation subprocess call.
     ai_narrative_enabled: bool = False
     ai_narrative_timeout_s: int = Field(240, ge=30, le=600)
+    ai_narrative_claude_bin: str = "claude"
+
+    # Trust the proxy-injected X-Viewer-Is-Admin header (api/deps.py).
+    # Only safe when a header-stripping proxy fronts :8082 — a direct
+    # caller holding the shared token can forge the header otherwise.
+    # Set ORCH_TRUST_VIEWER_ADMIN_HEADER=false on proxyless deployments.
+    trust_viewer_admin_header: bool = True
 
     # Specialist agent model pins (Path A, Max-plan-only — 2026-05-19).
     # No API client; specialists run as Claude Code Agent-tool sub-agents

@@ -51,7 +51,12 @@ log = get_logger(__name__)
 # ORCHESTRATOR_CHANGE journal entry citing rationale.
 PROTECTED_STRATEGY_CODES: tuple[str, ...] = ("LSR", "VCB", "VBO")
 PORTFOLIO_DISCOUNT_K: float = 0.5
-MIN_OVERLAP_DAYS_FOR_CORR: int = 5
+# Raised 5 → 20 (2026-06-12): Spearman on 5 paired exit-day returns has a
+# standard error ≈ 0.7 — far too noisy to bind a decision that can halve
+# the candidate's effective PF lower bound. Below the floor the corr
+# functions return None and the gate skips ("no correlation evidence"),
+# which was already the thin-overlap semantics.
+MIN_OVERLAP_DAYS_FOR_CORR: int = 20
 BASELINE_CACHE_TTL_S: int = 24 * 3600
 # Reject baseline backtest_run rows older than this. A year-old
 # experimental run with non-production params would otherwise become the
@@ -366,28 +371,36 @@ def apply_portfolio_gate(
     }
 
 
-# Module-level cache. Recreated on process restart; stale-but-recent
-# entries are explicitly tolerated up to BASELINE_CACHE_TTL_S because
-# the protected strategies' performance shifts on a multi-week timescale,
-# not per-tick. clear_baseline_cache() exists for tests.
-_BASELINE_CACHE: dict[str, dict[date, float]] | None = None
-_BASELINE_CACHE_T: float = 0.0
+# Module-level cache, keyed by the (symbol, interval) scope the baselines
+# were fetched for. Recreated on process restart; stale-but-recent entries
+# are explicitly tolerated up to BASELINE_CACHE_TTL_S because the protected
+# strategies' performance shifts on a multi-week timescale, not per-tick.
+# clear_baseline_cache() exists for tests.
+_BASELINE_CACHE: dict[
+    tuple[str | None, str | None], tuple[float, dict[str, dict[date, float]]]
+] = {}
 
 
 def clear_baseline_cache() -> None:
     """Invalidate the module-level cache. Intended for tests."""
-    global _BASELINE_CACHE, _BASELINE_CACHE_T
-    _BASELINE_CACHE = None
-    _BASELINE_CACHE_T = 0.0
+    _BASELINE_CACHE.clear()
 
 
 async def _fetch_one_baseline(
-    conn: asyncpg.Connection, strategy_code: str
+    conn: asyncpg.Connection,
+    strategy_code: str,
+    symbol: str | None = None,
+    interval_name: str | None = None,
 ) -> dict[date, float] | None:
     """Read the most recent COMPLETED backtest_run for a protected
     strategy WITHIN ``BASELINE_MAX_AGE_DAYS``, bin its trades to daily
     returns. None if no recent run exists — the gate will then skip
     cleanly rather than correlating against stale or experimental params.
+
+    ``symbol``/``interval_name`` scope the lookup to the candidate's data
+    surface (2026-06-12): unscoped, ANY fresh experimental run on any
+    symbol — e.g. a researcher's LSR-on-XRP-5m probe — silently became
+    the protected-book baseline for every subsequent gate evaluation.
     """
     row = await conn.fetchrow(
         """
@@ -396,11 +409,15 @@ async def _fetch_one_baseline(
          WHERE strategy_code = $1
            AND status = 'COMPLETED'
            AND created_time > NOW() - make_interval(days => $2)
+           AND ($3::text IS NULL OR asset = $3)
+           AND ($4::text IS NULL OR interval_name = $4)
          ORDER BY created_time DESC
          LIMIT 1
         """,
         strategy_code,
         BASELINE_MAX_AGE_DAYS,
+        symbol,
+        interval_name,
     )
     if row is None:
         return None
@@ -439,7 +456,11 @@ async def evaluate_portfolio_gate(
     except (TypeError, ValueError):
         initial_capital = 100.0
     candidate_returns = daily_returns_from_trades(trades, initial_capital)
-    baselines = await fetch_book_baselines(db)
+    baselines = await fetch_book_baselines(
+        db,
+        symbol=run_metrics.get("asset"),
+        interval_name=run_metrics.get("interval_name"),
+    )
     spearman_max_positive, spearman_per_code = max_positive_correlation(
         candidate_returns, baselines, method="spearman"
     )
@@ -459,28 +480,39 @@ async def fetch_book_baselines(
     db: Database,
     codes: tuple[str, ...] = PROTECTED_STRATEGY_CODES,
     now_fn: Any = None,
+    *,
+    symbol: str | None = None,
+    interval_name: str | None = None,
 ) -> dict[str, dict[date, float]]:
-    """Get the most-recent daily-return series for each protected code.
+    """Get the most-recent daily-return series for each protected code,
+    scoped to the candidate's (symbol, interval) surface when provided.
 
-    Cached in process for 24h. Codes for which no backtest_run exists are
-    silently omitted from the return — the gate will then have nothing
-    to correlate against and apply_portfolio_gate will skip cleanly.
+    Cached in process for 24h per scope. Codes for which no backtest_run
+    exists are silently omitted from the return — the gate will then have
+    nothing to correlate against and apply_portfolio_gate will skip cleanly.
     """
-    global _BASELINE_CACHE, _BASELINE_CACHE_T
     now = (now_fn or time.monotonic)()
-    if _BASELINE_CACHE is not None and (now - _BASELINE_CACHE_T) < BASELINE_CACHE_TTL_S:
-        return _BASELINE_CACHE
+    cache_key = (symbol, interval_name)
+    cached = _BASELINE_CACHE.get(cache_key)
+    if cached is not None and (now - cached[0]) < BASELINE_CACHE_TTL_S:
+        return cached[1]
     out: dict[str, dict[date, float]] = {}
     async with db.acquire() as conn:
         for code in codes:
             try:
-                series = await _fetch_one_baseline(conn, code)
+                series = await _fetch_one_baseline(
+                    conn, code, symbol=symbol, interval_name=interval_name
+                )
             except Exception as e:  # noqa: BLE001
                 log.warn("portfolio.baseline_fetch_failed", code=code, error=str(e))
                 continue
             if series is not None and len(series) >= MIN_OVERLAP_DAYS_FOR_CORR:
                 out[code] = series
-    _BASELINE_CACHE = out
-    _BASELINE_CACHE_T = now
-    log.info("portfolio.baselines_loaded", codes=list(out.keys()))
+    _BASELINE_CACHE[cache_key] = (now, out)
+    log.info(
+        "portfolio.baselines_loaded",
+        codes=list(out.keys()),
+        symbol=symbol,
+        interval=interval_name,
+    )
     return out

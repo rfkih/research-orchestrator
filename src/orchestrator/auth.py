@@ -51,7 +51,11 @@ def _synth_session_id(agent_name: str, *, now: datetime | None = None) -> uuid.U
 # Endpoints reachable without the shared-secret header. Health probes need
 # to work from the systemd readiness check; /agent/playbook is intentionally
 # discoverable so a fresh agent can read the contract before authenticating.
-_PUBLIC_PATHS = frozenset({"/healthz", "/readyz", "/ml/readyz", "/agent/playbook"})
+# /ml/readyz is NOT public (removed 2026-06-12): it forks a LightGBM-importing
+# Python interpreter per call (15s cap, single-worker service — trivial DoS
+# amplification) and returned absolute interpreter paths + raw import stderr
+# to unauthenticated callers. It is researcher-facing, not a systemd probe.
+_PUBLIC_PATHS = frozenset({"/healthz", "/readyz", "/agent/playbook"})
 
 # Agent name is allow-listed: snake_case alpha + dash, max 64. Prevents log
 # injection and stops typos from creating "fingerprint" rows under garbage

@@ -57,7 +57,7 @@ research-orchestrator/
 ### asyncpg + JSONB
 The codec at `src/orchestrator/infra/db.py:_init_connection` registers `encoder=_json_dumps, decoder=json.loads` for jsonb. **Pass dicts directly to `$N` params for JSONB columns** — do NOT call `json.dumps()` first (it double-encodes; you'll store `"{\"k\":1}"` instead of `{"k":1}`).
 
-Peer pattern: see `repo/queue_write.insert_queue` line 60 — `sweep_config` (a dict) is passed verbatim. The lone exception is the idempotency repo, which does `json.dumps(value, default=str)` AND uses an explicit `$3::jsonb` cast.
+Peer pattern: see `repo/queue_write.insert_queue` line 60 — `sweep_config` (a dict) is passed verbatim. There are NO exceptions: the idempotency repo's former `json.dumps` + `$3::jsonb` shape was exactly this double-encode bug (fixed 2026-06-12; rows written before then are JSON-string scalars, which `PostgresIdempotencyStore.get` still normalises on read).
 
 ### Idempotency
 Every state-changing POST honours `Idempotency-Key`. Pattern:
