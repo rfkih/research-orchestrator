@@ -265,3 +265,68 @@ async def list_compute_runs(
         *params,
     )
     return [dict(r) for r in rows]
+
+
+async def fetch_feature_series(
+    conn,
+    *,
+    name: str,
+    symbol: str,
+    interval: str,
+    start,
+    end,
+) -> tuple[list[tuple], dict]:
+    """Ascending ``[(ts, value), ...]`` for one feature_values series, for
+    the /signal-screen point-in-time alignment.
+
+    Series resolution: feature_values rows are keyed (feature_name, version,
+    symbol, interval, ts) where symbol/interval may be '' for symbol-less /
+    bar-less (macro) series. We pin version to the MAX present for the name
+    (latest definition), then try scopes from most to least specific:
+
+      1. (symbol, interval)  -- true per-bar series
+      2. (symbol, '')        -- per-symbol, not bar-aligned
+      3. ('', interval)      -- symbol-less but bar-aligned
+      4. ('', '')            -- macro / global series
+
+    First non-empty scope wins. The ts window is widened backwards by the
+    caller (start may be far before the bar window) so the point-in-time
+    "latest value with ts <= bar start" join has a value for the first bars.
+    NULL values are dropped. Returns (points, meta) where meta records the
+    scope + version that resolved, for the screen's audit trail.
+    """
+    version = await conn.fetchval(
+        "SELECT MAX(version) FROM feature_values WHERE feature_name = $1", name
+    )
+    if version is None:
+        return [], {"resolved": False}
+
+    scopes = [(symbol, interval), (symbol, ""), ("", interval), ("", "")]
+    seen: set[tuple[str, str]] = set()
+    for scope_symbol, scope_interval in scopes:
+        if (scope_symbol, scope_interval) in seen:
+            continue
+        seen.add((scope_symbol, scope_interval))
+        rows = await conn.fetch(
+            """
+            SELECT ts, value
+            FROM feature_values
+            WHERE feature_name = $1 AND version = $2
+              AND symbol = $3 AND interval = $4
+              AND ts >= $5 AND ts < $6
+              AND value IS NOT NULL
+            ORDER BY ts ASC
+            """,
+            name, version, scope_symbol, scope_interval, start, end,
+        )
+        if rows:
+            return (
+                [(r["ts"], float(r["value"])) for r in rows],
+                {
+                    "resolved": True,
+                    "version": int(version),
+                    "scope_symbol": scope_symbol,
+                    "scope_interval": scope_interval,
+                },
+            )
+    return [], {"resolved": False, "version": int(version)}
