@@ -95,6 +95,9 @@ All non-2xx responses use `OrchestratorError` → `{error_code, message, retryab
 ### Re-discovery gate (Tier 1, 2026-05-03)
 `POST /queue` rejects sweeps whose axis-set already produced a `decision_verdict='DISCARD'` audit row on the same strategy. Returns 409 `axis_previously_discarded` with `details.prior_iteration_id`. Bypass via `override_discard_gate: true` only with a documented journal entry. Prevents the autonomous loop from p-hacking by re-running the same dimensions under a fresh hypothesis line.
 
+### IC screen — `POST /signal-screen` (WS-C, 2026-06-12)
+Minutes-cost, read-only feature-level triage: Spearman IC + Newey-West t-stat + quantile-spread over `feature_values`/`market_data`, journaled as a `SIGNAL_SCREEN` row for multiplicity awareness. Playbook §1.9 makes it REQUIRED before pre-registering a HYPOTHESIS on any not-yet-traded signal family (DEAD on all horizons → pivot without spending DSR multiplicity). Advisory only — it never alters the frozen V11/V60 gates. Completes the cost ladder: IC screen (minutes) → null-screen (~1h) → sweep (hours) → walk-forward.
+
 ## Test discipline
 
 ```bash
