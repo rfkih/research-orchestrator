@@ -276,7 +276,12 @@ async def playbook() -> Playbook:
                 path="/leaderboard",
                 purpose=(
                     "Iteration ranking. sort=pf|return_pct|sharpe|trade_count|created. "
-                    "Pass significant_only=true to filter to SIGNIFICANT_EDGE."
+                    "Defaults: sort=pf, min_trades=20 (degenerate n=1-2 rows are "
+                    "hidden; pass min_trades=0 to see them). The pf sort nulls out "
+                    "the 9999 no-loss sentinel so a 1-trade PF=9999 cannot outrank "
+                    "a real strategy. min_trades is a DISPLAY floor, NOT the V11 "
+                    "n>=100 gate. Pass significant_only=true to filter to "
+                    "SIGNIFICANT_EDGE."
                 ),
                 idempotent=True,
             ),

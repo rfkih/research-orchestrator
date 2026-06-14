@@ -22,8 +22,22 @@ from ..errors import OrchestratorError
 # wildly off a single near-perfect cell.
 _TPE_PF_CAP = 10.0
 
+# PF infinity sentinel stamped by services/analyze.py for no-loss runs
+# (gross loss == 0). Mirrors analyze.PF_INFINITY_SENTINEL. A degenerate
+# 1-trade winner gets PF=9999 and, under a naive DESC sort, floats to the
+# top of the board ahead of every real strategy. The ``pf`` sort below
+# treats the sentinel as NULL so an unreliable "infinite" PF ranks LAST,
+# never above a genuine finite PF. (Display-only — does NOT touch the V11
+# PF 95% CI gate, which already ignores the sentinel via its own path.)
+_PF_INFINITY_SENTINEL = "9999"
+
 _LEADERBOARD_SORTS = {
-    "pf": "(metrics_snapshot->>'profit_factor')::numeric",
+    # NULLIF drops the no-loss sentinel out of the ranking so a lucky
+    # 1-trade PF=9999 cannot outrank a real strategy's finite PF.
+    "pf": (
+        f"NULLIF((metrics_snapshot->>'profit_factor')::numeric, "
+        f"{_PF_INFINITY_SENTINEL})"
+    ),
     "return_pct": "(metrics_snapshot->>'return_pct')::numeric",
     "sharpe": "(metrics_snapshot->>'sharpe_ratio')::numeric",
     # metrics_snapshot = {**run_metrics, "analysis": analysis} (tick.py). The
@@ -191,6 +205,7 @@ async def leaderboard(
     strategy_code: str | None,
     verdict: str | None,
     significant_only: bool,
+    min_trades: int,
     sort: str,
     limit: int,
 ) -> list[dict[str, Any]]:
@@ -212,6 +227,15 @@ async def leaderboard(
         where.append(f"verdict = ${len(args)}")
     if significant_only:
         where.append("statistical_verdict = 'SIGNIFICANT_EDGE'")
+    if min_trades > 0:
+        # Minimum-sample floor so degenerate n=1-2 runs (whose PF is a
+        # no-loss 9999 sentinel or a single-lucky-trade artifact) do not
+        # surface on the board. Display sanity floor only — NOT the V11
+        # n>=100 significance gate, which is enforced separately at verdict
+        # time. NULL total_trades (very old rows) is excluded by the
+        # numeric comparison; that is the safe default for a quality board.
+        args.append(min_trades)
+        where.append(f"(metrics_snapshot->>'total_trades')::int >= ${len(args)}")
     args.append(limit)
     sql = f"""
         SELECT strategy_code,

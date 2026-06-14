@@ -84,6 +84,18 @@ async def leaderboard(
     significant_only: bool = Query(
         False, description="If true, filter to statistical_verdict=SIGNIFICANT_EDGE."
     ),
+    min_trades: int = Query(
+        20,
+        ge=0,
+        le=100000,
+        description=(
+            "Minimum total_trades for a row to appear. Default 20 keeps "
+            "degenerate n=1-2 runs (whose PF is a no-loss 9999 sentinel or a "
+            "single-lucky-trade artifact) off the board. Pass min_trades=0 to "
+            "see every row including thin ones. This is a DISPLAY floor, not "
+            "the V11 n>=100 significance gate."
+        ),
+    ),
     sort: str = Query("pf", description="pf|return_pct|sharpe|trade_count|created"),
     limit: int = Query(25, ge=1, le=200),
     conn: asyncpg.Connection = Depends(get_db_conn),
@@ -93,6 +105,7 @@ async def leaderboard(
         strategy_code=strategy_code,
         verdict=verdict,
         significant_only=significant_only,
+        min_trades=min_trades,
         sort=sort,
         limit=limit,
     )
