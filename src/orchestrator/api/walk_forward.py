@@ -94,6 +94,16 @@ class WalkForwardRequest(BaseModel):
     # evidence. Set true ONLY for instruments whose history genuinely predates
     # every known bear, with a documented journal entry.
     override_bear_coverage: bool = False
+    # DSR selection-bias honesty (2026-06-14 re-audit HOLE-1). Trials run
+    # OUTSIDE the orchestrator for this (instrument, interval_name) family —
+    # offline sweeps, hand-tuning, direct JVM backtests — that hypothesis_audit
+    # cannot see. Added into the low-frequency walk-forward DSR ``n_trials`` so
+    # the equity-curve significance bar reflects the TRUE multiplicity. Default
+    # 0. Monotone: can only raise n_trials → the gate only TIGHTENS (V11-safe).
+    # Set this ONLY for off-orchestrator trials NOT already declared on the
+    # sweep that produced this candidate — re-declaring the same trials here
+    # double-counts the family's multiplicity and may reject a real edge.
+    external_trials: int = Field(0, ge=0, le=2000)
 
 
 class WalkForwardResponse(BaseModel):
@@ -298,6 +308,7 @@ async def post_walk_forward(
             overrides=body.overrides,
             motivating_iteration_id=body.motivating_iteration_id,
             require_bear_coverage=not body.override_bear_coverage,
+            external_trials=body.external_trials,
         )
     except Exception as _wf_exc:
         async with db.acquire() as conn:

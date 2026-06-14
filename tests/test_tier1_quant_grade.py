@@ -31,8 +31,10 @@ from orchestrator.repo.hypothesis_audit import (
 from orchestrator.services.analyze import (
     ANNUALIZED_RETURN_PASS_THRESHOLD_PCT,
     DAYS_PER_YEAR,
+    DENOM_SQ_BOOTSTRAP_FLOOR,
     DSR_SIGNIFICANCE_THRESHOLD,
     RISK_FREE_RATE_ANNUAL_PCT,
+    _bootstrap_dsr,
     _norm_cdf,
     _norm_inv,
     _total_deployed_days,
@@ -246,6 +248,106 @@ def test_bootstrap_dsr_invariant_to_pnls_scale() -> None:
     assert dsr_a is not None and dsr_b is not None
     # Bootstrap is random but seeded — same seed + scaled pnls → same DSR.
     assert abs(dsr_a - dsr_b) < 1e-6
+
+
+# ── 2026-06-14 re-audit fixes (HOLE-1/2/3) ────────────────────────────
+
+
+def test_denom_sq_bootstrap_floor_is_pinned() -> None:
+    # Operator-controlled constant: the closed-form trust floor below which
+    # DSR routes to the bootstrap instead of risking Φ(z)→1.0 saturation.
+    assert DENOM_SQ_BOOTSTRAP_FLOOR == 0.05
+
+
+def test_near_degenerate_denom_no_longer_spuriously_certifies() -> None:
+    """HOLE-3: a near-degenerate-but-positive denom_sq must NOT certify at
+    1.0 off the closed form. sr=0.5, skew=2.19, kurt=0.0 gives
+    denom_sq = 1 - 2.19·0.5 + ((0+2)/4)·0.5² = 0.03 ∈ (0, FLOOR) — the
+    closed form would saturate Φ(z)→1.0 even at n_trials=5000. With no PnL
+    series to bootstrap, the gate must now fail closed (None), not certify.
+    This is also the annualised-Sharpe-leak guard (an annualised SR fed where
+    a per-obs one is expected lands in exactly this denom band)."""
+    denom_sq = 1 - 2.19 * 0.5 + ((0.0 + 2) / 4) * (0.5**2)
+    assert 0.0 < denom_sq < DENOM_SQ_BOOTSTRAP_FLOOR  # 0.03 — the saturation band
+    out = deflated_sharpe_ratio(
+        sr=0.5, n_obs=300, skew=2.19, kurt=0.0, n_trials=5000
+    )
+    assert out is None, (
+        "Near-degenerate denom_sq with no PnL series must fail closed; a "
+        "non-None here means the closed form is still saturating to ~1.0."
+    )
+
+
+def test_bootstrap_dsr_resamples_at_n_obs_not_raw_length() -> None:
+    """HOLE-2: the bootstrap SE must scale with the n_obs the caller passes
+    (= int(n_eff) on the autocorrelation-adjusted low-frequency path), NOT
+    the raw PnL length. With sr_observed and sr_star held fixed, a smaller
+    n_obs ⇒ wider resample SE ⇒ strictly lower DSR. If the bootstrap ignored
+    n_obs and resampled len(pnls) for both calls, the two DSRs would be
+    identical and this fails."""
+    import random
+
+    rng = random.Random(3)
+    pnls = [-rng.uniform(0.4, 0.8) for _ in range(180)] + [
+        rng.uniform(1.0, 3.0) for _ in range(120)
+    ]
+    d_small = _bootstrap_dsr(
+        pnls, sr_observed=0.15, sr_star=0.10, n_obs=40, B=400, seed=5
+    )
+    d_large = _bootstrap_dsr(
+        pnls, sr_observed=0.15, sr_star=0.10, n_obs=300, B=400, seed=5
+    )
+    assert d_small is not None and d_large is not None
+    assert d_small < d_large, (
+        f"n_obs=40 DSR ({d_small}) must be < n_obs=300 DSR ({d_large}); equal "
+        f"means the bootstrap is resampling raw len(pnls), ignoring n_eff."
+    )
+
+
+def test_external_trials_deflate_marginal_candidate_below_bar() -> None:
+    """HOLE-1: declared off-orchestrator trials must be able to flip a
+    marginal candidate from PASS to FAIL via the multiplicity penalty. A
+    per-observation Sharpe that certifies at n_trials=1 must NOT certify once
+    the ~15 offline exploration trials are honestly counted."""
+    base = deflated_sharpe_ratio(sr=0.30, n_obs=140, skew=0.5, kurt=3.0, n_trials=1)
+    deflated = deflated_sharpe_ratio(
+        sr=0.30, n_obs=140, skew=0.5, kurt=3.0, n_trials=15
+    )
+    assert base is not None and deflated is not None
+    assert base >= DSR_SIGNIFICANCE_THRESHOLD  # certifies when multiplicity hidden
+    assert deflated < DSR_SIGNIFICANCE_THRESHOLD  # fails once it's honest
+    assert deflated < base  # monotone decreasing in n_trials
+
+
+def test_dsr_monotone_non_increasing_in_n_trials() -> None:
+    """Load-bearing invariant behind 'external_trials can only TIGHTEN': DSR
+    must be monotone non-increasing as n_trials rises (more multiplicity →
+    higher SR* → lower-or-equal DSR). If this ever inverts, declaring offline
+    trials could LOOSEN the gate — the exact failure HOLE-1's fix must avoid."""
+    prev = 1.0 + 1e-9
+    for nt in (1, 2, 5, 15, 50, 200, 1000, 2000):
+        dsr = deflated_sharpe_ratio(sr=0.30, n_obs=140, skew=0.5, kurt=3.0, n_trials=nt)
+        assert dsr is not None
+        assert dsr <= prev + 1e-12, f"DSR rose at n_trials={nt}: {dsr} > {prev}"
+        prev = dsr
+
+
+def test_psr_near_degenerate_denom_no_longer_saturates() -> None:
+    """HOLE-3 twin (binds House Book pool admission, services/pool.py): PSR
+    must NOT certify at ~1.0 off the closed form in the near-degenerate denom
+    band. Same moments as the DSR guard (denom_sq=0.03 ∈ (0, FLOOR)); with no
+    PnL series PSR fails closed (None) instead of saturating; with one it
+    routes to the bootstrap and returns an honest value."""
+    out = probabilistic_sharpe_ratio(0.5, 300, 2.19, 0.0)
+    assert out is None, "near-degenerate PSR with no PnL series must fail closed"
+    import random
+
+    rng = random.Random(19)
+    pnls = [-rng.uniform(0.5, 1.0) for _ in range(240)] + [
+        rng.uniform(2.0, 8.0) for _ in range(80)
+    ]
+    out_boot = probabilistic_sharpe_ratio(0.5, 300, 2.19, 0.0, pnls=pnls)
+    assert out_boot is not None and 0.0 <= out_boot <= 1.0
 
 
 # ── Statistical verdict — DSR gate ────────────────────────────────────
@@ -468,10 +570,36 @@ def test_insert_audit_requires_symbol_and_interval_name() -> None:
 def test_count_data_universe_trials_signature() -> None:
     # The replacement for count_cumulative_trials. Pin the args so a
     # rename in S3 (when tick.py swaps the caller) doesn't silently
-    # break.
+    # break. ``external_declared`` (2026-06-14 HOLE-1) is keyword-optional,
+    # default 0, so existing positional callers are unaffected.
     sig = inspect.signature(count_data_universe_trials)
     params = sig.parameters
-    assert list(params.keys()) == ["conn", "symbol", "interval_name"]
+    assert list(params.keys()) == [
+        "conn",
+        "symbol",
+        "interval_name",
+        "external_declared",
+    ]
+    assert params["external_declared"].default == 0
+
+
+def test_count_data_universe_trials_adds_external_declared() -> None:
+    # HOLE-1 close: declared off-orchestrator trials ADD into the DB count;
+    # negatives are clamped (can only RAISE multiplicity → gate only tightens).
+    import asyncio
+
+    class _StubConn:
+        async def fetchval(self, *_a: object, **_k: object) -> int:
+            return 7  # pretend 7 audited trials on this (symbol, interval)
+
+    async def _run(ext: int) -> int:
+        return await count_data_universe_trials(
+            _StubConn(), "XRPUSDT", "1h", external_declared=ext
+        )
+
+    assert asyncio.run(_run(0)) == 7
+    assert asyncio.run(_run(15)) == 22  # 7 audited + 15 declared offline
+    assert asyncio.run(_run(-5)) == 7  # clamp: declared can't lower the count
 
 
 # ── _total_deployed_days ───────────────────────────────────────────────

@@ -434,6 +434,7 @@ async def run_walk_forward(
     overrides: dict[str, Any] | None = None,
     motivating_iteration_id: UUID | None = None,
     require_bear_coverage: bool = True,
+    external_trials: int = 0,
 ) -> WalkForwardResult:
     if full_end is None:
         full_end = (datetime.now(timezone.utc) - timedelta(days=1)).date()
@@ -634,7 +635,8 @@ async def run_walk_forward(
                         await wf_repo.fetch_fold_daily_returns(conn, run_id)
                     )
             n_trials = await audit_repo.count_data_universe_trials(
-                conn, instrument, interval_name
+                conn, instrument, interval_name,
+                external_declared=external_trials,
             )
         verdict, lf_metrics = low_freq_stability_verdict(
             oos_daily_returns=oos_daily_returns,

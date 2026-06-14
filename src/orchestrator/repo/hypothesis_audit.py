@@ -190,12 +190,24 @@ async def update_audit_verdict(
 
 
 async def count_data_universe_trials(
-    conn: asyncpg.Connection, symbol: str, interval_name: str
+    conn: asyncpg.Connection,
+    symbol: str,
+    interval_name: str,
+    external_declared: int = 0,
 ) -> int:
     """COMPLETED trials on this data universe. Scopes DSR ``n_trials`` by
     (symbol, interval_name) — the set of bars the autonomous loop has
     actually inspected — rather than by strategy_code (which resets on
     every archetype pivot, leaking selection bias).
+
+    ``external_declared`` (2026-06-14 re-audit HOLE-1): off-orchestrator
+    trials the audit ledger CANNOT see — offline Python sweeps, hand-tuning,
+    direct JVM backtests — declared by the caller at enqueue / walk-forward
+    submission and ADDED into the count. The DB count is a structural lower
+    bound on multiplicity; declaring the off-ledger trials raises SR* and
+    deflates DSR, closing the one fail-open hole (undercounted n_trials →
+    DSR biased UP → gate too lenient). Clamped ≥ 0 — it can only ever raise
+    the trial count, never lower it, so the gate can only TIGHTEN (V11-safe).
 
     Pre-V93 audit rows whose data-universe identity is NULL are excluded
     implicitly: the equality comparison ``symbol = $1`` returns NULL (not
@@ -230,7 +242,11 @@ async def count_data_universe_trials(
         symbol,
         interval_name,
     )
-    return int(val or 0)
+    try:
+        extra = max(0, int(external_declared or 0))
+    except (TypeError, ValueError, OverflowError):
+        extra = 0
+    return int(val or 0) + extra
 
 
 async def count_axis_trials(
