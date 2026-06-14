@@ -59,6 +59,18 @@ DAYS_PER_YEAR = 365
 # tracked follow-up, deliberately out of scope of this change.
 RISK_FREE_RATE_ANNUAL_PCT = 0.0
 
+# DSR closed-form trust floor (2026-06-14 re-audit, HOLE-3). The Bailey-LdP
+# Gaussian-asymptotic SE has variance factor ``denom_sq``. As skew·SR → the
+# moment boundary, denom_sq → tiny-positive, z = (SR-SR*)·√((n-1)/denom_sq)
+# explodes, and Φ(z) SATURATES to 1.0 — a spurious certification on heavy-skew
+# (capitulation-style) payoffs, AND the failure mode if an *annualised* Sharpe
+# ever leaks in where a per-observation one is expected. The closed form is
+# only trusted when denom_sq ≥ this floor; in the near-degenerate band
+# (0 < denom_sq < floor) we route to the non-parametric bootstrap, which
+# estimates SE empirically and does NOT saturate. This only ever TIGHTENS the
+# gate (a spurious 1.0 becomes an honest <1.0) — never loosens V11.
+DENOM_SQ_BOOTSTRAP_FLOOR = 0.05
+
 
 def _f(v: Any) -> float | None:
     if v is None:
@@ -236,6 +248,7 @@ def probabilistic_sharpe_ratio(
     skew: float,
     kurt: float,
     n_strategies_tested: int = 5,
+    pnls: list[float] | None = None,
 ) -> float | None:
     """Deflated Sharpe (Bailey & Lopez de Prado 2014).
 
@@ -246,6 +259,16 @@ def probabilistic_sharpe_ratio(
     hardcoded V11 contract. Production callers should use
     ``deflated_sharpe_ratio`` and pass the actual cumulative trial
     count from ``hypothesis_audit`` — see analyze_run().
+
+    Saturation guard (2026-06-14 re-audit, HOLE-3's twin): like
+    ``deflated_sharpe_ratio`` the closed form is trusted only when
+    ``denom_sq >= DENOM_SQ_BOOTSTRAP_FLOOR``. In the near-degenerate band the
+    Gaussian SE collapses and Φ(z) saturates to a spurious 1.0. With a
+    ``pnls`` series we route to the same Bailey-LdP bootstrap; without one we
+    fail closed (None). This matters because PSR BINDS House Book pool
+    admission (``services/pool.py``) on heavy-positive-skew streams — exactly
+    the capitulation/carry payoff shape that hits the saturation band.
+    STRICTER only — never loosens.
     """
     if sr is None or n_obs < 30:
         return None
@@ -257,10 +280,16 @@ def probabilistic_sharpe_ratio(
     # so the correct coefficient is ((κ + 2)/4), NOT (κ - 1)/4. (Fixed
     # 2026-06-09 — the prior (κ-1)/4 understated SE and inflated PSR/DSR.)
     denom_sq = 1 - skew * sr + ((kurt + 2) / 4) * (sr**2)
-    if denom_sq <= 0:
+    if denom_sq >= DENOM_SQ_BOOTSTRAP_FLOOR:
+        z = (sr - sr_star) * math.sqrt((n_obs - 1) / denom_sq)
+        return _norm_cdf(z)
+    # Near-degenerate / degenerate closed form (saturates). Route to the
+    # bootstrap if we have the PnL series, else fail closed.
+    if pnls is None or len(pnls) < 30:
         return None
-    z = (sr - sr_star) * math.sqrt((n_obs - 1) / denom_sq)
-    return _norm_cdf(z)
+    return _bootstrap_dsr(
+        pnls=pnls, sr_observed=sr, sr_star=sr_star, n_obs=n_obs
+    )
 
 
 def deflated_sharpe_ratio(
@@ -303,7 +332,10 @@ def deflated_sharpe_ratio(
     (skew·SR > 1 + ((kurt-1)/4)·SR^2), in which case the closed-form is
     undefined.
 
-    Bootstrap fallback (this commit, 2026-05-21): when ``denom_sq <= 0``
+    Bootstrap fallback (2026-05-21; trigger widened 2026-06-14): when
+    ``denom_sq < DENOM_SQ_BOOTSTRAP_FLOOR`` (which includes the classic
+    ``denom_sq <= 0`` degenerate case AND the near-degenerate band
+    0 < denom_sq < floor where Φ(z) would saturate to a spurious 1.0)
     AND a ``pnls`` series is supplied, fall back to the non-parametric
     bootstrap DSR procedure recommended in Bailey & López de Prado
     (2014) §5 *Empirical Estimation of the Sampling Distribution of the
@@ -313,8 +345,8 @@ def deflated_sharpe_ratio(
     as SE, and recompute z = (SR - SR*) / SE → DSR = Phi(z). This is
     methodology-faithful — the V11 DSR threshold is unchanged; only
     the *computation* extends to cover the case the closed-form cannot.
-    If ``pnls`` is None on a denom_sq<=0 path the function still
-    returns None so the gate correctly fails-closed.
+    If ``pnls`` is None below the floor the function still returns None
+    so the gate correctly fails-closed.
 
     Reference: Bailey, López de Prado (2014), *The Deflated Sharpe
     Ratio: Correcting for Selection Bias, Backtest Overfitting, and
@@ -343,11 +375,16 @@ def deflated_sharpe_ratio(
     # See probabilistic_sharpe_ratio: ``kurt`` is EXCESS kurtosis, so the
     # Bailey-LdP ((γ4-1)/4) term is ((kurt + 2)/4), not (kurt - 1)/4.
     denom_sq = 1 - skew * sr + ((kurt + 2) / 4) * (sr**2)
-    if denom_sq > 0:
+    # Trust the closed form only when denom_sq is comfortably positive. In the
+    # near-degenerate band 0 < denom_sq < DENOM_SQ_BOOTSTRAP_FLOOR the SE
+    # collapses and Φ(z) saturates to 1.0 spuriously (2026-06-14 re-audit
+    # HOLE-3 / annualised-Sharpe-leak guard). Route those — and the classic
+    # denom_sq <= 0 degenerate case — through the bootstrap. STRICTER only.
+    if denom_sq >= DENOM_SQ_BOOTSTRAP_FLOOR:
         z = (sr - sr_star) * math.sqrt((n_obs - 1) / denom_sq)
         return _norm_cdf(z)
-    # Closed-form degenerate (non-Gaussian shape). Try the Bailey-LdP
-    # bootstrap fallback if we have the underlying PnL series.
+    # Closed-form unreliable (degenerate or near-degenerate non-Gaussian
+    # shape). Try the Bailey-LdP bootstrap fallback if we have the PnL series.
     if pnls is None or len(pnls) < 30:
         return None
     return _bootstrap_dsr(
@@ -401,10 +438,18 @@ def _bootstrap_dsr(
         return None
 
     rng = random.Random(seed)
-    n = len(pnls)
+    # Resample at the EFFECTIVE observation count the closed form and SR* use
+    # (n_obs = int(n_eff) on the autocorrelation-adjusted low-frequency path),
+    # NOT the raw series length (2026-06-14 re-audit HOLE-2). The per-resample
+    # Sharpe's sampling variance scales ~1/√(resample length); drawing raw-n
+    # samples would understate the SE on serially dependent daily returns and
+    # silently drop the Lo-2002 n_eff discount the rest of the DSR path applies.
+    # Draw from the full empirical pnl pool so each resample is n_obs i.i.d.
+    # observations of the return distribution. Clamp ≥ 2 (Sharpe needs variance).
+    n_resample = max(2, int(n_obs))
     sr_samples: list[float] = []
     for _ in range(B):
-        sample = [rng.choice(pnls) for _ in range(n)]
+        sample = [rng.choice(pnls) for _ in range(n_resample)]
         sr_b = sharpe_ratio(sample, ann_factor=None)
         if sr_b is not None and math.isfinite(sr_b):
             sr_samples.append(sr_b)
@@ -645,7 +690,7 @@ def analyze_run(
     sortino = sortino_ratio(pnls, ann_factor)
     sk = skewness(pnls)
     kt = excess_kurtosis(pnls)
-    psr = probabilistic_sharpe_ratio(sr_per_obs, n, sk, kt, n_strategies_tested)
+    psr = probabilistic_sharpe_ratio(sr_per_obs, n, sk, kt, n_strategies_tested, pnls=pnls)
 
     # DSR with real cumulative trial count from hypothesis_audit. Falls
     # back to n_strategies_tested so test fixtures and legacy callers

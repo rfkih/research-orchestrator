@@ -69,6 +69,28 @@ _POLL_INTERVAL_S = 5
 _STUCK_RUNNING_BUFFER_S = 5 * 60
 
 
+def _external_declared_trials(sweep_config: dict[str, Any] | None) -> int:
+    """Off-orchestrator trial count declared at enqueue (sweep_config
+    ['external_trials']). Added into the DSR data-universe ``n_trials`` so
+    hand-tuning / offline Python sweeps / direct JVM backtests the audit
+    ledger can't see still deflate the Sharpe (2026-06-14 re-audit HOLE-1).
+    Clamped ≥ 0 — can only raise multiplicity, so the gate only TIGHTENS.
+
+    Coerce via float() so a JSONB-edited string like '15.7' truncates to 15
+    (toward the gate-tightening direction) rather than being silently dropped
+    to 0 (which would LOOSEN). sweep_config is operator-editable JSONB, so this
+    is the last line of defense behind the API's int Field; genuinely
+    uncoercible / non-finite junk drops to 0 with a warning."""
+    raw = (sweep_config or {}).get("external_trials")
+    if raw is None:
+        return 0
+    try:
+        return max(0, int(float(raw)))
+    except (TypeError, ValueError, OverflowError):
+        log.warning("tick.external_trials_uncoercible", value=repr(raw))
+        return 0
+
+
 def _terminal(err: OrchestratorError) -> OrchestratorError:
     """Tag an OrchestratorError so the outer rollback skips it.
 
@@ -526,7 +548,8 @@ async def _execute_after_claim(
         backtest_run_id = str(active_run_id)
         async with db.acquire() as conn:
             cumulative_trials = await audit_repo.count_data_universe_trials(
-                conn, instrument, interval_name
+                conn, instrument, interval_name,
+                external_declared=_external_declared_trials(sweep_config),
             ) + 1
     else:
         combo, audit_id, cumulative_trials, backtest_run_id = (
@@ -701,7 +724,8 @@ async def _derive_and_submit(
             # under-counts multiplicity because it resets on every
             # archetype pivot (V93). ``instrument`` is the symbol here.
             cumulative_trials = await audit_repo.count_data_universe_trials(
-                conn, instrument, interval_name
+                conn, instrument, interval_name,
+                external_declared=_external_declared_trials(sweep_config),
             ) + 1
 
     # ── Step 4: submit backtest, poll for completion ──────────────────

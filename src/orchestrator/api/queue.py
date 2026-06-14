@@ -147,6 +147,20 @@ class EnqueueRequest(BaseModel):
     # sweep_config['track'] so the claim query + re-discovery gate can filter
     # per-track — a hedging discard won't block a trading axis-set.
     track: Literal["trading", "hedging"] | None = None
+    # DSR selection-bias honesty (2026-06-14 re-audit HOLE-1). Declare trials
+    # run OUTSIDE the orchestrator for this (instrument, interval_name) family —
+    # offline Python sweeps, hand-tuning, direct JVM backtests — that the
+    # hypothesis_audit ledger cannot see. Added into the DSR ``n_trials`` so the
+    # Bonferroni SR* reflects the TRUE multiplicity. Default 0 = "all exploration
+    # was on-orchestrator". Monotone: it can only raise n_trials → the >=0.95 DSR
+    # gate can only get STRICTER, never looser (V11-safe). Stamped into
+    # sweep_config['external_trials']; tick.run_tick reads it back at DSR time.
+    # Per-submission and additive-only — NOT persisted as audit rows, so a
+    # mistaken value affects only this run (reversible). Declare the offline
+    # trials ONCE, at the stage they actually biased selection; don't also
+    # re-declare them on the downstream walk-forward of the same family or the
+    # multiplicity is double-counted (over-tightening, may reject a real edge).
+    external_trials: int = Field(0, ge=0, le=2000)
 
 
 class CancelRequest(BaseModel):
@@ -297,6 +311,11 @@ async def enqueue(
     # tick.run_tick reads it back and forwards it to the JVM payload.
     if body.universe:
         sweep_dict["universe"] = body.universe
+    # Carry declared off-orchestrator trials on sweep_config (JSONB) so they
+    # survive the queue round-trip without a research_queue schema change;
+    # tick.run_tick reads it back and adds it into the DSR n_trials (HOLE-1).
+    if body.external_trials:
+        sweep_dict["external_trials"] = body.external_trials
     effective_iter_budget, iter_budget_note = resolve_iter_budget(
         body.sweep_config, body.iter_budget
     )

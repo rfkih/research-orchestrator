@@ -318,7 +318,13 @@ async def playbook() -> Playbook:
                     "override_discard_gate=true with a documented "
                     "justification to bypass. "
                     "Pass track ('trading'|'hedging') to scope this to one "
-                    "research loop; omit for the legacy global queue."
+                    "research loop; omit for the legacy global queue. "
+                    "Pass external_trials=N to declare offline/off-orchestrator "
+                    "exploration on this (instrument, interval) the audit ledger "
+                    "can't see (hand-tuning, direct JVM backtests) — it is added "
+                    "into the DSR n_trials so multiplicity is honest. Declare "
+                    "once, at the stage selection happened; it only tightens the "
+                    "gate."
                 ),
                 idempotent=False,
             ),

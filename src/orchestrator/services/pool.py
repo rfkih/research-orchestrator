@@ -413,7 +413,10 @@ def stream_sharpe_validity(
         return {"valid": False, "reason": "zero_variance", "n_obs": n}
     sr = mean / sd  # per-day Sharpe (PSR consumes the per-observation Sharpe)
     skew, kurt = _skew_kurt(vals)
-    psr = probabilistic_sharpe_ratio(sr, n, skew, kurt)
+    # pnls=vals routes the near-degenerate (heavy-skew) band through the
+    # bootstrap instead of letting the closed form saturate to a spurious
+    # PSR=1.0 that would wrongly admit a stream (2026-06-14 re-audit HOLE-3).
+    psr = probabilistic_sharpe_ratio(sr, n, skew, kurt, pnls=vals)
 
     # Stationarity over CALENDAR YEARS — but only judge years with enough data.
     # Thin boundary years (a 1-week first year, a 2-month last year) are statistically
