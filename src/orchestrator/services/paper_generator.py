@@ -27,7 +27,7 @@ from . import paper_narrator
 
 # Gate constants (mirror V11 / V60 — must not drift from analyze.py)
 _MIN_TRADES = 100
-_MIN_DSR = 0.95
+_MIN_DSR = 0.90  # 0.90 — operator methodology decision 2026-06-15 (was 0.95); mirrors analyze.DSR_SIGNIFICANCE_THRESHOLD
 _MIN_CAGR = 10.0
 
 _CITATIONS: list[dict[str, str]] = [
@@ -361,7 +361,7 @@ def _build_prose_sections(
         f"Statistical validation employed a five-gate pre-registered framework: "
         f"(1) minimum 100 completed trades, "
         f"(2) Profit Factor 95% confidence interval lower bound exceeding 1.0, "
-        f"(3) Deflated Sharpe Ratio (DSR) >= 0.95 (Bailey and Lopez de Prado, 2014), "
+        f"(3) Deflated Sharpe Ratio (DSR) >= 0.90 (Bailey and Lopez de Prado, 2014), "
         f"(4) statistical significance assessed as Significant Edge, and "
         f"(5) CAGR >= 10% at 90% Kelly allocation. "
         f"All thresholds were pre-registered before the experiment to mitigate selection bias "

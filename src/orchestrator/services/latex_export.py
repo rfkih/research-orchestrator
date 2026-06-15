@@ -245,7 +245,7 @@ Each parameter configuration is evaluated against the following gates:
   \item \textbf{{Minimum trade count:}} $n \geq 100$ closed trades.
   \item \textbf{{Profit Factor 95\% CI:}} Bootstrap lower bound $> 1.0$
         ($B = 2{{,}}000$ resamples) \cite{{bailey2014deflated}}.
-  \item \textbf{{Deflated Sharpe Ratio:}} $\mathrm{{DSR}} \geq 0.95$, deflated
+  \item \textbf{{Deflated Sharpe Ratio:}} $\mathrm{{DSR}} \geq 0.90$, deflated
         by the cumulative number of trials via the HLZ correction
         \cite{{harvey2016cross}}.
   \item \textbf{{Economic gate:}} Annualised geometric return $\geq 10\%$ at
@@ -505,7 +505,7 @@ def _section_conclusion(
          gate.get("n_trades_ok"), gate.get("n_trades_value")),
         ("Profit Factor 95\\% CI lower $> 1.0$",
          gate.get("pf_ci_ok"), gate.get("pf_ci_low")),
-        (f"DSR $\\geq {gate.get('dsr_threshold', 0.95)}$",
+        (f"DSR $\\geq {gate.get('dsr_threshold', 0.90)}$",
          gate.get("dsr_ok"), gate.get("dsr_value")),
         ("Statistical verdict: Significant Edge",
          gate.get("stat_verdict_ok"), gate.get("stat_verdict")),

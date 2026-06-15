@@ -305,15 +305,7 @@ _LOAD_BEARING_CONSTANTS = (
     "8.5",                                          # wall-clock cap (hours)
     "10%",                                          # profitability bar prose
     "PF lower 95% CI > 1.0",                        # V11 PF gate
-    # NOTE 2026-06-15: the DSR gate was lowered 0.95 → 0.90 platform-wide
-    # (operator methodology decision). The agent prompt
-    # (../.claude/agents/quant-researcher.md) still cites "DSR ≥ 0.95" and
-    # lives OUTSIDE this repo, so it could not be updated in this change.
-    # This pin stays at "DSR ≥ 0.95" to match the prompt the test actually
-    # reads — flipping it to 0.90 here while the prompt says 0.95 would make
-    # this drift-guard fail. Update BOTH together once the external prompt
-    # is bumped to "DSR ≥ 0.90".
-    "DSR ≥ 0.95",                                   # V11 DSR threshold (prompt-side; see NOTE above)
+    "DSR ≥ 0.90",                                   # V11 DSR threshold (lowered 0.95→0.90, operator methodology decision 2026-06-15; prompt updated to match)
     "research-mode",                                # never auto-promote
     "/specialist-review/request",                   # Path C trigger endpoint
     "PATH_C_RESUMING_",                             # crash-safety marker
