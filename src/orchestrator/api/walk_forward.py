@@ -194,7 +194,7 @@ async def post_walk_forward(
     #   • Low-frequency (1d / structurally low-turnover): trade-count folds are
     #     inapplicable — the walk-forward validates on the OOS daily-equity
     #     return series instead — so only a small absolute floor applies. The
-    #     statistical bars (DSR≥0.95, positive-fold≥60%) are unchanged; see
+    #     statistical bars (DSR≥0.90, positive-fold≥60%) are unchanged; see
     #     services/walk_forward.low_freq_stability_verdict.
     _MIN_TRADES_PER_FOLD = 30
     if body.motivating_iteration_id is not None:

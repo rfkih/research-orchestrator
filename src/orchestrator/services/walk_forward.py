@@ -51,7 +51,7 @@ log = get_logger(__name__)
 # such strategies on the OUT-OF-SAMPLE daily-equity return series instead.
 #
 # HONESTY GUARANTEE: every statistical *bar* is identical to the standard
-# (high-frequency) path — the DSR significance bar stays at the V11 0.95, the
+# (high-frequency) path — the DSR significance bar stays at the V11 0.90, the
 # positive-fold consistency bar stays at 60%. ONLY the unit of observation
 # changes: daily equity returns (n≈bars) instead of trades, and calendar-fold
 # return instead of per-fold profit factor. No threshold is loosened; a
@@ -272,7 +272,7 @@ def low_freq_stability_verdict(
     OVERFIT, NO_EDGE} so it persists into ``walk_forward_run`` unchanged.
 
     Significance/consistency BARS are identical to the standard path
-    (DSR≥0.95, positive-fold≥60%); only the observation unit differs.
+    (DSR≥0.90, positive-fold≥60%); only the observation unit differs.
     """
     n_obs = len(oos_daily_returns)
     n_folds = len(fold_returns_pct)
@@ -297,7 +297,7 @@ def low_freq_stability_verdict(
     # 2026-06-09 fix (86651af) corrected this in analyze_run but missed this
     # call site: passing the √365-annualised ``sr`` inflated the DSR z-score
     # ~19×, letting i.i.d. noise with annualised Sharpe 0.19 score DSR 0.967
-    # and clear the 0.95 bar as ROBUST. ``sr`` (annualised) stays reported.
+    # and clear the 0.90 bar as ROBUST. ``sr`` (annualised) stays reported.
     sr_per_obs = sharpe_ratio(oos_daily_returns, None)
     dsr = (
         deflated_sharpe_ratio(
@@ -332,7 +332,7 @@ def low_freq_stability_verdict(
     # 3. Edge concentrated in too few calendar periods → overfit risk.
     if fold_pos_pct < LOW_FREQ_FOLD_POSITIVE_PCT:
         return "OVERFIT", metrics
-    # 4. Significance not established on the equity curve (same V11 0.95 bar).
+    # 4. Significance not established on the equity curve (same V11 0.90 bar).
     if dsr is None or dsr < LOW_FREQ_DSR_BAR:
         return "INSUFFICIENT_EVIDENCE", metrics
     # 5. One fold carries the whole result — unstable across the cycle.

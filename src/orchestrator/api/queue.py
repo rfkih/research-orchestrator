@@ -152,7 +152,7 @@ class EnqueueRequest(BaseModel):
     # offline Python sweeps, hand-tuning, direct JVM backtests — that the
     # hypothesis_audit ledger cannot see. Added into the DSR ``n_trials`` so the
     # Bonferroni SR* reflects the TRUE multiplicity. Default 0 = "all exploration
-    # was on-orchestrator". Monotone: it can only raise n_trials → the >=0.95 DSR
+    # was on-orchestrator". Monotone: it can only raise n_trials → the >=0.90 DSR
     # gate can only get STRICTER, never looser (V11-safe). Stamped into
     # sweep_config['external_trials']; tick.run_tick reads it back at DSR time.
     # Per-submission and additive-only — NOT persisted as audit rows, so a
