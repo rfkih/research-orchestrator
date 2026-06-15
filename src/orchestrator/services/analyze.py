@@ -592,7 +592,7 @@ def annualize_geometric_return(
     return (annualized_multiplier - 1.0) * 100.0
 
 
-DSR_SIGNIFICANCE_THRESHOLD = 0.95
+DSR_SIGNIFICANCE_THRESHOLD = 0.90  # 0.90 — operator methodology decision 2026-06-15 (was 0.95)
 
 
 def statistical_verdict(
@@ -603,7 +603,7 @@ def statistical_verdict(
 
     The PF-CI gate is necessary but not sufficient: a strategy whose 95%
     CI excludes 1.0 may still be a noise pass once you account for the
-    cumulative trial count. If DSR < 0.95, demote SIGNIFICANT_EDGE to
+    cumulative trial count. If DSR < 0.90, demote SIGNIFICANT_EDGE to
     INSUFFICIENT_EVIDENCE with a reason that names the multiplicity.
 
     dsr=None at gate sample size is fail-CLOSED (2026-06-12): past the
@@ -778,7 +778,7 @@ def decision_verdict(
 
     1. ``n >= 100`` trades (statistical floor).
     2. ``statistical_verdict == SIGNIFICANT_EDGE`` (PF 95% CI lower > 1.0
-       AND DSR >= 0.95).
+       AND DSR >= 0.90).
     3. ``annualized_geometric_return_pct_at_alloc_90 >= 10.0`` — the
        economic threshold. Replaces the prior ``+20bps slippage net > 0``
        gate. A statistically-significant edge that compounds below 10%/yr

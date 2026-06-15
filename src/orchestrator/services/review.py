@@ -31,7 +31,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 # Operator-controlled constants, pinned in tests.
-DSR_THRESHOLD: float = 0.95
+DSR_THRESHOLD: float = 0.90  # 0.90 — operator methodology decision 2026-06-15 (was 0.95)
 PF_CI_LOWER_BOUND_PASS: float = 1.0
 MIN_TRADES_PASS: int = 100
 COST_REALISM_BPS: int = 50

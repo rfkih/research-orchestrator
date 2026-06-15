@@ -189,7 +189,7 @@ async def playbook() -> Playbook:
                 "cost-aware backtest before claiming SIGNIFICANT_EDGE."
             ),
             "do_not_loosen_gates": (
-                "V11 (PF lower-95%-CI > 1.0, DSR ≥ 0.95) + V60 (≥10%/yr on "
+                "V11 (PF lower-95%-CI > 1.0, DSR ≥ 0.90) + V60 (≥10%/yr on "
                 "annualized_geometric_return_pct_at_alloc_90) are FROZEN. Loosening "
                 "to fit a candidate is fraud and manufactures losers, not alpha. The "
                 "constraint is the SEARCH SPACE, not the gates."

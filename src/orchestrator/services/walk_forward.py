@@ -59,7 +59,7 @@ log = get_logger(__name__)
 LOW_FREQ_MAX_TRADES_PER_YEAR = 52   # ≥ this annualised trade rate → standard path
 LOW_FREQ_MIN_TOTAL_TRADES = 8       # floor: guards against 1–2 lucky entries
 LOW_FREQ_MIN_DAILY_OBS = 30         # DSR needs ≥30 return observations to be valid
-LOW_FREQ_DSR_BAR = 0.95             # == V11 DSR bar, measured on the equity curve
+LOW_FREQ_DSR_BAR = 0.90             # 0.90 — operator methodology decision 2026-06-15 (was 0.95); == V11 DSR bar, measured on the equity curve
 LOW_FREQ_FOLD_POSITIVE_PCT = 60.0   # == high-freq pf_positive_pct consistency bar
 LOW_FREQ_RETURN_CV_MAX = 2.5        # fold-return coeff. of variation → INCONSISTENT
 _LOW_FREQ_INTERVALS = {"1d", "3d", "1w"}  # structurally low-turnover bar sizes

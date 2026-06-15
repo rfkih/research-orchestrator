@@ -305,7 +305,7 @@ _LOAD_BEARING_CONSTANTS = (
     "8.5",                                          # wall-clock cap (hours)
     "10%",                                          # profitability bar prose
     "PF lower 95% CI > 1.0",                        # V11 PF gate
-    "DSR ≥ 0.95",                                   # V11 DSR threshold
+    "DSR ≥ 0.90",                                   # V11 DSR threshold (lowered 0.95→0.90, operator methodology decision 2026-06-15; prompt updated to match)
     "research-mode",                                # never auto-promote
     "/specialist-review/request",                   # Path C trigger endpoint
     "PATH_C_RESUMING_",                             # crash-safety marker
