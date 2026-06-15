@@ -24,20 +24,23 @@ def test_low_freq_constants_are_pinned():
     assert wf.LOW_FREQ_MAX_TRADES_PER_YEAR == 52
     assert wf.LOW_FREQ_MIN_TOTAL_TRADES == 8
     assert wf.LOW_FREQ_MIN_DAILY_OBS == 30
-    assert wf.LOW_FREQ_DSR_BAR == 0.95  # == V11 significance bar
+    assert wf.LOW_FREQ_DSR_BAR == 0.90  # 0.90 — operator methodology decision 2026-06-15 (was 0.95); == V11 significance bar
     assert wf.LOW_FREQ_FOLD_POSITIVE_PCT == 60.0  # == high-freq consistency bar
     assert wf.LOW_FREQ_RETURN_CV_MAX == 2.5
     assert wf._LOW_FREQ_INTERVALS == {"1d", "3d", "1w"}
 
 
 def test_dsr_bar_matches_v11():
-    """The low-freq significance bar must equal the V11 PSR/DSR bar (0.95).
-    This is the contract guarantee that we did not loosen significance."""
+    """The low-freq significance bar must equal the V11 DSR bar (0.90 since
+    the 2026-06-15 operator methodology decision; was 0.95). This is the
+    contract guarantee that the low-freq path uses the SAME bar as the
+    standard path — not a separately-loosened one."""
     from orchestrator.services import analyze
 
-    # The V11 quant-grade bar referenced in analyze.probabilistic_sharpe_ratio
-    # docstring is 0.95; the low-freq path reuses it verbatim.
-    assert wf.LOW_FREQ_DSR_BAR == 0.95
+    # The low-freq path must reuse the standard DSR_SIGNIFICANCE_THRESHOLD
+    # verbatim — assert equality to the shared constant rather than a literal
+    # so the two can never silently diverge.
+    assert wf.LOW_FREQ_DSR_BAR == analyze.DSR_SIGNIFICANCE_THRESHOLD == 0.90
     assert analyze.MIN_TRADES_FOR_SIG == 100  # standard-path floor unchanged
 
 

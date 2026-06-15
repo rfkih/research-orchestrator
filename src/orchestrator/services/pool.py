@@ -39,7 +39,7 @@ _TRADING_DAYS = 365
 # doesn't pad the book. Overridable per call.
 DEFAULT_THETA = 0.02
 # DSR significance bar — identical to analyze.DSR_SIGNIFICANCE_THRESHOLD.
-DSR_THRESHOLD = 0.95
+DSR_THRESHOLD = 0.90  # 0.90 — operator methodology decision 2026-06-15 (was 0.95)
 _MIN_OBS = 5
 
 

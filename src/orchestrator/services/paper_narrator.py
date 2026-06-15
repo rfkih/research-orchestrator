@@ -261,7 +261,7 @@ def _build_data_block(
             "cagr_gate_threshold_pct": 10.0,
             "cagr_gate_passed": gate.get("cagr_ok"),
             "dsr": _f(analysis.get("dsr")),
-            "dsr_gate_threshold": 0.95,
+            "dsr_gate_threshold": 0.90,
             "dsr_gate_passed": gate.get("dsr_ok"),
             "sharpe_annualized": _f(analysis.get("sharpe_annualized")),
             "sortino_annualized": _f(analysis.get("sortino_annualized")),

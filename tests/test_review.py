@@ -41,7 +41,7 @@ from orchestrator.services.review import (
 def test_review_constants_are_pinned() -> None:
     # Operator-controlled thresholds. Update these only with a
     # documented ORCHESTRATOR_CHANGE journal entry.
-    assert DSR_THRESHOLD == 0.95
+    assert DSR_THRESHOLD == 0.90  # 0.90 — operator methodology decision 2026-06-15 (was 0.95)
     assert PF_CI_LOWER_BOUND_PASS == 1.0
     assert MIN_TRADES_PASS == 100
     assert COST_REALISM_BPS == 50

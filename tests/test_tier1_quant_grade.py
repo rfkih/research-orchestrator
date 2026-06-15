@@ -404,7 +404,7 @@ def test_dsr_threshold_constant_is_pinned() -> None:
     # Operator-controlled constant — moving it is a methodology change
     # (per quant-researcher.md's "out of bounds" list). Pin it to catch
     # accidental drift.
-    assert DSR_SIGNIFICANCE_THRESHOLD == 0.95
+    assert DSR_SIGNIFICANCE_THRESHOLD == 0.90  # 0.90 — operator methodology decision 2026-06-15 (was 0.95)
 
 
 # ── analyze_run integration ───────────────────────────────────────────
