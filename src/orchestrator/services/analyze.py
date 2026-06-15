@@ -252,7 +252,7 @@ def probabilistic_sharpe_ratio(
 ) -> float | None:
     """Deflated Sharpe (Bailey & Lopez de Prado 2014).
 
-    Returns P(true SR > 0 | sample). PSR > 0.95 is the quant-grade
+    Returns P(true SR > 0 | sample). PSR > 0.90 is the quant-grade
     significance bar; below 0.5 the Sharpe is indistinguishable from zero.
 
     NOTE: ``n_strategies_tested`` defaults to 5 for back-compat with the

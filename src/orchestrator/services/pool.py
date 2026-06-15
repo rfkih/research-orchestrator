@@ -353,7 +353,7 @@ async def _active_members_returns(
 # approved methodology extension (2026-06-04); the standard trade-count gate is
 # UNCHANGED — this is an additive lane for strategies flagged stream-type.
 
-STREAM_PSR_THRESHOLD = 0.95  # mirrors the DSR significance bar
+STREAM_PSR_THRESHOLD = 0.90  # mirrors the DSR significance bar (both 0.90 — operator methodology decision 2026-06-15, was 0.95)
 STREAM_MIN_OBS = 252         # ~1 year of daily observations
 
 

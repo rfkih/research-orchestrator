@@ -83,7 +83,7 @@ def test_thin_boundary_year_is_not_gated():
 def test_custom_min_obs_and_threshold():
     # A weak-but-positive drift that clears a relaxed PSR bar but not the default.
     s = _series(2022, 300, lambda i: 0.0005 + (0.004 if i % 2 else -0.004))
-    strict = stream_sharpe_validity(s)              # default 0.95
+    strict = stream_sharpe_validity(s)              # default 0.90
     relaxed = stream_sharpe_validity(s, psr_threshold=0.50)
     assert relaxed["psr"] is not None
     # the relaxed run should be at least as permissive as strict
