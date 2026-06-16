@@ -25,6 +25,8 @@ from ..errors import NextAction, OrchestratorError
 from ..repo import queue as queue_repo
 from ..repo import reviews as reviews_repo
 from ..repo import walk_forward as walk_forward_repo
+from ..logging import get_logger
+from ..services import registry_sync
 from ..services.activity_logger import log_activity
 from ..services.idempotency import cache_response, replay_cached_response
 from ..services.walk_forward import (
@@ -37,6 +39,8 @@ from .constants import REVIEW_VERDICTS_PASSING_GATE
 from .deps import get_agent_name, get_db_conn
 
 router = APIRouter(tags=["walk-forward"])
+
+log = get_logger(__name__)
 
 
 class WalkForwardRunDetailResponse(BaseModel):
@@ -328,6 +332,28 @@ async def post_walk_forward(
         raise
 
     payload = result.to_dict()
+
+    # Best-effort: reflect the walk-forward verdict into the Strategy Research
+    # Registry so a graduation (ROBUST) auto-promotes the agent's row. Own
+    # short-lived connection; never affects the walk-forward result.
+    try:
+        async with db.acquire() as _reg_conn:
+            await registry_sync.sync_from_research(
+                _reg_conn,
+                strategy_code=body.strategy_code,
+                symbol=body.instrument,
+                interval=body.interval_name,
+                statistical_verdict=None,
+                walk_forward_verdict=result.stability_verdict,
+                agent=agent,
+            )
+    except Exception as _reg_exc:  # noqa: BLE001
+        log.warning(
+            "walk_forward.registry_sync_failed",
+            strategy_code=body.strategy_code,
+            error=str(_reg_exc),
+        )
+
     next_actions: list[dict[str, Any]] = []
     if result.stability_verdict == "ROBUST" and body.pool_candidate:
         # Pool lane: ROBUST clears the last validity check. Route to the

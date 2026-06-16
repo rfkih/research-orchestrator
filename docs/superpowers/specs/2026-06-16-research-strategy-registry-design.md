@@ -98,20 +98,23 @@ New files mirroring the existing `api/rankings.py` + `repo/rankings.py` pattern 
 |---|---|---|---|
 | GET | `/strategy-registry` | authed | list merged rows + tier/status counts; filters `tier`, `status`, `family`, `search`, `include_archived` |
 | GET | `/strategy-registry/{id}` | authed | single merged row (full detail) |
-| POST | `/strategy-registry` | **admin** | create curated row |
-| PATCH | `/strategy-registry/{id}` | **admin** | partial update |
-| DELETE | `/strategy-registry/{id}` | **admin** | soft delete (`archived=true`) |
+| POST | `/strategy-registry` | **writer** | create curated row (by id; 409 on dup slug) |
+| PATCH | `/strategy-registry/{id}` | **writer** | partial update by id |
+| DELETE | `/strategy-registry/{id}` | **writer** | soft delete by id (`archived=true`) |
+| GET | `/strategy-registry/by-slug/{slug}` | authed | single merged row by stable slug (agent's key) |
+| PUT | `/strategy-registry/by-slug/{slug}` | **writer** | **idempotent upsert** — existing slug → merge supplied fields; new slug → insert (requires the create fields). Slug in path is authoritative. The agent's primary maintenance primitive. |
+| DELETE | `/strategy-registry/by-slug/{slug}` | **writer** | archive by slug |
 
-Admin gating: mutations require header `X-Viewer-Is-Admin: true` (injected by the proxy from the JWT). Missing/false → `OrchestratorError` 403 `admin_required`. `updated_by` stamped from `X-Agent-Name`.
+**Writer gating (`_require_writer`):** every caller already holds the `X-Orch-Token` (the real boundary; orchestrator is loopback-only). Mutations are allowed for a dashboard **admin** (`X-Viewer-Is-Admin: true`, injected by the proxy) **OR** a trusted server-side **agent** (its own `X-Agent-Name`, e.g. `quant-researcher`, not the proxy's `dashboard`/`anonymous`). This blocks only non-admin *dashboard* end-users; missing → 403 `writer_required`. `updated_by` is stamped from `X-Agent-Name`. The dashboard edits by `id`; **the agent maintains the roster by `slug` via PUT/DELETE — no SQL injection needed.**
 
 ### 4.2 Live-metrics resolution (per row, LEFT-JOIN, tolerant)
 
 1. If `evidence_iteration_id` set and the row exists → pull `dsr`, `psr`, `annualized_geometric_return_pct_at_alloc_90`, `sharpe_annualized`, `n_trades`, `pf_point_estimate`, `statistical_verdict` from that `research_iteration_log.metrics_snapshot`; `resolvedFrom="pointer"`.
-2. Else if `strategy_code` (+ symbol/interval) set → resolve the best completed run for that key using the same join the ranking query uses (`research_iteration_log` → `backtest_run` on `backtest_run_id`, filter `backtest_run.asset`/`interval_name`, pick best by annualized return / most recent); `resolvedFrom="lookup"`.
+2. Else if `strategy_code` (+ symbol/interval) set → resolve the **LATEST completed run** for that key (`research_iteration_log` → `backtest_run` on `backtest_run_id`, filter `backtest_run.asset`/`interval_name`, `verdict <> 'FAILED'`, order `ril.created_time DESC`) — the strategy's *current condition*, NOT the best-ever cell (a "best by return" pick would surface a stale over-fit after a live param swap); `resolvedFrom="lookup"`.
 3. Else → no live metrics (`resolvedFrom=null`), `isOfflineLead` drives the "not-yet-run" badge.
 
 Walk-forward verdict: latest `walk_forward_run.stability_verdict` by `evidence_walk_forward_id`, else by `(strategy_code, instrument, interval_name)`.
-Live flag: `EXISTS` an `account_strategy` row for `strategy_code` (+symbol) with `enabled=true` (and not `simulated`).
+Live flag: `EXISTS` an `account_strategy` row for `strategy_code` (+symbol + **interval**) with `enabled=true`, `simulated=false`, **and `is_deleted=false`**. (Interval + is_deleted matter: without them, e.g. DCB-4h would falsely read live off the DCB-1h live row and trip a spurious "falsified but live" divergence.)
 
 ### 4.3 Divergence flag (server-computed)
 
@@ -147,12 +150,21 @@ Live flag: `EXISTS` an `account_strategy` row for `strategy_code` (+symbol) with
 }
 ```
 
+### 4.5 Auto-sync from the research loop (2026-06-16)
+
+So the registry always reflects the latest research without the agent injecting SQL, the loop upserts it automatically:
+
+- **`services/registry_sync.py`** — `derive_status(statistical_verdict, walk_forward_verdict)` maps a verdict to `(promise_tier, verdict_tag, lifecycle_status)` (ROBUST→A/REAL_LEAD; SIGNIFICANT_EDGE→B/REAL_UNCERTIFIABLE/LEAD; INSUFFICIENT→B/PARKED; NO_EDGE/OVERFIT→C/FALSIFIED; NOT_TESTED→none/skip). `sync_from_research(...)` upserts the row keyed by `(strategy_code, symbol, interval)`.
+- **Hooks (both best-effort — own connection, never raise, never affect the run):** tick `_finish_iteration` syncs on **every** iteration (symbol/interval read from `backtest_run`); the `/walk-forward` handler syncs the stability verdict on completion (ROBUST auto-promotes to TIER_A/REAL_LEAD).
+- **Curation-safe via `auto_managed`** (new col on V182): the loop only **creates** rows (`auto_managed=TRUE`) or **updates** rows it already owns; it **SKIPS** any `auto_managed=FALSE` row (the curated seed + any dashboard-admin edit). A dashboard-admin write sets `auto_managed=FALSE` (claims the row). A curated **universe** row (symbol NULL) covers any symbol for that code → no per-symbol duplicates. So the hand-ranked top-20 is never clobbered; only the loop's own rows move.
+- Live metrics + live status are still read-time (the sync writes no metrics), so even auto rows show the latest run via the join.
+
 ## 5. Frontend (`Blackridge`)
 
 - **Route:** `src/app/(dashboard)/admin/research-strategies/page.tsx` — `'use client'`, gated by `useIsAdmin()` + `useAuthHydrated()` (existing admin pattern).
 - **API module:** `src/lib/api/researchRegistry.ts` — uses `apiClient`, `BASE = '/api/v1/research-orch/strategy-registry'` (research-orch goes through the trading-JVM proxy = `apiClient`, like `orchestrator.ts`). Functions: `listRegistry(filters)`, `getRegistryEntry(id)`, `createRegistryEntry(body)`, `updateRegistryEntry(id, patch)`, `archiveRegistryEntry(id)`. Coerce wire numbers with `toNumOrNull` (`@/lib/api/coerce`).
 - **Types:** `src/types/research.ts` — `ResearchRegistryEntry`, `RegistryLiveMetrics`, `PromiseTier`, `VerdictTag`, `LifecycleStatus`, `RegistryListResponse`. (`Backend*` wire types stay in the api module.)
-- **Hook:** `useQuery(['research-registry', filters], …, { staleTime: 60_000 })`; mutations via `useMutation` + invalidate.
+- **Hook:** `useQuery(['research-registry', filters], …, { staleTime: 15_000, refetchInterval: 30_000, refetchOnWindowFocus: true })` for near-real-time (each poll reads the live DB + resolves the latest run server-side); mutations via `useMutation` + invalidate. The detail dialog resolves its row from the live list by id (not a click-time snapshot) so it stays current while open.
 - **Layout:** `PageHeader` (eyebrow "Research" / title "Strategy Research Registry") → `StatCard` row (Live / Leads / Parked / Data-gated / Falsified) → filter bar (tier · status · family `Select` + debounced search via `useDebouncedSearchPage`, filters sent server-side — no client-side filtering) → **table grouped by Tier A/B/C** with group headers. Columns: rank · name (+family badge) · status badge · verdict-tag badge · DSR (mono) · WF verdict · ann-return% (mono, profit/loss color) · n_trades · symbol/interval · ⚠ divergence.
 - **Detail dialog:** thesis + `detail` markdown + live metrics block + evidence ids (copyable; link `strategy_code` to the leaderboard filtered by code where a route exists) + `memoryRef`.
 - **Edit/create dialog (Phase 2):** RHF controlled-`<div>` form (no `<form>` element). Fields: rank, tier, name, family, code/symbol/interval, verdict, status, thesis, detail, memoryRef, isOfflineLead, evidence ids. Admin-only; surfaced via "Add" button in `PageHeader` and a per-row "Edit"/"Archive" action.

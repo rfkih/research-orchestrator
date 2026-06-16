@@ -231,3 +231,59 @@ CREATE TABLE IF NOT EXISTS feature_values (
     compute_run_id UUID,
     PRIMARY KEY (feature_name, version, symbol, interval, ts)
 );
+
+-- ── Strategy Research Registry (Flyway V182) + the tables its live-metrics
+--    join reads. backtest_run / walk_forward_run are trimmed FK-free copies
+--    (only the columns the join touches); account_strategy gains the
+--    live-status columns the join needs (added idempotently so the trimmed
+--    CREATE above other tests rely on is untouched). ─────────────────────────
+ALTER TABLE account_strategy ADD COLUMN IF NOT EXISTS symbol        VARCHAR(30);
+ALTER TABLE account_strategy ADD COLUMN IF NOT EXISTS interval_name VARCHAR(20);
+ALTER TABLE account_strategy ADD COLUMN IF NOT EXISTS enabled       BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE account_strategy ADD COLUMN IF NOT EXISTS simulated     BOOLEAN NOT NULL DEFAULT TRUE;
+
+CREATE TABLE IF NOT EXISTS backtest_run (
+    backtest_run_id  UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    strategy_code    VARCHAR(60),
+    asset            VARCHAR(30),
+    interval_name    VARCHAR(20),
+    status           VARCHAR(20),
+    start_time       TIMESTAMP,
+    end_time         TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS walk_forward_run (
+    walk_forward_id   UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    strategy_code     VARCHAR(60),
+    instrument        VARCHAR(30),
+    interval_name     VARCHAR(20),
+    stability_verdict VARCHAR(40),
+    created_time      TIMESTAMP    NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS strategy_research_registry (
+    registry_id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    slug                     TEXT NOT NULL UNIQUE,
+    rank                     INT,
+    promise_tier             TEXT NOT NULL,
+    display_name             TEXT NOT NULL,
+    signal_family            TEXT,
+    strategy_code            TEXT,
+    symbol                   TEXT,
+    interval_name            TEXT,
+    verdict_tag              TEXT NOT NULL,
+    lifecycle_status         TEXT NOT NULL,
+    thesis                   TEXT NOT NULL,
+    detail                   TEXT,
+    evidence_iteration_id    UUID,
+    evidence_walk_forward_id UUID,
+    evidence_backtest_run_id UUID,
+    journal_id               UUID,
+    memory_ref               TEXT,
+    is_offline_lead          BOOLEAN NOT NULL DEFAULT FALSE,
+    archived                 BOOLEAN NOT NULL DEFAULT FALSE,
+    auto_managed             BOOLEAN NOT NULL DEFAULT FALSE,
+    created_time             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_time             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_by               TEXT
+);

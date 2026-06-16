@@ -48,7 +48,7 @@ from ..repo import (
     queue_write,
     trades as trades_repo,
 )
-from . import analyze, hedging_gate, paper_generator, portfolio, sweep
+from . import analyze, hedging_gate, paper_generator, portfolio, registry_sync, sweep
 from .activity_logger import log_activity
 from .tick_summary import compute_tick_summary
 
@@ -1163,6 +1163,40 @@ async def _attach_fenced(
         ))
 
 
+async def _sync_registry_best_effort(
+    db: Database,
+    *,
+    strategy_code: str,
+    backtest_run_id: str,
+    statistical_verdict: str,
+    agent_name: str,
+) -> None:
+    """Mirror this iteration's result into the Strategy Research Registry so it
+    always reflects the latest research. BEST-EFFORT: its own connection, never
+    raises, never affects the tick. Symbol/interval are read from the
+    backtest_run; ``registry_sync`` leaves curated (auto_managed=FALSE) rows
+    untouched and only creates/updates agent-owned rows."""
+    try:
+        async with db.acquire() as conn:
+            br = await conn.fetchrow(
+                "SELECT asset, interval_name FROM backtest_run WHERE backtest_run_id = $1::uuid",
+                backtest_run_id,
+            )
+            if br is None:
+                return
+            outcome = await registry_sync.sync_from_research(
+                conn,
+                strategy_code=strategy_code,
+                symbol=br["asset"],
+                interval=br["interval_name"],
+                statistical_verdict=statistical_verdict,
+                agent=agent_name,
+            )
+        log.info("tick.registry_synced", strategy_code=strategy_code, outcome=outcome)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("tick.registry_sync_failed", strategy_code=strategy_code, error=str(exc))
+
+
 async def _finish_iteration(
     *,
     db: Database,
@@ -1212,6 +1246,16 @@ async def _finish_iteration(
             )
     except Exception as _act_exc:  # noqa: BLE001
         log.warning("tick.activity_log_failed", step="ITERATION_COMPLETED", error=str(_act_exc))
+
+    # Mirror the result into the Strategy Research Registry (best-effort; never
+    # affects the tick). Keeps the registry current on every research iteration.
+    await _sync_registry_best_effort(
+        db,
+        strategy_code=strategy_code,
+        backtest_run_id=backtest_run_id,
+        statistical_verdict=stat_v,
+        agent_name=agent_name,
+    )
 
     # ── Step 6: queue next-state ──────────────────────────────────────
     next_actions = await _decide_next_state(
