@@ -1123,6 +1123,57 @@ async def playbook() -> Playbook:
                 ),
                 idempotent=False,
             ),
+            PlaybookCapability(
+                name="carry_book_gate",
+                method="POST",
+                path="/carry-book/gate",
+                purpose=(
+                    "PR #2 — certify a COMPLETED multi-leg PORTFOLIO_CARRY "
+                    "backtest_run on BOOK-level metrics, NOT the single-asset "
+                    "trade-count/DSR gate (a delta-neutral carry book is one "
+                    "portfolio, not 100+ trades on one surface; its edge lives "
+                    "in the book equity curve). Body: {backtest_run_id, "
+                    "leverage_cap? (default 3.0), require_basis_coverage? "
+                    "(default false)}. Reads the run's backtest_equity_point "
+                    "book curve + backtest_trade rows (grouped by asset for "
+                    "per-leg attribution) + the PR #1 carry columns "
+                    "(book_n_legs, book_leverage, borrow_cost_bps_per_day). "
+                    "PASS iff ALL hold: book_sharpe>=1.0 AND book_maxdd_pct>=-15.0 "
+                    "(both negative, shallower passes) AND n_legs>=4 AND "
+                    "net_of_cost_return_pct>=10.0 (the SAME economic floor as "
+                    "V60, imported not redefined) AND book_leverage<=leverage_cap "
+                    "AND positive cumulative return in every judged calendar year. "
+                    "When require_basis_coverage=true, also FAIL if any leg is "
+                    "outside the perp_basis coverage set "
+                    "{BTCUSDT,ETHUSDT,BNBUSDT,XRPUSDT} (basis_unmodeled). "
+                    "Returns {passed, book_sharpe, book_maxdd_pct, n_legs, "
+                    "net_of_cost_return_pct, leverage_used, leverage_cap, "
+                    "per_leg:[{symbol,return,basis_unmodeled}], reason, "
+                    "thresholds}. ISOLATED lane — never touches V11/V60 or "
+                    "analyze.py's frozen constants. Idempotency-Key honoured."
+                ),
+                idempotent=True,
+            ),
+            PlaybookCapability(
+                name="carry_book_preview",
+                method="GET",
+                path="/carry-book/preview",
+                purpose=(
+                    "PR #2 — STATELESS what-if for the carry-book gate. Same "
+                    "verdict shape as /carry-book/gate but from raw per-leg "
+                    "daily-return series instead of a stored run, so you can "
+                    "size a book BEFORE committing a PORTFOLIO_CARRY backtest. "
+                    "Body (GET or POST — the per-leg series is too nested for a "
+                    "query string): {legs:[{symbol, daily_returns:[...]}], "
+                    "leverage? (default 1.0), borrow_cost_bps_per_day? "
+                    "(default 0.0, a flat book-level per-day financing drag), "
+                    "leverage_cap?, require_basis_coverage?}. Builds an "
+                    "equal-notional, leverage-scaled, borrow-net book curve and "
+                    "runs the identical evaluate_book gate. READ-ONLY — persists "
+                    "nothing."
+                ),
+                idempotent=True,
+            ),
         ],
         recipes=[
             PlaybookRecipe(

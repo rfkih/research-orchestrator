@@ -32,6 +32,7 @@ from .api.provisional_roster import router as provisional_roster_router
 from .api.strategy_registry import router as strategy_registry_router
 from .api.account_strategies import router as account_strategies_router
 from .api.pool import router as pool_router
+from .api.carry_book import router as carry_book_router
 from .api.signals import router as signals_router
 from .api.signal_screen import router as signal_screen_router
 from .api.streaming_status import router as streaming_status_router
@@ -79,6 +80,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(queue_router)
     app.include_router(account_strategies_router)
     app.include_router(pool_router)
+    app.include_router(carry_book_router)
     app.include_router(iterations_router)
     app.include_router(journal_router)
     app.include_router(tick_router)
