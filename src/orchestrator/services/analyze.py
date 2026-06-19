@@ -34,12 +34,15 @@ from typing import Any, Iterable
 MIN_TRADES_FOR_SIG = 100
 PF_INFINITY_SENTINEL = 9999.0
 
-# Annualized compounded-return threshold for the economic PASS gate. Strategies
-# clearing the V11 statistical gate must ALSO compound to at least this much
-# per year at 90% sizing to be worth keeping. Mirrors CLAUDE.md's headline
-# "10%/yr net after fees+slippage" profitability bar — a strategy below this
-# can have real edge yet still not deserve real capital.
-ANNUALIZED_RETURN_PASS_THRESHOLD_PCT = 10.0
+# Annualized compounded-return threshold for the economic (V60) PASS gate.
+# Set to 0.0 by explicit operator methodology decision (2026-06-19): the 10%/yr
+# absolute-return floor was REMOVED platform-wide. Rationale: a market-neutral /
+# leverage-scalable edge can reach any absolute return purely by sizing, so an
+# absolute-return bar is the wrong instrument — the V11 statistical gate
+# (DSR>=0.90, PSR, walk-forward) remains the real quality bar, and the V102
+# LIVE-deploy gate keeps its own 10% CAGR floor. 0.0 still rejects net-NEGATIVE
+# strategies (annualized return < 0 -> ITERATE, never PASS).
+ANNUALIZED_RETURN_PASS_THRESHOLD_PCT = 0.0
 
 # Calendar days per year. Crypto markets trade 24/7 so we use 365 rather
 # than 252 trading days. Plain integer per operator decision — leap-year

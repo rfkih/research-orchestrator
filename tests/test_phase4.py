@@ -230,14 +230,16 @@ def test_decision_verdict_discard_for_no_edge() -> None:
     assert decision_verdict("NO_EDGE", 200, 50.0) == "DISCARD"
 
 
-def test_decision_verdict_pass_requires_geom_above_threshold() -> None:
-    # SIGNIFICANT_EDGE + annualized geom >= 10% → PASS.
-    assert decision_verdict("SIGNIFICANT_EDGE", 200, 10.0) == "PASS"
+def test_decision_verdict_pass_requires_positive_geom() -> None:
+    # V60 economic floor removed by operator decision 2026-06-19 (10.0 -> 0.0):
+    # a SIGNIFICANT_EDGE that is net-POSITIVE now PASSes on the economic axis.
     assert decision_verdict("SIGNIFICANT_EDGE", 200, 25.0) == "PASS"
-    # Below threshold → ITERATE — the edge is real but compounds too slowly
-    # at 90% sizing to justify promotion.
-    assert decision_verdict("SIGNIFICANT_EDGE", 200, 9.99) == "ITERATE"
-    assert decision_verdict("SIGNIFICANT_EDGE", 200, 0.0) == "ITERATE"
+    assert decision_verdict("SIGNIFICANT_EDGE", 200, 10.0) == "PASS"
+    # Modest-but-positive returns now PASS (would have ITERATEd under the old 10% bar).
+    assert decision_verdict("SIGNIFICANT_EDGE", 200, 9.99) == "PASS"
+    assert decision_verdict("SIGNIFICANT_EDGE", 200, 0.0) == "PASS"
+    # Net-NEGATIVE returns still ITERATE — the floor at 0.0 rejects money-losers.
+    assert decision_verdict("SIGNIFICANT_EDGE", 200, -0.01) == "ITERATE"
     assert decision_verdict("SIGNIFICANT_EDGE", 200, -100.0) == "ITERATE"
 
 

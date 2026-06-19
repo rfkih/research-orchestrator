@@ -535,10 +535,12 @@ def test_analyze_run_handles_missing_geom_column() -> None:
     assert out["annualized_geometric_return_pct_at_alloc_90"] is None
 
 
-def test_pass_threshold_constant_is_ten_percent() -> None:
-    # CLAUDE.md profitability bar — encode the contract so a stray edit
-    # to the constant doesn't silently change which strategies promote.
-    assert ANNUALIZED_RETURN_PASS_THRESHOLD_PCT == 10.0
+def test_pass_threshold_constant_is_pinned() -> None:
+    # V60 economic floor — encode the contract so a stray edit to the constant
+    # doesn't silently change which strategies promote. Set to 0.0 by explicit
+    # operator methodology decision (2026-06-19): the 10%/yr absolute-return floor
+    # was removed platform-wide (V11 statistical rigor + V102 live gate remain).
+    assert ANNUALIZED_RETURN_PASS_THRESHOLD_PCT == 0.0
 
 
 # ── V93 data-universe scoping — signature pins ────────────────────────

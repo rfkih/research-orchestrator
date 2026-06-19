@@ -27,8 +27,9 @@ frozen single-asset gate:
     ``_positive_every_judged_year`` below, which mirrors its calendar-year
     bucketing + thin-boundary-year exclusion).
   * The economic floor is IMPORTED verbatim from
-    ``analyze.ANNUALIZED_RETURN_PASS_THRESHOLD_PCT`` (10.0) — NOT redefined
-    here, so it can never silently drift from the platform-wide bar.
+    ``analyze.ANNUALIZED_RETURN_PASS_THRESHOLD_PCT`` (0.0 since the 2026-06-19
+    operator removal of the 10%/yr floor) — NOT redefined here, so it can never
+    silently drift from the platform-wide bar.
 
 It deliberately does NOT import or call ``analyze``'s gate functions
 (``statistical_verdict``, the DSR check, etc.) — the book gate is a parallel

@@ -80,9 +80,10 @@ def test_threshold_constants_pinned():
 
 def test_economic_floor_is_imported_not_redefined():
     # The book gate's economic floor MUST equal analyze's shared constant — so it
-    # can never silently drift from the platform-wide 10%/yr bar.
+    # can never silently drift from the platform-wide bar (0.0 since the 2026-06-19
+    # operator removal of the 10%/yr economic floor).
     assert g.ANNUALIZED_RETURN_PASS_THRESHOLD_PCT == analyze.ANNUALIZED_RETURN_PASS_THRESHOLD_PCT
-    assert g.ANNUALIZED_RETURN_PASS_THRESHOLD_PCT == 10.0
+    assert g.ANNUALIZED_RETURN_PASS_THRESHOLD_PCT == 0.0
     # And the verdict echoes that exact value (not a local copy).
     floor = analyze.ANNUALIZED_RETURN_PASS_THRESHOLD_PCT
     assert _pass_book()["thresholds"]["min_net_of_cost_return_pct"] == floor
@@ -167,17 +168,20 @@ def test_fail_too_few_legs():
     assert v["n_legs"] < g.MIN_N_LEGS
 
 
-def test_fail_sub_floor_return():
-    # ~3%/yr — real Sharpe, shallow DD, positive every year, but below the 10%
-    # economic floor. Only the return clause fails.
+def test_modest_positive_return_passes_after_v60_floor_removed():
+    # ~3%/yr — real Sharpe, shallow DD, positive every year. Before the 2026-06-19
+    # operator decision this FAILED the 10%/yr economic floor; with the floor
+    # removed (ANNUALIZED_RETURN_PASS_THRESHOLD_PCT=0.0) a positive, modest-return
+    # book PASSES on its risk-adjusted merits. The return clause now only rejects
+    # net-NEGATIVE books — which the Sharpe clause already catches first.
     pts = _book_curve(annual_return=0.03, daily_sd=0.0010, n_days=365 * 3, seed=11)
     v = g.evaluate_book(
         equity_points=pts, n_legs=5, leverage=2.0, per_leg=_legs(_PASS_SYMBOLS),
         leverage_cap=3.0,
     )
-    assert v["passed"] is False
-    assert v["reason"] == "net_return_below_floor", v
-    assert v["net_of_cost_return_pct"] < 10.0
+    assert v["passed"] is True, v
+    assert v["reason"] == "passed"
+    assert 0.0 <= v["net_of_cost_return_pct"] < 10.0
 
 
 def test_fail_leverage_over_cap():
@@ -314,9 +318,10 @@ def test_preview_require_basis_coverage():
 def test_analyze_frozen_constants_unchanged():
     # These analyze.py constants are the frozen single-asset gate the carry-book
     # lane must NOT perturb. Pinned here so a refactor that touches analyze
-    # trips this test.
+    # trips this test. (V11 statistical bars stay frozen; the V60 economic floor
+    # is 0.0 since the 2026-06-19 operator removal of the 10%/yr bar.)
     assert analyze.MIN_TRADES_FOR_SIG == 100
-    assert analyze.ANNUALIZED_RETURN_PASS_THRESHOLD_PCT == 10.0
+    assert analyze.ANNUALIZED_RETURN_PASS_THRESHOLD_PCT == 0.0
     assert analyze.DSR_SIGNIFICANCE_THRESHOLD == 0.90
     assert analyze.DENOM_SQ_BOOTSTRAP_FLOOR == 0.05
 
