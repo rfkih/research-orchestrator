@@ -28,6 +28,7 @@ from ..services.ml_training import (
     reap_orphaned_on_startup,
 )
 from .feature_refresh import start_feature_refresh_task
+from .rebalance_cron import start_rebalance_task
 
 log = get_logger(__name__)
 
@@ -153,6 +154,17 @@ async def lifespan_for(settings: Settings, app: FastAPI) -> AsyncIterator[None]:
     except Exception:  # noqa: BLE001
         log.exception("orchestrator.feature_refresh_startup_failed")
 
+    # Nightly portfolio-rebalance task (scorecard #10). OFF unless
+    # ORCH_REBALANCE_ENABLED — automated rebalancing writes weights that
+    # multiply into live order sizing, so it is opt-in. Best-effort startup.
+    rebalance_task = None
+    if settings.rebalance_enabled:
+        try:
+            rebalance_task = await start_rebalance_task(db, settings)
+            app.state.rebalance_task = rebalance_task
+        except Exception:  # noqa: BLE001
+            log.exception("orchestrator.rebalance_startup_failed")
+
     log.info(
         "orchestrator.startup",
         profile=settings.profile,
@@ -170,6 +182,13 @@ async def lifespan_for(settings: Settings, app: FastAPI) -> AsyncIterator[None]:
             feature_refresh_task.cancel()
             try:
                 await feature_refresh_task
+            except asyncio.CancelledError:
+                pass
+        # Cancel the nightly rebalance task if it was started
+        if rebalance_task is not None:
+            rebalance_task.cancel()
+            try:
+                await rebalance_task
             except asyncio.CancelledError:
                 pass
         # Cancel in-flight ML-training tasks SO THEIR CLEANUP RUNS: an

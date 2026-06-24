@@ -224,6 +224,22 @@ class Settings(BaseSettings):
     # Per-row stdout/stderr capture cap. Tail-only — the artifact and
     # experiment_run rows carry the structured detail.
     ml_training_stdio_tail_bytes: int = Field(16384, ge=1024, le=1048576)
+    # ──────────────────────────────────────────────────────────────────
+    # Nightly portfolio-rebalance task (scorecard #10 portfolio construction).
+    # The optimizer (services/rebalance.rebalance_book) is exposed at
+    # POST /portfolio/rebalance, but nothing ran it on a schedule, so live
+    # account_strategy.portfolio_weight stayed flat EQUAL_WEIGHT. This task
+    # closes that loop. OFF by default — automated rebalancing writes weights
+    # that multiply into live order sizing, so it is opt-in
+    # (ORCH_REBALANCE_ENABLED=true). Safe on a thin/dormant book: rebalance_book
+    # falls back to equal-weight on insufficient history and no-ops when there
+    # are no eligible strategies; per-account errors are isolated.
+    rebalance_enabled: bool = False
+    rebalance_interval_seconds: int = Field(86400, ge=3600, le=604800)
+    rebalance_optimizer: Literal["HRP", "EQUAL_WEIGHT", "MEAN_VARIANCE"] = "HRP"
+    # When True, the task computes + journals proposed weights but does NOT
+    # write them (observe-only). False = live writes once the task is enabled.
+    rebalance_dry_run: bool = False
     # Phase D (2026-05-19) — researcher discovers what model specs it can
     # train via GET /ml/model-specs. This list mirrors
     # blackheart-train/src/blackheart_train/specs.py's _spec_choices().
