@@ -791,6 +791,52 @@ async def playbook() -> Playbook:
                 idempotent=False,
             ),
             PlaybookCapability(
+                name="pooled_certification_analyze",
+                method="POST",
+                path="/pooled-certification/analyze",
+                purpose=(
+                    "Orchestrator-side pooled-book certification, phase 1 "
+                    "(operator methodology approval 2026-07-10). Body: "
+                    "{strategy_code (BOOK code, e.g. DCB_POOL), sleeves[2..5] "
+                    "of {strategy_code, instrument, interval_name, "
+                    "window_start, overrides (incl. _ml_* sentinels)}, "
+                    "full_end?, external_trials, motivating_hypothesis_id "
+                    "(412 pooled_hypothesis_missing without a pre-registered "
+                    "HYPOTHESIS row)}. Runs ONE standard single-symbol "
+                    "backtest per sleeve (honest SL/TP, shorts, ML gates), "
+                    "pools the trade series, scores with UNCHANGED V11 "
+                    "primitives (bootstrap PF CI, Bailey-LdP DSR at the "
+                    "summed per-surface cumulative trial tax + external), "
+                    "and persists ONE research_iteration_log row on the "
+                    "book strategy_code (targetable by the standard "
+                    "graduation review). Economic metrics use the "
+                    "documented equal-slice no-rebalance sizing model; "
+                    "contention diagnostics included. Long-running "
+                    "(minutes to ~1h) — background the call."
+                ),
+                idempotent=False,
+            ),
+            PlaybookCapability(
+                name="pooled_certification_walk_forward",
+                method="POST",
+                path="/pooled-certification/walk-forward",
+                purpose=(
+                    "Pooled-book certification, phase 2. Body: {iteration_id "
+                    "(the pooled iteration from phase 1), train_months=12, "
+                    "test_months=3, step_months=3, n_folds<=20, "
+                    "override_bear_coverage}. 409 graduation_review_required "
+                    "without an APPROVED graduation verdict on iteration_id "
+                    "(same contract as /walk-forward; no override offered). "
+                    "Per fold x sleeve: standard single-symbol run on the "
+                    "fold TEST window; per-fold pooled trade series scored "
+                    "and aggregated with the byte-identical stability_verdict "
+                    "cutoffs. Persists ONE walk_forward_run row "
+                    "(interval_name='pooled'). Long-running (n_folds x "
+                    "n_sleeves runs) — background the call."
+                ),
+                idempotent=False,
+            ),
+            PlaybookCapability(
                 name="log_activity",
                 method="POST",
                 path="/activity",

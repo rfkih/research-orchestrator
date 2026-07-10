@@ -154,3 +154,29 @@ async def fetch_walk_forward_run(
         walk_forward_id,
     )
     return dict(row) if row else None
+
+
+async def fetch_daily_returns_dated(
+    conn: asyncpg.Connection, backtest_run_id: UUID
+) -> list[tuple[Any, float]]:
+    """Dated variant of ``fetch_fold_daily_returns`` — returns
+    ``[(equity_date, daily_return_pct), ...]`` ordered by date.
+
+    Used by the pooled-certification slice-equity combiner
+    (``services/pooled_certification.combine_slice_equity``), which must
+    ALIGN sleeve equity curves by calendar date before averaging them into
+    a book curve; the value-only variant cannot express idle-slice days.
+    NULL returns are skipped (first bar carries NULL). Percent units,
+    matching the JVM storage.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT equity_date, daily_return_pct
+          FROM backtest_equity_point
+         WHERE backtest_run_id = $1
+           AND daily_return_pct IS NOT NULL
+         ORDER BY equity_date ASC
+        """,
+        backtest_run_id,
+    )
+    return [(r["equity_date"], float(r["daily_return_pct"])) for r in rows]
