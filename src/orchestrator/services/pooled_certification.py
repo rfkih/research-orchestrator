@@ -33,9 +33,21 @@ STATISTICAL CONTRACT — nothing loosened, nothing redefined:
     data universes of ``hypothesis_audit.count_data_universe_trials``
     + caller-declared ``external_trials`` + 1 — strictly MORE punitive than
     any single-surface count (monotone: callers can only raise it);
-  * certification re-runs of the frozen pre-registered sleeve configs write
-    NO ``hypothesis_audit`` rows — they are confirmatory, not selection —
-    mirroring the existing ``/walk-forward`` fold-run precedent.
+  * each ``run_pooled_analyze`` writes ONE ``hypothesis_audit`` row PER
+    SLEEVE SURFACE (tick step-3.5/5 convention: inserted with
+    ``iteration_id`` NULL before any sleeve run, backfilled with the book
+    iteration_id + verdicts after the iteration row commits) — so pooled
+    certifications are themselves visible in the data-universe ledger and
+    FUTURE counts on those surfaces tighten (skeptic f75a2231, operator-
+    endorsed 2026-07-12). The rows do NOT self-count within the run
+    (``count_data_universe_trials`` requires ``iteration_id IS NOT NULL``
+    and the count is taken before backfill; the run's own multiplicity is
+    the explicit ``+ 1``). A crashed run leaves NULL-iteration rows for
+    forensics that never count (infra failure is not selection bias).
+    ``n_trials_breakdown`` carries a ``counted_at`` timestamp so the
+    ledger count stays re-derivable point-in-time. Walk-forward fold runs
+    remain confirmatory and write NO audit rows, mirroring the existing
+    ``/walk-forward`` fold-run precedent.
 
 SIZING MODEL (shared-equity-contention approximation, documented for the
 reviewer): pooling merges trades of INDEPENDENT full-capital runs. Per-trade
@@ -291,6 +303,7 @@ async def _pooled_n_trials(
         "n_trials": total + extra + 1,
         "per_surface": per_surface,
         "external_declared": extra,
+        "counted_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -414,6 +427,25 @@ async def run_pooled_analyze(
                 retryable=False,
             )
 
+    # Step-3.5 provenance (skeptic f75a2231): one audit row per sleeve
+    # surface BEFORE any backtest submits, iteration_id NULL until the
+    # step-5 backfill below. Inserted rows don't self-count (see module
+    # docstring) — they tighten FUTURE data-universe counts only.
+    sleeve_audit_ids: list[UUID] = []
+    async with db.acquire() as conn:
+        for sleeve in sleeves:
+            sleeve_audit_ids.append(
+                await audit_repo.insert_audit(
+                    conn,
+                    strategy_code=book_strategy_code,
+                    symbol=sleeve.instrument,
+                    interval_name=sleeve.interval_name,
+                    params_snapshot=sleeve.to_snapshot(),
+                    queue_id=None,
+                    created_by=agent_name,
+                )
+            )
+
     as_cache: dict[str, dict[str, Any]] = {}
     sleeve_results: list[dict[str, Any]] = []
     per_sleeve_trades: list[list[dict[str, Any]]] = []
@@ -497,6 +529,15 @@ async def run_pooled_analyze(
         "sizing_model": SIZING_MODEL_DOC,
         "contention": contention,
         "n_trials_breakdown": trials,
+        "provenance": {
+            "sleeve_audit_ids": [str(a) for a in sleeve_audit_ids],
+            "convention": (
+                "step-3.5/5: audit rows inserted pre-run (iteration_id "
+                "NULL), backfilled with the book iteration_id post-commit; "
+                "counts re-derivable via count_data_universe_trials at "
+                "n_trials_breakdown.counted_at"
+            ),
+        },
         "book_slice_return_pct": book_return_pct,
         "book_slice_geom90_pct": book_geom90_pct,
         "book_slice_max_drawdown_pct": book_max_dd,
@@ -556,13 +597,28 @@ async def run_pooled_analyze(
                     f"{[f'{s.instrument}/{s.interval_name}' for s in sleeves]}; "
                     f"DSR n_trials={trials['n_trials']} "
                     f"(per-surface={trials['per_surface']}, "
-                    f"external={trials['external_declared']}, +1 self). "
+                    f"external={trials['external_declared']}, +1 self, "
+                    f"counted_at={trials['counted_at']}). "
                     f"Economic metrics use the equal-slice no-rebalance model "
                     f"(see metrics_snapshot.pooled_certification.sizing_model). "
-                    f"Sleeve runs: {[r['run_id'] for r in sleeve_results]}."
+                    f"Sleeve runs: {[r['run_id'] for r in sleeve_results]}. "
+                    f"Sleeve audit rows: {[str(a) for a in sleeve_audit_ids]}."
                 ),
                 created_by=agent_name,
             )
+            # Step-5 backfill: attach the book iteration + verdicts to the
+            # per-sleeve audit rows so they count toward future
+            # data-universe multiplicity (same transaction as the
+            # iteration insert — no window where the iteration exists
+            # unattached).
+            for audit_id in sleeve_audit_ids:
+                await audit_repo.update_audit_verdict(
+                    conn,
+                    audit_id=audit_id,
+                    iteration_id=iteration_id,
+                    statistical_verdict=stat_v,
+                    decision_verdict=dec_v,
+                )
 
     log.info(
         "pooled_cert.analyze_complete",

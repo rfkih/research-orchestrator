@@ -285,3 +285,155 @@ def test_pooled_analyze_rejects_sleeve_counts():
             )
         )
     assert ei.value.envelope.error_code == "pooled_sleeve_count_invalid"
+
+
+# -- provenance: step-3.5/5 audit rows + counted_at (skeptic f75a2231) --------
+
+
+def test_pooled_n_trials_carries_counted_at_and_monotone_sum():
+    conn = _FakeConn()  # fetchval -> 0 per surface
+    sleeves = [_sleeve(), _sleeve(instrument="ETHUSDT", interval="1h")]
+    trials = _run(pc._pooled_n_trials(conn, sleeves, external_trials=10))
+    assert trials["n_trials"] == 0 + 0 + 10 + 1
+    assert trials["external_declared"] == 10
+    assert set(trials["per_surface"]) == {"SOLUSDT:4h", "ETHUSDT:1h"}
+    # counted_at pins the ledger-count instant for later re-derivation
+    datetime.fromisoformat(trials["counted_at"])
+
+
+class _TxFakeConn(_FakeConn):
+    """_FakeConn + no-op transaction() for the analyze persist block."""
+
+    def transaction(self):
+        class _Tx:
+            async def __aenter__(self):
+                return None
+
+            async def __aexit__(self, *exc):
+                return None
+
+        return _Tx()
+
+    async def execute(self, sql, *params):  # noqa: ARG002
+        return "UPDATE 1"
+
+
+def _provenance_harness(monkeypatch, fail_first_sleeve=False):
+    """Wire run_pooled_analyze with recording fakes; return the recorders."""
+    calls = {"insert_audit": [], "backfill": [], "sleeve_runs": [], "iteration": []}
+    iteration_id = uuid4()
+
+    async def fake_insert_audit(conn, **kw):
+        calls["insert_audit"].append(kw)
+        return uuid4()
+
+    async def fake_update_audit_verdict(conn, **kw):
+        calls["backfill"].append(kw)
+
+    async def fake_run_sleeve_backtest(**kw):
+        calls["sleeve_runs"].append(kw["sleeve"])
+        if fail_first_sleeve:
+            raise OrchestratorError(
+                status_code=502,
+                error_code="pooled_sleeve_run_failed",
+                message="boom",
+                retryable=False,
+            )
+        metrics = {
+            "total_trades": 2,
+            "profit_factor": 1.5,
+            "return_pct": 10.0,
+            "geometric_return_pct_at_alloc_90": 9.0,
+            "max_drawdown_pct": 5.0,
+        }
+        trades = [
+            {"realized_pnl_amount": 4.0},
+            {"realized_pnl_amount": -1.0},
+        ]
+        return str(uuid4()), metrics, trades
+
+    async def fake_daily(conn, run_id):  # noqa: ARG001
+        return []
+
+    async def fake_next_iteration_number(conn, code):  # noqa: ARG001
+        return 7
+
+    async def fake_insert_iteration(conn, **kw):  # noqa: ARG001
+        calls["iteration"].append(kw)
+        return iteration_id
+
+    def fake_analyze_run(pseudo_run, trades, cumulative_trials):  # noqa: ARG001
+        return {
+            "statistical_verdict": {"verdict": "NO_EDGE"},
+            "n_trades": len(trades),
+            "pf_95_ci": [0.5, 2.0],
+            "pf_point_estimate": 1.0,
+            "sharpe_annualized": 0.0,
+            "annualized_geometric_return_pct_at_alloc_90": 0.0,
+        }
+
+    monkeypatch.setattr(pc.audit_repo, "insert_audit", fake_insert_audit)
+    monkeypatch.setattr(
+        pc.audit_repo, "update_audit_verdict", fake_update_audit_verdict
+    )
+    monkeypatch.setattr(pc, "_run_sleeve_backtest", fake_run_sleeve_backtest)
+    monkeypatch.setattr(pc.wf_repo, "fetch_daily_returns_dated", fake_daily)
+    monkeypatch.setattr(
+        pc.iterations_write, "next_iteration_number", fake_next_iteration_number
+    )
+    monkeypatch.setattr(pc.iterations_write, "insert_iteration", fake_insert_iteration)
+    monkeypatch.setattr(pc.analyze, "analyze_run", fake_analyze_run)
+    return calls, iteration_id
+
+
+def test_pooled_analyze_writes_and_backfills_sleeve_audit_rows(monkeypatch):
+    calls, iteration_id = _provenance_harness(monkeypatch)
+    sleeves = [_sleeve(), _sleeve(instrument="ETHUSDT", interval="1h")]
+    result = _run(
+        pc.run_pooled_analyze(
+            db=_FakeDb(_TxFakeConn()),  # type: ignore[arg-type]
+            jvm=None,  # type: ignore[arg-type]
+            settings=None,  # type: ignore[arg-type]
+            agent_name="test",
+            book_strategy_code="DCB_POOL",
+            sleeves=sleeves,
+        )
+    )
+    # step 3.5: one audit row per sleeve, book code + sleeve surface,
+    # all inserted BEFORE any sleeve backtest ran
+    assert len(calls["insert_audit"]) == 2
+    assert {(k["symbol"], k["interval_name"]) for k in calls["insert_audit"]} == {
+        ("SOLUSDT", "4h"),
+        ("ETHUSDT", "1h"),
+    }
+    assert all(k["strategy_code"] == "DCB_POOL" for k in calls["insert_audit"])
+    # step 5: every row backfilled with the book iteration + verdicts
+    assert len(calls["backfill"]) == 2
+    assert all(k["iteration_id"] == iteration_id for k in calls["backfill"])
+    assert all(k["decision_verdict"] == result["verdict"] for k in calls["backfill"])
+    # snapshot carries the provenance block + counted_at
+    snap = calls["iteration"][0]["metrics_snapshot"]["pooled_certification"]
+    assert len(snap["provenance"]["sleeve_audit_ids"]) == 2
+    datetime.fromisoformat(snap["n_trials_breakdown"]["counted_at"])
+
+
+def test_pooled_analyze_crash_leaves_audit_rows_unbackfilled(monkeypatch):
+    calls, _ = _provenance_harness(monkeypatch, fail_first_sleeve=True)
+    sleeves = [_sleeve(), _sleeve(instrument="ETHUSDT", interval="1h")]
+    with pytest.raises(OrchestratorError):
+        _run(
+            pc.run_pooled_analyze(
+                db=_FakeDb(_TxFakeConn()),  # type: ignore[arg-type]
+                jvm=None,  # type: ignore[arg-type]
+                settings=None,  # type: ignore[arg-type]
+                agent_name="test",
+                book_strategy_code="DCB_POOL",
+                sleeves=sleeves,
+            )
+        )
+    # rows were written pre-run (forensics)…
+    assert len(calls["insert_audit"]) == 2
+    # …but never backfilled: iteration_id stays NULL, so a crashed run
+    # can never inflate count_data_universe_trials
+    assert calls["backfill"] == []
+    assert calls["iteration"] == []
