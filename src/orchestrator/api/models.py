@@ -58,6 +58,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
 from orchestrator.repo import models as models_repo
+from orchestrator.services import promotion_gate
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/models", tags=["models"])
@@ -581,6 +582,16 @@ class PromoteRequest(BaseModel):
             "the transition follows a structured reviewer pass."
         ),
     )
+    override_gauntlet: bool = Field(
+        default=False,
+        description=(
+            "Bypass the promotion-time gauntlet re-check (generalization "
+            "median / fold stability / transferability) when promoting into "
+            "a deployment-bearing status. Operator escape hatch — the "
+            "override + the gate failures are logged at WARNING for audit. "
+            "Leave false; only set with a documented reason."
+        ),
+    )
 
 
 def validate_transition(
@@ -709,6 +720,38 @@ async def promote_model(
                 if cache_key:
                     await store.put(agent, cache_key, response)
                 return response
+
+            # Governance gate (2026-07-13): promotion INTO a deployment-
+            # bearing status (staged/shadow/cooling_down/live) re-runs the
+            # binding gauntlet gates against the model's already-stored
+            # metrics. Prevents a model that fails today's methodology
+            # (coin-flip median / conditional-shift) from being promoted the
+            # way 6b3b12e4 was — it was registered under the old 5-gate
+            # gauntlet and walked to `live` with no re-evaluation. The
+            # transition-shape check above is necessary but not sufficient.
+            if body.target_status in promotion_gate.GATED_TARGET_STATUSES:
+                gate = promotion_gate.evaluate_promotion_gate(current.get("metrics"))
+                if not gate.passed and not body.override_gauntlet:
+                    detail = (
+                        f"promotion gauntlet re-check FAILED "
+                        f"({current['status']!r} -> {body.target_status!r}): "
+                        + "; ".join(gate.failures)
+                        + ". Re-train under the current gauntlet, or pass "
+                        "override_gauntlet=true with a documented reason to force."
+                    )
+                    if cache_key:
+                        await store.put(
+                            agent, cache_key,
+                            {"_idempotent_error": True, "status_code": 409, "detail": detail},
+                        )
+                    raise HTTPException(status_code=409, detail=detail)
+                if not gate.passed and body.override_gauntlet:
+                    logger.warning(
+                        "model promote gauntlet OVERRIDE | agent=%s model_id=%s "
+                        "%s -> %s failures=%s checks=%s reason=%s",
+                        agent, model_id, current["status"], body.target_status,
+                        gate.failures, gate.checks, body.reason or "(none)",
+                    )
 
             updated = await models_repo.update_status(
                 conn,
