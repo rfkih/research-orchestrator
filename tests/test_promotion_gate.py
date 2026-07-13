@@ -7,8 +7,14 @@ have certified a look-ahead-contaminated book. The gate MUST reject it.
 """
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
+import pytest
+
 from orchestrator.services.promotion_gate import (
     _EDGE_THRESHOLD,
+    _RANDOM_BASELINE,
     _STABILITY_THRESHOLD,
     _TRANSFERABILITY_THRESHOLD,
     GATED_TARGET_STATUSES,
@@ -161,3 +167,70 @@ def test_gated_targets_are_the_deployment_bearing_statuses():
     assert "retired" not in GATED_TARGET_STATUSES
     assert "rejected_by_operator" not in GATED_TARGET_STATUSES
     assert "trained" not in GATED_TARGET_STATUSES
+
+
+# ── Gate 5 — saved booster above random ────────────────────────────────────
+
+
+def test_booster_below_random_fails():
+    m = _good_metrics()
+    m["saved_booster"] = {"auc": 0.48}  # < 0.5
+    res = evaluate_promotion_gate(m)
+    assert res.passed is False
+    assert any("saved_booster_above_random" in f for f in res.failures)
+
+
+def test_booster_legacy_flat_shape_read():
+    m = _good_metrics()
+    m["auc"] = 0.42  # legacy flat saved-booster metric < 0.5
+    res = evaluate_promotion_gate(m)
+    assert any("saved_booster_above_random" in f for f in res.failures)
+
+
+def test_booster_absent_is_lenient():
+    # _good_metrics has no saved_booster and no flat metric -> no booster failure
+    res = evaluate_promotion_gate(_good_metrics())
+    assert res.passed is True
+    assert not any("saved_booster" in f for f in res.failures)
+
+
+def test_6b3b12e4_does_not_fail_on_booster():
+    # its saved booster auc 0.6094 clears random 0.5; the failures are
+    # median + transferability only, never the booster gate.
+    res = evaluate_promotion_gate(_METRICS_6B3B12E4)
+    assert not any("saved_booster" in f for f in res.failures)
+
+
+# ── Cross-repo drift: thresholds must match blackheart-train source ─────────
+
+
+def _module_const(path: Path, name: str):
+    """Extract a module-level dict constant from a .py file via ast."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        targets = (
+            node.targets if isinstance(node, ast.Assign)
+            else [node.target] if isinstance(node, ast.AnnAssign) else []
+        )
+        for t in targets:
+            if isinstance(t, ast.Name) and t.id == name and node.value is not None:
+                return ast.literal_eval(node.value)
+    raise KeyError(f"{name} not found in {path}")
+
+
+def test_thresholds_match_blackheart_train_source():
+    """Best-effort cross-repo pin: when blackheart-train is a sibling
+    checkout, assert our duplicated thresholds equal its source of truth.
+    Skips in an isolated CI where blackheart-train isn't present."""
+    train = (
+        Path(__file__).resolve().parents[2]
+        / "blackheart-train" / "src" / "blackheart_train"
+    )
+    gauntlet = train / "gauntlet.py"
+    cond_inv = train / "conditional_invariance.py"
+    if not gauntlet.exists() or not cond_inv.exists():
+        pytest.skip("blackheart-train not a sibling checkout — drift check skipped")
+    assert _module_const(gauntlet, "_EDGE_THRESHOLD") == _EDGE_THRESHOLD
+    assert _module_const(gauntlet, "_STABILITY_THRESHOLD") == _STABILITY_THRESHOLD
+    assert _module_const(gauntlet, "_RANDOM_BASELINE") == _RANDOM_BASELINE
+    assert _module_const(cond_inv, "PASS_THRESHOLD") == _TRANSFERABILITY_THRESHOLD

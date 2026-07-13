@@ -59,6 +59,9 @@ _STABILITY_THRESHOLD: dict[str, float] = {"auc": 0.15, "pearson_r": 0.20}
 _TRANSFERABILITY_THRESHOLD: dict[str, float] = {
     "binary": 0.15, "regression": 0.5, "multiclass": 0.15,
 }
+# blackheart_train/gauntlet.py::_RANDOM_BASELINE — the saved booster must
+# clear random on its primary metric.
+_RANDOM_BASELINE: dict[str, float] = {"auc": 0.5, "pearson_r": 0.0}
 
 # primary_metric -> objective (for the transferability threshold lookup).
 _METRIC_TO_OBJECTIVE: dict[str, str] = {"auc": "binary", "pearson_r": "regression"}
@@ -185,4 +188,26 @@ def evaluate_promotion_gate(metrics: dict[str, Any] | None) -> PromotionGateResu
             f"(conditional relationship shifts across folds — OOS metrics untrustworthy)"
         )
 
+    # Gate 5 — saved booster above random (lenient: only fails when the
+    # saved-booster metric is present and below the random baseline; a
+    # missing value is not a hard block because the generalization gates
+    # above already bind). Reads the new metrics_blob["saved_booster"]
+    # shape and the legacy flat shape (6b3b12e4 stored `auc` at top level).
+    baseline = _RANDOM_BASELINE.get(metric)
+    booster = metrics.get("saved_booster") if isinstance(metrics, dict) else None
+    booster_val = booster.get(metric) if isinstance(booster, dict) else None
+    if booster_val is None and isinstance(metrics, dict):
+        booster_val = metrics.get(metric)  # legacy flat shape
+    checks["saved_booster_metric"] = booster_val
+    if baseline is not None and _finite(booster_val) and booster_val < baseline:
+        failures.append(
+            f"saved_booster_above_random: saved-booster {metric}={booster_val} "
+            f"< random baseline {baseline}"
+        )
+
+    # NOTE: gauntlet gates 1 (integrity) and 2 (walk_forward_complete) are
+    # NOT re-derivable from the stored metrics blob (their inputs aren't
+    # persisted) — they are validated once at registration and are not
+    # re-checkable here. This gate covers the generalization / transfer /
+    # booster cluster, which is the delta the old gauntlet missed.
     return PromotionGateResult(passed=not failures, failures=failures, checks=checks)

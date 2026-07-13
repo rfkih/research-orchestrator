@@ -729,6 +729,7 @@ async def promote_model(
             # way 6b3b12e4 was — it was registered under the old 5-gate
             # gauntlet and walked to `live` with no re-evaluation. The
             # transition-shape check above is necessary but not sufficient.
+            reviewer_verdict = body.reviewer_verdict
             if body.target_status in promotion_gate.GATED_TARGET_STATUSES:
                 gate = promotion_gate.evaluate_promotion_gate(current.get("metrics"))
                 if not gate.passed and not body.override_gauntlet:
@@ -752,13 +753,18 @@ async def promote_model(
                         agent, model_id, current["status"], body.target_status,
                         gate.failures, gate.checks, body.reason or "(none)",
                     )
+                    # Persist the override on the row so the audit trail
+                    # survives log rotation. Caller-supplied reviewer_verdict
+                    # wins; otherwise stamp a sentinel.
+                    if reviewer_verdict is None:
+                        reviewer_verdict = "gauntlet_override"
 
             updated = await models_repo.update_status(
                 conn,
                 model_id=model_id,
                 new_status=body.target_status,
                 expected_current_status=current["status"],
-                reviewer_verdict=body.reviewer_verdict,
+                reviewer_verdict=reviewer_verdict,
                 reviewer_run_id=body.reviewer_run_id,
                 actor=f"orchestrator:{agent}",
             )
