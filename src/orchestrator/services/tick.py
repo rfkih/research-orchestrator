@@ -68,6 +68,20 @@ _POLL_INTERVAL_S = 5
 # cap so a healthy in-flight tick is never reset mid-run.
 _STUCK_RUNNING_BUFFER_S = 5 * 60
 
+# Crypto symbols the DB CHECK constraint ``chk_hypothesis_audit_symbol``
+# (Flyway V93/V124) permits in hypothesis_audit.symbol. Kept in sync with the
+# constraint; a symbol OUTSIDE this set (e.g. non-crypto research instruments
+# like XAUUSD gold) is denormalised to NULL at insert time (the constraint
+# permits NULL) so the audit write doesn't crash the tick. Extending the DB
+# allowlist itself is a Flyway migration (operator-owned); NULL-denormalising
+# is the DML-side accommodation and is honest for DSR (NULL → strategy-code
+# trial baseline; a fresh non-crypto surface has no prior audit rows anyway).
+_AUDIT_SYMBOL_ALLOWLIST = frozenset({
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+    "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "ZECUSDT", "NEARUSDT",
+    "LINKUSDT", "XLMUSDT", "FETUSDT",
+})
+
 
 def _external_declared_trials(sweep_config: dict[str, Any] | None) -> int:
     """Off-orchestrator trial count declared at enqueue (sweep_config
@@ -703,12 +717,37 @@ async def _derive_and_submit(
     # toward trial multiplicity — overfitting risk is "did the loop ever
     # see this combo", not "did the run finish". We backfill verdicts
     # in step 5 once the iteration is logged.
+    # Cross-sectional (universe-ranking) runs use a SYNTHETIC instrument
+    # label (e.g. "XS5") that is NOT a real trading symbol, so it fails the
+    # DB CHECK constraint ``chk_hypothesis_audit_symbol`` (V93/V124 allowlist
+    # of BTCUSDT/ETHUSDT/SOL/BNB/XRP/ADA/DOGE/AVAX). Denormalise the audit
+    # symbol as NULL for XS runs — the constraint explicitly permits NULL,
+    # and a NULL symbol is the HONEST data-universe identity for a book with
+    # no single underlying. NULL rows are already excluded from
+    # ``count_data_universe_trials`` (the ``symbol = $1`` predicate is never
+    # true for NULL, and the driving partial index requires symbol NOT NULL),
+    # so XS multiplicity falls back to the strategy-code trial baseline
+    # instead of corrupting a real symbol's (symbol, interval) count.
+    # Non-crypto research symbols (e.g. gold XAUUSD) are NOT in the DB
+    # allowlist of ``chk_hypothesis_audit_symbol`` (crypto-only, V93/V124).
+    # Inserting one crashes the tick with a CheckViolationError. The
+    # constraint permits NULL, so denormalise a non-allowlisted symbol to
+    # NULL — identical to the XS handling above and honest for DSR: a NULL
+    # audit row falls back to the strategy-code trial baseline (a fresh
+    # non-crypto surface has zero prior audit rows anyway, so no per-symbol
+    # multiplicity is lost; declared external_trials still feed DSR n_trials).
+    is_cross_sectional = bool((sweep_config or {}).get("universe"))
+    audit_symbol = (
+        None
+        if (is_cross_sectional or instrument not in _AUDIT_SYMBOL_ALLOWLIST)
+        else instrument
+    )
     async with db.acquire() as conn:
         async with conn.transaction():
             audit_id = await audit_repo.insert_audit(
                 conn,
                 strategy_code=strategy_code,
-                symbol=instrument,
+                symbol=audit_symbol,
                 interval_name=interval_name,
                 params_snapshot=combo,
                 queue_id=queue_id,
@@ -722,7 +761,10 @@ async def _derive_and_submit(
             # COMPLETED trial on this symbol × interval, regardless of
             # strategy_code) — not the strategy_code-scoped count, which
             # under-counts multiplicity because it resets on every
-            # archetype pivot (V93). ``instrument`` is the symbol here.
+            # archetype pivot (V93). ``instrument`` is the symbol here for a
+            # single-symbol run; for a cross-sectional run it is the XS label
+            # that matches no real-symbol audit rows, so the count is the
+            # XS-surface baseline (0 prior + this trial).
             cumulative_trials = await audit_repo.count_data_universe_trials(
                 conn, instrument, interval_name,
                 external_declared=_external_declared_trials(sweep_config),
@@ -756,6 +798,17 @@ async def _derive_and_submit(
     # spec params, so re-adding them is harmless redundancy there.
     if strategy_code.upper() in sweep.IN_SPEC_ML_GATE_CODES and ml_combo:
         regular_combo = {**regular_combo, **ml_combo}
+    # Direction policy: default to the resolved anchor's allow_long/allow_short
+    # (mirrors the production strategy). A sweep MAY pin direction via
+    # sweep_config["allow_long"]/["allow_short"] — required for non-crypto
+    # sleeves whose edge is one-sided (e.g. gold long-only: shorting fights
+    # gold's secular uptrend, PF ~0.9). Additive + default-preserving: a
+    # sweep_config without these keys is byte-identical to the pre-2026-07-16
+    # anchor-only behaviour (every existing crypto sweep). NULL/absent → anchor.
+    cfg_allow_long = (sweep_config or {}).get("allow_long")
+    cfg_allow_short = (sweep_config or {}).get("allow_short")
+    eff_allow_long = as_row["allow_long"] if cfg_allow_long is None else bool(cfg_allow_long)
+    eff_allow_short = as_row["allow_short"] if cfg_allow_short is None else bool(cfg_allow_short)
     payload = _build_submit_payload(
         account_strategy_id=as_row["account_strategy_id"],
         strategy_code=strategy_code,
@@ -763,8 +816,8 @@ async def _derive_and_submit(
         interval_name=interval_name,
         overrides=regular_combo,
         settings=settings,
-        allow_long=as_row["allow_long"],
-        allow_short=as_row["allow_short"],
+        allow_long=eff_allow_long,
+        allow_short=eff_allow_short,
         start_time_override=start_time_override,
         ml_overrides=ml_override_payload,
         universe=(sweep_config or {}).get("universe"),

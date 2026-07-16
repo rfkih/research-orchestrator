@@ -81,6 +81,14 @@ class SweepConfig(BaseModel):
     seed: int = Field(42, ge=0)
     # Optional: override the backtest start window. None ⇒ default 2024-01-01.
     backtest_window: BacktestWindow | None = None
+    # Direction pin (2026-07-16). For one-sided non-crypto sleeves (e.g. gold
+    # long-only: shorting fights gold's secular uptrend, PF ~0.9), pin the
+    # backtest direction instead of inheriting the two-sided anchor default.
+    # None ⇒ resolved account_strategy anchor default (crypto byte-identical).
+    # tick._execute_after_claim reads these back onto the payload's
+    # allowLong/allowShort.
+    allow_long: bool | None = None
+    allow_short: bool | None = None
 
     @model_validator(mode="after")
     def _check_param_shape(self) -> "SweepConfig":
