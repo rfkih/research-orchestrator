@@ -71,7 +71,7 @@ async def insert_audit(
     conn: asyncpg.Connection,
     *,
     strategy_code: str,
-    symbol: str,
+    symbol: str | None,
     interval_name: str,
     params_snapshot: dict[str, Any],
     queue_id: UUID | None,
@@ -88,9 +88,13 @@ async def insert_audit(
     ``symbol`` + ``interval_name`` denormalise the data-universe identity
     onto the audit row (V93). Required so ``count_data_universe_trials``
     can scope DSR n_trials by (symbol, interval) without a JOIN to
-    research_queue. The hard-rule allowlist (BTCUSDT/ETHUSDT × 5m/15m/
-    1h/4h) is enforced at the DB layer by V93's CHECK constraints — pass
-    junk values and the INSERT will raise.
+    research_queue. The hard-rule allowlist (real trading symbols × the
+    valid intervals) is enforced at the DB layer by the V93/V124/V157 CHECK
+    constraints — pass a non-allowlisted symbol and the INSERT will raise.
+    ``symbol`` may be ``None`` (constraint allows NULL): the tick passes NULL
+    for cross-sectional (universe-ranking) runs whose synthetic XS label is
+    not a real trading symbol. NULL rows are excluded from
+    ``count_data_universe_trials`` by design.
 
     ``decision_verdict`` is normally NULL at insert (step 5 backfills it).
     The null-screen passes ``'NULL_SCREEN_DRAW'`` for its completed draws

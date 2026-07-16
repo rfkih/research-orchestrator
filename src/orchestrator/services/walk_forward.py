@@ -435,6 +435,8 @@ async def run_walk_forward(
     motivating_iteration_id: UUID | None = None,
     require_bear_coverage: bool = True,
     external_trials: int = 0,
+    allow_long: bool | None = None,
+    allow_short: bool | None = None,
 ) -> WalkForwardResult:
     if full_end is None:
         full_end = (datetime.now(timezone.utc) - timedelta(days=1)).date()
@@ -538,8 +540,10 @@ async def run_walk_forward(
             test_start=test_start,
             test_end=test_end,
             overrides=overrides,
-            allow_long=as_row["allow_long"],
-            allow_short=as_row["allow_short"],
+            # Direction: caller may pin (one-sided non-crypto sleeves, e.g. gold
+            # long-only); None → resolved anchor default (crypto byte-identical).
+            allow_long=as_row["allow_long"] if allow_long is None else allow_long,
+            allow_short=as_row["allow_short"] if allow_short is None else allow_short,
         )
         try:
             run_id = await jvm.submit_backtest(payload)

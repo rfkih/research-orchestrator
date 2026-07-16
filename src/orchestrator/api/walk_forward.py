@@ -108,6 +108,14 @@ class WalkForwardRequest(BaseModel):
     # sweep that produced this candidate — re-declaring the same trials here
     # double-counts the family's multiplicity and may reject a real edge.
     external_trials: int = Field(0, ge=0, le=2000)
+    # Direction pin (2026-07-16). For one-sided non-crypto sleeves whose edge is
+    # long-only (e.g. gold: shorting fights the secular uptrend), pin the WF
+    # folds to match the in-sample iteration's direction. None → resolved anchor
+    # default (crypto byte-identical). Mirrors the sweep_config allow_* override
+    # the tick path honours so an in-sample long-only candidate is validated
+    # long-only, not re-run two-sided.
+    allow_long: bool | None = None
+    allow_short: bool | None = None
 
 
 class WalkForwardResponse(BaseModel):
@@ -313,6 +321,8 @@ async def post_walk_forward(
             motivating_iteration_id=body.motivating_iteration_id,
             require_bear_coverage=not body.override_bear_coverage,
             external_trials=body.external_trials,
+            allow_long=body.allow_long,
+            allow_short=body.allow_short,
         )
     except Exception as _wf_exc:
         async with db.acquire() as conn:
